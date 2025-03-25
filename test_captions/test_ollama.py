@@ -9,10 +9,9 @@
 # ]
 # ///
 
-#!/usr/bin/env python3
 """
-Script para procesar imágenes usando un LLM local (Ollama) con enfoque en descripción de imágenes.
-Utiliza hilos para procesamiento en paralelo y asegura el acceso al modelo mediante threading.Lock().
+Script for processing images using a local LLM (Ollama) with focus on image description.
+Uses threads for parallel processing and ensures model access through threading.Lock().
 """
 
 import os
@@ -30,7 +29,7 @@ from PIL import Image
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# Configuración básica de logging
+# Basic logging configuration
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -38,8 +37,8 @@ logger = logging.getLogger(__name__)
 
 class LocalImageAttachment:
     """
-    Clase para envolver una imagen local y proporcionar su contenido en base64,
-    además de resolver su tipo MIME.
+    Class to wrap a local image and provide its content in base64,
+    as well as resolve its MIME type.
     """
     def __init__(self, file_path: str):
         self.file_path = file_path
@@ -55,9 +54,9 @@ class LocalImageAttachment:
 
 class OllamaImageProcessor:
     """
-    Clase para procesar imágenes usando un modelo local de Ollama.
-    Provee métodos para obtener información básica de la imagen, generar un prompt
-    y procesar la imagen con el modelo en un entorno multihilo.
+    Class for processing images using a local Ollama model.
+    Provides methods to get basic image information, generate a prompt,
+    and process the image with the model in a multi-threaded environment.
     """
     def __init__(self, model="gemma3:4b", temperature=0.5, max_tokens=4096,
                 top_p=0.5, num_ctx=8192, top_k=20, output_file=None, mode="single"):
@@ -69,7 +68,7 @@ class OllamaImageProcessor:
         self.top_k = top_k  
         self.mode = mode
         
-        # Gestión del archivo de salida
+        # Output file management
         if output_file is None:
             model_clean = model.replace(":", "_")
             mode_suffix = "single" if mode == "single" else "batch"
@@ -79,21 +78,21 @@ class OllamaImageProcessor:
             
         os.makedirs(os.path.dirname(self.output_file), exist_ok=True)
             
-        self.token_factor = 1.3  # Factor para estimar tokens
+        self.token_factor = 1.3  # Factor to estimate tokens
 
-        # Intentar cargar el modelo una sola vez
+        # Try to load the model once
         try:
             self.model = llm.get_model(model)
         except UnknownModelError as e:
-            logger.error(f"Error al obtener el modelo {model}: {e}")
+            logger.error(f"Error getting model {model}: {e}")
             raise
 
-        # Lock para proteger el acceso al modelo en entornos multihilo
+        # Lock to protect model access in multi-threaded environments
         self.model_lock = threading.Lock()
 
     def extract_basic_image_info(self, image_path):
         """
-        Extrae información básica de una imagen: nombre, formato, modo y dimensiones.
+        Extracts basic information from an image: name, format, mode, and dimensions.
         """
         try:
             info = {
@@ -106,14 +105,14 @@ class OllamaImageProcessor:
                 info["size"] = img.size
             return info
         except Exception as e:
-            logger.warning(f"Error extrayendo información de {image_path}: {e}")
+            logger.warning(f"Error extracting information from {image_path}: {e}")
             return {"filename": os.path.basename(image_path),
                     "path": image_path,
                     "error": str(e)}
 
     def create_description_prompt(self, image_info):
         """
-        Crea un prompt más efectivo para solicitar una descripción detallada de la imagen.
+        Creates an effective prompt to request a detailed description of the image.
         """
         prompt = f"""Necesito que analices esta imagen y proporciones un resumen conciso de su contenido principal.
             
@@ -134,7 +133,7 @@ class OllamaImageProcessor:
 
     def estimate_tokens(self, text):
         """
-        Estima el número de tokens en un texto (aproximación basada en palabras y signos).
+        Estimates the number of tokens in a text (approximation based on words and signs).
         """
         if not text:
             return 0
@@ -143,16 +142,16 @@ class OllamaImageProcessor:
 
     def process_image(self, image_path, max_retries=3):
         """
-        Procesa una imagen y obtiene su descripción usando el modelo local.
-        Se usa un threading.Lock() para proteger el acceso al modelo. En caso de respuestas
-        muy cortas, se reintenta agregando instrucciones al prompt.
+        Processes an image and gets its description using the local model.
+        Uses threading.Lock() to protect model access. In case of very short responses,
+        retries by adding instructions to the prompt.
         """
         start_time = time.time()
         image_info = self.extract_basic_image_info(image_path)
         base_prompt = self.create_description_prompt(image_info)
         prompt = base_prompt
 
-        # Preparar la imagen como attachment
+        # Prepare the image as attachment
         attachment = LocalImageAttachment(os.path.abspath(image_path))
 
         retries = 0
@@ -170,14 +169,13 @@ class OllamaImageProcessor:
                     response = self.model.prompt(prompt, attachments=[attachment], **base_params)
                 response_text = response.text()
 
-                # Si la respuesta es muy corta (menos de 100 caracteres), reintentamos
+                # If the response is too short (less than 100 characters), retry
                 if len(response_text.strip()) < 100:
                     if retries < max_retries:
                         retries += 1
-                        logger.warning(f"Respuesta demasiado corta para {image_path}, reintento {retries}/{max_retries}")
-                        # Prompt mejorado para reintento que enfatiza la necesidad de más detalles
+                        logger.warning(f"Response too short for {image_path}, retry {retries}/{max_retries}")
+                        # Enhanced prompt for retry that emphasizes the need for more details
                         prompt = base_prompt + """
-
                             NOTA IMPORTANTE: Tu respuesta anterior fue demasiado breve o incompleta.
 
                             Por favor, proporciona una respuesta más completa siguiendo estas instrucciones específicas:
@@ -199,7 +197,7 @@ class OllamaImageProcessor:
 
                 duration = time.time() - start_time
                 tokens = self.estimate_tokens(response_text)
-                logger.info(f"Procesada {image_path} en {duration:.2f}s, tokens estimados: {tokens}")
+                logger.info(f"Processed {image_path} in {duration:.2f}s, estimated tokens: {tokens}")
 
                 return {
                     "image_path": image_path,
@@ -212,22 +210,22 @@ class OllamaImageProcessor:
             except Exception as e:
                 if retries == max_retries:
                     duration = time.time() - start_time
-                    logger.error(f"Error procesando {image_path} después de {max_retries} intentos: {e}")
+                    logger.error(f"Error processing {image_path} after {max_retries} attempts: {e}")
                     return {"image_path": image_path,
                             "error": str(e),
                             "processing_time": duration}
                 retries += 1
-                logger.warning(f"Error en intento {retries}/{max_retries} para {image_path}: {e}")
-                time.sleep(1)  # Pausa entre reintentos
+                logger.warning(f"Error in attempt {retries}/{max_retries} for {image_path}: {e}")
+                time.sleep(1)  # Pause between retries
 
         duration = time.time() - start_time
         return {"image_path": image_path,
-                "error": "No se pudo obtener una respuesta válida después de múltiples intentos",
+                "error": "Could not get a valid response after multiple attempts",
                 "processing_time": duration}
 
     def process_batch(self, image_files, max_workers=None):
         """
-        Procesa una lista de imágenes en paralelo utilizando ThreadPoolExecutor.
+        Processes a list of images in parallel using ThreadPoolExecutor.
         """
         results = []
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -237,9 +235,9 @@ class OllamaImageProcessor:
                 try:
                     result = future.result()
                     results.append(result)
-                    logger.info(f"Completado: {img_path}")
+                    logger.info(f"Completed: {img_path}")
                 except Exception as e:
-                    logger.error(f"Error procesando {img_path}: {e}")
+                    logger.error(f"Error processing {img_path}: {e}")
                     results.append({"image_path": img_path,
                                     "error": str(e),
                                     "processing_time": 0})
@@ -247,82 +245,82 @@ class OllamaImageProcessor:
 
     def save_results(self, results):
         """
-        Guarda los resultados de procesamiento en un archivo de texto con formato estandarizado.
-        Usa append para acumular resultados en múltiples ejecuciones.
+        Saves the processing results to a text file with standardized format.
+        Uses append to accumulate results in multiple executions.
         """
-        # Verificar si el archivo existe para decidir si añadir encabezado
+        # Check if the file exists to decide whether to add header
         file_exists = os.path.exists(self.output_file) and os.path.getsize(self.output_file) > 0
         
         with open(self.output_file, "a", encoding="utf-8") as f:
-            # Solo añadir encabezado si el archivo es nuevo
+            # Only add header if the file is new
             if not file_exists:
-                f.write(f"Resultados de descripciones de imágenes con Ollama - Modelo: {self.model_name} - max_tokens: {self.max_tokens}\n\n")
+                f.write(f"Image description results with Ollama - Model: {self.model_name} - max_tokens: {self.max_tokens}\n\n")
             
-            # Añadir marca de nueva ejecución
+            # Execution mark
             separator = "\n" + "=" * 80 + "\n"
             f.write(separator)
-            f.write(f"NUEVA EJECUCIÓN: {datetime.datetime.now().isoformat()}\n")
+            f.write(f"NEW EXECUTION: {datetime.datetime.now().isoformat()}\n")
             f.write(separator)
             
-            # Escribir cada resultado de imagen
+            # Write each image result
             for res in results:
                 f.write(separator)
-                f.write("RESULTADOS DE IMAGEN\n")
+                f.write("IMAGE RESULTS\n")
                 f.write(f"Timestamp: {datetime.datetime.now().isoformat()}\n")
-                f.write(f"Modelo: {self.model_name}, Tokens máx: {self.max_tokens}\n")
-                f.write(f"Imagen: {os.path.basename(res.get('image_path', 'N/A'))}\n")
+                f.write(f"Model: {self.model_name}, Max tokens: {self.max_tokens}\n")
+                f.write(f"Image: {os.path.basename(res.get('image_path', 'N/A'))}\n")
                 
                 if "error" in res:
                     f.write(f"Error: {res['error']}\n")
                 else:
-                    f.write("\nMÉTRICAS:\n")
-                    f.write(f"- Descripción: {res.get('processing_time', 0):.4f}s | ")
+                    f.write("\nMETRICS:\n")
+                    f.write(f"- Description: {res.get('processing_time', 0):.4f}s | ")
                     f.write(f"Total: {res.get('processing_time', 0):.4f}s | ")
                     f.write(f"Tokens: {res.get('token_count', 0)}\n")
                     
-                    f.write("\nRESULTADOS:\n")
-                    f.write("Pregunta: ¿Qué se observa en esta imagen?\n\n")
-                    f.write(f"Descripción: {res.get('response', '')}\n")
+                    f.write("\nRESULTS:\n")
+                    f.write("Question: What can be observed in this image?\n\n")
+                    f.write(f"Description: {res.get('response', '')}\n")
                 
                 f.write(separator + "\n")
             
-            # Añadir resumen final
-            self._guardar_resumen_final(results)
+            # Final summary
+            self._save_final_summary(results)
                 
-        logger.info(f"Resultados añadidos en: {self.output_file}")
+        logger.info(f"Results added in: {self.output_file}")
     
 
-    def _guardar_resumen_final(self, results):
+    def _save_final_summary(self, results):
         """
-        Guarda un resumen final de todos los resultados al final del archivo.
+        Saves a final summary of all results at the end of the file.
         """
         separator = "\n" + "=" * 80 + "\n"
         with open(self.output_file, "a", encoding="utf-8") as f:
             f.write(separator)
-            f.write("RESUMEN FINAL DE PROCESAMIENTO\n")
-            f.write(f"Timestamp finalización: {datetime.datetime.now().isoformat()}\n")
-            f.write(f"Modelo: {self.model_name}, Tokens máx: {self.max_tokens}\n")
+            f.write("FINAL PROCESSING SUMMARY\n")
+            f.write(f"Completion timestamp: {datetime.datetime.now().isoformat()}\n")
+            f.write(f"Model: {self.model_name}, Max tokens: {self.max_tokens}\n")
             
-            # Estadísticas básicas
+            # Basic statistics
             total_images = len(results)
             successful_images = sum(1 for res in results if "error" not in res)
             failed_images = total_images - successful_images
             
-            f.write(f"Total imágenes procesadas: {total_images}\n")
-            f.write(f"Exitosas: {successful_images}, Errores: {failed_images}\n")
+            f.write(f"Total images processed: {total_images}\n")
+            f.write(f"Successful: {successful_images}, Errors: {failed_images}\n")
             
-            # Tiempo y tokens totales
+            # Total time and tokens
             total_time = sum(res.get("processing_time", 0) for res in results if "processing_time" in res)
             total_tokens = sum(res.get("token_count", 0) for res in results if "token_count" in res)
             
-            f.write(f"Tiempo total de procesamiento: {total_time:.2f} segundos\n")
+            f.write(f"Total processing time: {total_time:.2f} seconds\n")
             
             if successful_images > 0:
-                # Calcular promedios
+                # Calculate averages
                 avg_time = total_time / successful_images
                 avg_tokens = total_tokens / successful_images
                 
-                f.write("\nTiempos promedio por imagen:\n")
+                f.write("\nAverage time per image:\n")
                 f.write(f"- Total: {avg_time:.4f}s | ")
                 f.write(f"Tokens: {avg_tokens:.1f}\n")
             
@@ -331,124 +329,124 @@ class OllamaImageProcessor:
 
     def process_interactive(self, image_path):
         """
-        Procesa una imagen en modo interactivo (similar a moondream).
+        Processes an image in interactive mode (similar to moondream).
         """
         print(f"\n{'='*60}")
-        print(f"Procesando: {os.path.basename(image_path)}")
-        print(f"Modelo: {self.model_name}")
+        print(f"Processing: {os.path.basename(image_path)}")
+        print(f"Model: {self.model_name}")
         
         try:
-            # Procesar imagen
-            print("Procesando imagen...")
+            # Process image
+            print("Processing image...")
             result = self.process_image(image_path)
             
             if "error" in result:
                 print(f"Error: {result['error']}")
             else:
-                # Mostrar resultados de forma compacta
-                print("\nTiempos: ", end="")
-                print(f"Procesamiento={result['processing_time']:.2f}s | ", end="")
-                print(f"Tokens estimados={result['token_count']}")
+                # Show results in compact form
+                print("\nTimes: ", end="")
+                print(f"Processing={result['processing_time']:.2f}s | ", end="")
+                print(f"Estimated tokens={result['token_count']}")
                 
-                print("\nDescripción:")
+                print("\nDescription:")
                 print(f"{result['response']}")
             
-            # Guardar resultado en formato común
+            # Save result in common format
             self.save_single_result(result)
-            print(f"\nResultados guardados: {os.path.basename(self.output_file)}")
+            print(f"\nResults saved: {os.path.basename(self.output_file)}")
             
         except Exception as e:
             print(f"Error: {str(e)}")
     
     def save_single_result(self, img_res):
         """
-        Guarda el resultado de una única imagen procesada en modo interactivo.
-        Usa append para acumular resultados en múltiples ejecuciones.
+        Saves the result of a single image processed in interactive mode.
+        Uses append to accumulate results in multiple executions.
         """
-        # Verificar si el archivo existe para decidir si añadir encabezado
+        # Check if the file exists to decide whether to add header
         file_exists = os.path.exists(self.output_file) and os.path.getsize(self.output_file) > 0
         
         with open(self.output_file, "a", encoding="utf-8") as f:
-            # Solo añadir encabezado si el archivo es nuevo
+            # Only add header if the file is new
             if not file_exists:
-                f.write(f"Resultados de descripción de imágenes con Ollama - Modelo: {self.model_name} - max_tokens: {self.max_tokens}\n\n")
+                f.write(f"Image description results with Ollama - Model: {self.model_name} - max_tokens: {self.max_tokens}\n\n")
             
             separator = "=" * 80 + "\n"
             f.write(separator)
-            f.write("RESULTADOS DE IMAGEN\n")
+            f.write("IMAGE RESULTS\n")
             f.write(f"Timestamp: {datetime.datetime.now().isoformat()}\n")
-            f.write(f"Modelo: {self.model_name}, Tokens máx: {self.max_tokens}\n")
-            f.write(f"Imagen: {os.path.basename(img_res.get('image_path', 'N/A'))}\n")
+            f.write(f"Model: {self.model_name}, Max tokens: {self.max_tokens}\n")
+            f.write(f"Image: {os.path.basename(img_res.get('image_path', 'N/A'))}\n")
             
             if "error" in img_res:
                 f.write(f"Error: {img_res['error']}\n")
             else:
-                f.write("\nMÉTRICAS:\n")
-                f.write(f"- Descripción: {img_res.get('processing_time', 0):.4f}s | ")
+                f.write("\nMETRICS:\n")
+                f.write(f"- Description: {img_res.get('processing_time', 0):.4f}s | ")
                 f.write(f"Total: {img_res.get('processing_time', 0):.4f}s | ")
                 f.write(f"Tokens: {img_res.get('token_count', 0)}\n")
                 
-                f.write("\nRESULTADOS:\n")
-                f.write("Pregunta: ¿Qué se observa en esta imagen?\n\n")
-                f.write(f"Descripción: {img_res.get('response', '')}\n")
+                f.write("\nRESULTS:\n")
+                f.write("Question: What can be observed in this image?\n\n")
+                f.write(f"Description: {img_res.get('response', '')}\n")
             
             f.write("\n" + separator)
 
 
 def parse_args():
     """
-    Parsea los argumentos de línea de comandos.
+    Parses command line arguments.
     """
     parser = argparse.ArgumentParser(
-        description="Procesamiento de imágenes con LLM local (Ollama) usando hilos"
+        description="Image processing with local LLM (Ollama) using threads"
     )
     parser.add_argument("--image_dir", "-d", type=str, default="./imagenes_prueba",
-                        help="Directorio con imágenes a procesar (default: ./imagenes_prueba)")
+                        help="Directory with images to process (default: ./imagenes_prueba)")
     parser.add_argument("--output", "-o", default=None,
-                        help="Nombre del archivo de salida para resultados")
+                        help="Output filename for results")
     parser.add_argument("--model", "-m", default="gemma3:4b",
-                        help="Modelo a utilizar (default: gemma3:4b)")
+                        help="Model to use (default: gemma3:4b)")
     parser.add_argument("--temperature", "-t", type=float, default=0.5,
-                        help="Temperatura base para el modelo (default: 0.5)")
+                        help="Base temperature for the model (default: 0.5)")
     parser.add_argument("--max_tokens", type=int, default=4096,
-                        help="Número máximo de tokens a generar (default: 4096)")
+                        help="Maximum number of tokens to generate (default: 4096)")
     parser.add_argument("--threads", type=int, default=None,
-                        help="Número máximo de hilos a utilizar (default: automático)")
+                        help="Maximum number of threads to use (default: automatic)")
     parser.add_argument("--top_k", type=int, default=20,
-                        help="Limitar selección de tokens a los k más probables (default: 40)")
+                        help="Limit token selection to the k most likely (default: 40)")
     parser.add_argument("--mode", choices=["single", "batch"], default="single",
-                        help="Modo: 'single' (una imagen) o 'batch' (todas) (default: single)")
+                        help="Mode: 'single' (one image) or 'batch' (all) (default: single)")
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
     image_dir = os.path.abspath(args.image_dir)
-    logger.info(f"Directorio de imágenes: {image_dir}")
+    logger.info(f"Image directory: {image_dir}")
 
-    # Buscar imágenes en el directorio con extensiones válidas
+    # Find images in the directory with valid extensions
     valid_extensions = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff', '.webp')
     image_files = glob.glob(os.path.join(image_dir, "*"))
     image_files = [img for img in image_files if img.lower().endswith(valid_extensions)]
 
     if not image_files:
-        logger.error(f"No se encontraron imágenes en el directorio: {image_dir}")
+        logger.error(f"No images found in directory: {image_dir}")
         return
     
-    # Ordenar las imágenes para consistencia
+    # Sort images for consistency
     image_files = sorted(image_files)
 
-    # Simplificar la generación del nombre de archivo de salida
+    # Simplify output filename generation
     model_clean = args.model.replace(":", "_")
     output_file = args.output
     if output_file is None:
         mode_suffix = "single" if args.mode == "single" else "batch"
         output_file = f"./tests/results/ollama__{model_clean}__{mode_suffix}__tokens_{args.max_tokens}.txt"
     
-    # Asegurarse de que el directorio existe
+    # Ensure directory exists
     os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
-    # Inicializar el procesador
+    # Initialize the processor
     processor = OllamaImageProcessor(
         model=args.model,
         temperature=args.temperature,
@@ -460,40 +458,40 @@ def main():
         mode=args.mode
     )
 
-    # Calcular número de hilos si no se especifica (por defecto 70% de núcleos)
+    # Calculate number of threads if not specified (default 70% of cores)
     if args.threads is None:
         cpu_count = os.cpu_count() or 1
         threads = max(1, int(cpu_count * 0.7))
     else:
         threads = args.threads
 
-    # Lógica según el modo seleccionado
+    # Logic based on selected mode
     if args.mode == "single":
-        # Procesar solo la primera imagen
+        # Process only the first image
         image_path = image_files[0]
-        print(f"Modo: Single | Imagen: {os.path.basename(image_path)}")
-        print(f"Modelo: {args.model} | Tokens máx: {args.max_tokens}")
+        print(f"Mode: Single | Image: {os.path.basename(image_path)}")
+        print(f"Model: {args.model} | Max tokens: {args.max_tokens}")
         
         processor.process_interactive(image_path)
     else:
-        # Procesar todas las imágenes en batch
-        print(f"Modo: Batch | Imágenes: {len(image_files)}")
-        print(f"Modelo: {args.model} | Workers: {threads}")
+        # Process all images in batch
+        print(f"Mode: Batch | Images: {len(image_files)}")
+        print(f"Model: {args.model} | Workers: {threads}")
         
         start_time = time.time()
         results = processor.process_batch(image_files, max_workers=threads)
         total_time = time.time() - start_time
 
-        # Mostrar resumen de resultados
+        # Display results summary
         success_count = sum(1 for res in results if "error" not in res)
         total_tokens = sum(res.get("token_count", 0) for res in results if "token_count" in res)
 
-        print(f"Procesamiento completado en {total_time:.2f}s")
-        print(f"Imágenes procesadas exitosamente: {success_count}/{len(results)}")
-        print(f"Total de tokens generados: {total_tokens}")
-        print(f"Resultados guardados en: {os.path.basename(output_file)}")
+        print(f"Processing completed in {total_time:.2f}s")
+        print(f"Images successfully processed: {success_count}/{len(results)}")
+        print(f"Total tokens generated: {total_tokens}")
+        print(f"Results saved in: {os.path.basename(output_file)}")
 
-        # Guardar resultados
+        # Save results
         processor.save_results(results)
 
 
