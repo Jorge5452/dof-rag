@@ -4,6 +4,9 @@ import pathlib
 import os
 import time
 
+# Iniciar el temporizador
+start_time = time.time()
+
 # Configurar la API de Gemini
 genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 
@@ -11,8 +14,8 @@ genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 poppler_path = r"C:\poppler-24.08.0\Library\bin"
 
 # Definir rutas de entrada y salida
-input_pdf = "dof/2024/03/18032024-MAT.pdf"
-output_md = "dof_markdown_gemini/2024/03/18032024-MAT.md"
+input_pdf = "dof/2024/04/12042024-MAT.pdf"
+output_md = "dof_markdown_gemini/2024/04/12042024-MAT.md"
 
 # Asegurar que la carpeta de salida exista
 pathlib.Path(output_md).parent.mkdir(parents=True, exist_ok=True)
@@ -45,4 +48,9 @@ markdown_pages = [extract_markdown_from_image(img) for img in images]
 final_markdown = "\n\n".join(markdown_pages)
 pathlib.Path(output_md).write_text(final_markdown, encoding="utf-8")
 
+# Calcular y mostrar el tiempo total
+end_time = time.time()
+total_time = end_time - start_time
+
 print(f"✅ Conversión completada. Markdown guardado en: {output_md}")
+print(f"Tiempo total de procesamiento: {total_time:.2f} segundos")
