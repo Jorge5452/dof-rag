@@ -1,7 +1,6 @@
 import os
 import random
 import typer
-import getpass
 from pathlib import Path
 from datetime import datetime, timezone
 from dotenv import load_dotenv
@@ -12,7 +11,7 @@ import io
 app = typer.Typer()
 load_dotenv()
 
-api_key = os.getenv("GOOGLE_API_KEY") or getpass.getpass("Enter your Google API key: ")
+api_key = os.getenv("GOOGLE_API_KEY")
 genai.configure(api_key=api_key)
 
 def resolve_base_dir(arg: str) -> Path:
@@ -48,14 +47,17 @@ def parse_csv_from_gemini(text: str) -> list[list[str]]:
     """
     Receives the text returned by Gemini and tries to parse a CSV,
     omitting triple backtick lines and the header row if included.
+    Uses proper CSV parsing to handle commas within quoted fields.
     """
     lines = [line for line in text.splitlines() if not line.strip().startswith('```')]
     cleaned = '\n'.join(lines).strip()
-    reader = csv.reader(io.StringIO(cleaned))
+    
+    # Use the csv module's proper parsing capabilities
+    reader = csv.reader(io.StringIO(cleaned), quotechar='"', doublequote=True)
     rows = []
     for row in reader:
         # Skip if row is empty or its first cell starts with "Question"
-        if not row or row[0].lower().startswith("question"):
+        if not row or (row[0].lower().startswith("question") or row[0].lower().startswith("pregunta")):
             continue
         rows.append(row)
     return rows
@@ -68,13 +70,38 @@ def generate_questions(file_path: Path, num: int) -> list[list[str]]:
     """
     content = file_path.read_text(encoding="utf-8")
     prompt = (
-        f"Generate {num} simple questions based on this DOF extract. "
-        "Return a CSV with EXACT columns: Question,File,Page,Extract.\n\n"
+        f"Genera {num} preguntas simples basadas en este extracto del DOF (Diario Oficial de la Federación). "
+        "Enfócate en secciones legales, resolutivas o normativas. "
+        "Las preguntas deben ser claras, directas y respondibles a partir del texto. "
+        "Las preguntas y respuestas DEBEN estar en ESPAÑOL. "
+        "Devuelve un CSV con EXACTAMENTE estas columnas: Question,File,Page,Extract.\n\n"
+        "- Question: Debe ser sencilla y enfocarse en hechos o información específica\n"
+        "- File: Usa el nombre del archivo proporcionado abajo\n"
+        "- Page: Indica el número de página donde se puede encontrar la respuesta\n"
+        "- Extract: Incluye un extracto breve de 1-2 oraciones con la respuesta\n\n"
+        "IMPORTANTE: Asegúrate de usar comillas dobles (\") para encerrar cualquier texto que contenga comas.\n\n"
+        f"Nombre de archivo: {file_path.name}\n"
         f"---\n{content}\n---"
     )
     model = genai.GenerativeModel("gemini-2.0-flash")
     response_text = model.generate_content(prompt).text
     all_rows = parse_csv_from_gemini(response_text)
+    
+    # Verify we have at least one valid row
+    if not all_rows:
+        typer.echo("⚠️ No se generaron preguntas válidas, intentando nuevamente con un prompt simplificado...")
+        # Fallback to a simpler prompt if the first one failed
+        simple_prompt = (
+            f"Genera {num} preguntas sencillas sobre hechos mencionados en este texto. "
+            "Las preguntas y respuestas DEBEN estar en ESPAÑOL. "
+            "Devuelve un CSV con columnas: Question,File,Page,Extract.\n\n"
+            "IMPORTANTE: Usa comillas dobles (\") para cualquier texto que contenga comas.\n\n"
+            f"Nombre de archivo: {file_path.name}\n"
+            f"---\n{content}\n---"
+        )
+        response_text = model.generate_content(simple_prompt).text
+        all_rows = parse_csv_from_gemini(response_text)
+    
     # Force only 'num' rows, in case Gemini returns more
     return all_rows[:num]
 
