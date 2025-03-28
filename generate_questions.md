@@ -17,7 +17,6 @@ Este script genera preguntas relacionadas con documentos del Diario Oficial de l
 
 ## Configuración
 - Usa un archivo `.env` para cargar la clave API de Google
-- Si no encuentra la clave en variables de entorno, la solicita al usuario
 - Configura el cliente de Gemini con la clave API
 
 ## Funcionalidades
@@ -39,7 +38,6 @@ La función `parse_csv_from_gemini()`:
 - Recibe el texto generado por Gemini
 - Elimina líneas con marcadores de código (```)
 - Parsea el contenido como CSV
-- Omite filas vacías o encabezados
 - Devuelve una lista de filas
 
 ### Generación de preguntas
