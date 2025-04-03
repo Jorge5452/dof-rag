@@ -6,9 +6,6 @@ This script processes markdown files from the Mexican Official Gazette (DOF),
 extracts their content, splits them into semantic chunks, generates contextualized
 vector embeddings using Gemini, and stores them in a SQLite database with vector
 search capabilities. It also integrates BM25 for lexical matching.
-
-Usage:
-python extract_embeddings.py /path/to/markdown/files
 """
 
 import os
@@ -22,6 +19,8 @@ from tqdm import tqdm
 import google.generativeai as genai
 from rank_bm25 import BM25Okapi
 import numpy as np
+import time
+from google.api_core import exceptions  # For handling Gemini-specific errors
 
 # Load Gemini API key from environment variables
 try:
@@ -59,8 +58,8 @@ db.t.chunks.create(
     ignore=True,
 )
 
-# %%
-
+# Gemini model for context generation
+context_model = genai.GenerativeModel("gemini-2.0-flash")  # Adjust model as needed
 
 def get_url_from_filename(filename: str) -> str:
     """Generate URL from filename."""
@@ -71,7 +70,6 @@ def get_url_from_filename(filename: str) -> str:
         return f"https://diariooficial.gob.mx/abrirPDF.php?archivo={pdf_filename}&anio={year}&repo=repositorio/"
     raise ValueError(f"Expected filename like 23012025-MAT.md but got {filename}")
 
-
 def get_gemini_embedding(text: str) -> np.ndarray:
     """Generate embeddings using Gemini API."""
     try:
@@ -80,17 +78,31 @@ def get_gemini_embedding(text: str) -> np.ndarray:
     except Exception as e:
         raise RuntimeError(f"Failed to generate embedding with Gemini API: {str(e)}")
 
-
-def generate_context(file_path: str, document_content: str, chunk: str) -> str:
-    """Generate succinct context for a chunk using a heuristic approach."""
+def generate_context(file_path: str, document_content: str, chunk: str, max_retries: int = 5) -> str:
+    """Generate succinct context for a chunk using Gemini API with retry on rate limit."""
+    prompt = f"""Here is the chunk we want to situate within the whole document
+            <chunk>
+            {chunk}
+            </chunk>
+            Please give a short succinct context to situate this chunk within the overall document for the purposes of improving search retrieval of the chunk. Answer only with the succinct context and nothing else.
+            """
+    for attempt in range(max_retries):
+        try:
+            response = context_model.generate_content(prompt)
+            return response.text.strip()
+        except exceptions.ResourceExhausted as e:  # Specifically catch 429 errors
+            if attempt < max_retries - 1:  # Don't sleep on the last attempt
+                wait_time = 2 ** attempt  # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                print(f"Rate limit hit for {file_path}. Waiting {wait_time} seconds before retry {attempt + 1}/{max_retries}...")
+                time.sleep(wait_time)
+            else:
+                print(f"Max retries reached for {file_path}: {str(e)}. Falling back to basic context.")
+        except Exception as e:
+            print(f"Error generating context for chunk in {file_path}: {str(e)}. Falling back to basic context.")
+            break
+    # Fallback to basic context if all retries fail
     title = os.path.splitext(os.path.basename(file_path))[0]
-    try:
-        chunk_position = document_content.index(chunk) / len(document_content)
-    except ValueError:
-        chunk_position = 0.5  # Default to middle if chunk not found (rare edge case)
-    position_desc = "beginning" if chunk_position < 0.3 else "middle" if chunk_position < 0.7 else "end"
-    return f"This chunk is from {title} (DOF document), located at the {position_desc} of the document."
-
+    return f"This chunk is from {title} (DOF document)."
 
 def process_file(file_path: str):
     """Process a markdown file with Contextual Retrieval."""
@@ -149,7 +161,6 @@ def process_file(file_path: str):
             created_at=datetime.now(),
         )
 
-
 def process_directory(directory_path: str):
     """Recursively process all markdown files in a directory."""
     if not os.path.isdir(directory_path):
@@ -162,10 +173,8 @@ def process_directory(directory_path: str):
         elif os.path.isdir(entry_path):
             process_directory(entry_path)
 
-
 def main(root_dir: str):
     process_directory(root_dir)
-
 
 if __name__ == "__main__":
     typer.run(main)
