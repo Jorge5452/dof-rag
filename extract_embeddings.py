@@ -1,37 +1,49 @@
 # %%
+"""
+DOF Document Embedding Generator with Contextual Retrieval
+
+This script processes markdown files from the Mexican Official Gazette (DOF),
+extracts their content, splits them into semantic chunks, generates contextualized
+vector embeddings using Gemini, and stores them in a SQLite database with vector
+search capabilities. It also integrates BM25 for lexical matching.
+
+Usage:
+python extract_embeddings.py /path/to/markdown/files
+"""
 
 import os
 from datetime import datetime
-
 import typer
 from fastlite import database
 from sqlite_vec import load, serialize_float32
 from semantic_text_splitter import MarkdownSplitter
-from sentence_transformers import SentenceTransformer
 from tokenizers import Tokenizer
 from tqdm import tqdm
+import google.generativeai as genai
+from rank_bm25 import BM25Okapi
+import numpy as np
 
-# %%
+# Load Gemini API key from environment variables
+try:
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+except TypeError:
+    raise ValueError("GEMINI_API_KEY environment variable not set. Please set it with 'export GEMINI_API_KEY=your-key'.")
 
-tokenizer = Tokenizer.from_pretrained("nomic-ai/modernbert-embed-base")
-model = SentenceTransformer("nomic-ai/modernbert-embed-base", trust_remote_code=True)
+# Tokenizer for splitting (using a lightweight tokenizer)
+tokenizer = Tokenizer.from_pretrained("bert-base-uncased")
 splitter = MarkdownSplitter.from_huggingface_tokenizer(tokenizer, 2048)
 
-# %%
-
-db = database("dof_db/db.sqlite")
+# Database initialization
+db_path = "dof_db/db.sqlite"
+os.makedirs(os.path.dirname(db_path), exist_ok=True)  # Ensure directory exists
+db = database(db_path)
 db.conn.enable_load_extension(True)
 load(db.conn)
 db.conn.enable_load_extension(False)
 
+# Schema setup
 db.t.documents.create(
-    id=int,
-    title=str,
-    url=str,
-    file_path=str,
-    created_at=datetime,
-    pk="id",
-    ignore=True
+    id=int, title=str, url=str, file_path=str, created_at=datetime, pk="id", ignore=True
 )
 db.t.documents.create_index(["url"], unique=True, if_not_exists=True)
 
@@ -40,92 +52,113 @@ db.t.chunks.create(
     document_id=int,
     text=str,
     embedding=bytes,
+    bm25_context=str,
     created_at=datetime,
     pk="id",
     foreign_keys=[("document_id", "documents")],
-    ignore=True
+    ignore=True,
 )
 
 # %%
 
-def get_url_from_filename(filename: str):
-    """
-    Generate the URL based on the filename pattern '23012025-MAT.pdf'.
 
-    Args:
-        filename (str): Filename of the .md file
-
-    Returns:
-        str: The generated URL
-    """
-    # Extract just the base filename in case the full path was passed
-    base_filename = os.path.basename(filename).replace('.md', '')
-
-    # The year should be extracted from the filename (positions 4-8 in 23012025-MAT.pdf)
-    # This assumes the format is consistent
+def get_url_from_filename(filename: str) -> str:
+    """Generate URL from filename."""
+    base_filename = os.path.basename(filename).replace(".md", "")
     if len(base_filename) >= 8:
-        year = base_filename[4:8]  # Extract year (2025 from 23012025-MAT.pdf)
-        pdf_filename = f"{base_filename}.pdf"  # Add .pdf extension back
+        year = base_filename[4:8]
+        pdf_filename = f"{base_filename}.pdf"
+        return f"https://diariooficial.gob.mx/abrirPDF.php?archivo={pdf_filename}&anio={year}&repo=repositorio/"
+    raise ValueError(f"Expected filename like 23012025-MAT.md but got {filename}")
 
-        # Construct the URL
-        url = f"https://diariooficial.gob.mx/abrirPDF.php?archivo={pdf_filename}&anio={year}&repo=repositorio/"
-        return url
-    else:
-        # Return None or an error message if the filename doesn't match expected format
-        raise ValueError(f"Expected filename like 23012025-MAT.md but got {filename}")
 
-def process_file(file_path):
-    """
-    Process a file. Replace this function with your specific processing logic.
+def get_gemini_embedding(text: str) -> np.ndarray:
+    """Generate embeddings using Gemini API."""
+    try:
+        result = genai.embed_content(model="models/embedding-001", content=text)
+        return np.array(result["embedding"], dtype=np.float32)
+    except Exception as e:
+        raise RuntimeError(f"Failed to generate embedding with Gemini API: {str(e)}")
 
-    Args:
-        file_path (str): Path to the file to process
-    """
-    with open(file_path, 'r', encoding='utf-8') as file:
-        content = file.read()
 
-        # Get the title (filename without extension)
-        title = os.path.splitext(os.path.basename(file_path))[0]
+def generate_context(file_path: str, document_content: str, chunk: str) -> str:
+    """Generate succinct context for a chunk using a heuristic approach."""
+    title = os.path.splitext(os.path.basename(file_path))[0]
+    try:
+        chunk_position = document_content.index(chunk) / len(document_content)
+    except ValueError:
+        chunk_position = 0.5  # Default to middle if chunk not found (rare edge case)
+    position_desc = "beginning" if chunk_position < 0.3 else "middle" if chunk_position < 0.7 else "end"
+    return f"This chunk is from {title} (DOF document), located at the {position_desc} of the document."
+
+
+def process_file(file_path: str):
+    """Process a markdown file with Contextual Retrieval."""
+    try:
+        with open(file_path, "r", encoding="utf-8") as file:
+            content = file.read()
+    except FileNotFoundError:
+        print(f"Error: File {file_path} not found. Skipping.")
+        return
+    except Exception as e:
+        print(f"Error reading {file_path}: {str(e)}. Skipping.")
+        return
+
+    # Metadata extraction
+    title = os.path.splitext(os.path.basename(file_path))[0]
+    try:
         url = get_url_from_filename(file_path)
+    except ValueError as e:
+        print(f"Error generating URL for {file_path}: {str(e)}. Skipping.")
+        return
 
-        db.t.documents.delete_where('url = ?', [url])
+    # Delete existing document to avoid duplicates
+    db.t.documents.delete_where("url = ?", [url])
+    doc = db.t.documents.insert(
+        title=title, url=url, file_path=file_path, created_at=datetime.now()
+    )
 
-        doc = db.t.documents.insert(
-            title=title,
-            url=url,
-            file_path=file_path,
-            created_at=datetime.now()
+    # Split content into chunks
+    chunks = splitter.chunks(content)
+    if not chunks:
+        print(f"Warning: No chunks generated for {file_path}. Skipping.")
+        return
+
+    # Prepare BM25 corpus (tokenized chunks)
+    tokenized_corpus = [chunk.split() for chunk in chunks]
+    bm25 = BM25Okapi(tokenized_corpus)
+
+    # Process chunks with Contextual Retrieval
+    for i, chunk in enumerate(tqdm(chunks, desc=f"Processing {file_path}")):
+        context = generate_context(file_path, content, chunk)
+        contextualized_chunk = f"{context} {chunk}"
+
+        # Generate embedding with Gemini
+        try:
+            embedding = get_gemini_embedding(contextualized_chunk)
+        except RuntimeError as e:
+            print(f"Error embedding chunk {i} in {file_path}: {str(e)}. Skipping chunk.")
+            continue
+
+        # Store in database
+        db.t.chunks.insert(
+            document_id=doc["id"],
+            text=chunk,
+            embedding=serialize_float32(embedding),
+            bm25_context=contextualized_chunk,
+            created_at=datetime.now(),
         )
 
-        chunks = splitter.chunks(content)
 
-        # Store chunks and embeddings
-        for i, chunk in enumerate(tqdm(chunks, desc=f"Processing {file_path}")):
-            embedding = model.encode(f"search_document: {chunk}")
-            db.t.chunks.insert(
-                document_id=doc['id'],
-                text=chunk,
-                embedding=embedding,
-                created_at=datetime.now()
-            )
-
-
-def process_directory(directory_path):
-    """
-    Recursively process all files in a directory and its subdirectories.
-
-    Args:
-        directory_path (str): Path to the directory to process
-    """
-    # Loop through all entries in the directory
+def process_directory(directory_path: str):
+    """Recursively process all markdown files in a directory."""
+    if not os.path.isdir(directory_path):
+        print(f"Error: {directory_path} is not a directory.")
+        return
     for entry in tqdm(os.listdir(directory_path), desc=f"Processing {directory_path}"):
-        # Create full path
         entry_path = os.path.join(directory_path, entry)
-
-        # If it's a file, process it
-        if os.path.isfile(entry_path) and entry_path.lower().endswith('.md'):
+        if os.path.isfile(entry_path) and entry_path.lower().endswith(".md"):
             process_file(entry_path)
-        # If it's a directory, recursively process it
         elif os.path.isdir(entry_path):
             process_directory(entry_path)
 
@@ -134,5 +167,5 @@ def main(root_dir: str):
     process_directory(root_dir)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     typer.run(main)
