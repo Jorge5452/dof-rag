@@ -1,0 +1,11 @@
+.venv/
+.github
+.cursor
+.env
+pruebas/
+__pycache__/
+modulos/databases/db/
+sessions/
+test/analisis_resultados/
+test/resultados_db_tests/
+test/resultados_pruebas/

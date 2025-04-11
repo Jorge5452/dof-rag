@@ -1,0 +1,164 @@
+# Configuración general del sistema RAG
+general:
+  # Modo de depuración (activa logs más detallados)
+  debug: false
+  # Directorio para almacenar logs
+  log_dir: "logs"
+  # Directorio para almacenar sesiones
+  sessions_dir: "sessions"
+  # Nivel de logging (DEBUG, INFO, WARNING, ERROR)
+  log_level: "INFO"
+
+# Configuración para chunking de documentos
+chunks:
+  # Método de chunking a utilizar (character, token, context)
+  method: "context"
+  
+  # Configuración para chunker por caracteres
+  character:
+    # Tamaño máximo del chunk en caracteres
+    chunk_size: 1000
+    # Solapamiento entre chunks en caracteres
+    chunk_overlap: 200
+    # Habilitar o deshabilitar extracción de encabezados (puede mejorar rendimiento)
+    header_extraction_enabled: true
+    # Longitud mínima para considerar un texto como encabezado
+    min_header_length: 1
+    # Longitud máxima para un encabezado (textos más largos se saltan para mejorar rendimiento)
+    max_header_length: 6
+  
+  # Configuración para chunker por tokens
+  token:
+    # Nombre del modelo de tokenizador (debe ser compatible con HF)
+    # tokenizer: "intfloat/multilingual-e5-small"
+    tokenizer: "nomic-ai/modernbert-embed-base"
+    # Cantidad máxima de tokens por chunk
+    max_tokens: 512
+    # Solapamiento entre chunks en tokens
+    token_overlap: 100
+  
+  # Configuración para chunker por contexto
+  context:
+    # Utilizar encabezados para dividir chunks
+    use_headers: true
+    # Nivel máximo de encabezado para separar (1=H1, 2=H2, etc.)
+    max_header_level: 6
+    # Tamaño máximo de texto por chunk
+    max_chunk_size: 1500
+
+# Configuración para generación de embeddings
+embeddings:
+  # Modelo de embedding a utilizar (modernbert, cde-small, e5-small)
+  model: "modernbert"
+  # Incluir parámetro para trust_remote_code
+  trust_remote_code: False
+  
+  # Configuración para ModernBERT
+  modernbert:
+    # Nombre completo del modelo
+    model_name: "nomic-ai/modernbert-embed-base"
+    # Dispositivo para inferencia (cpu, cuda, mps)
+    device: "cpu"
+    # Normalizar embeddings para similitud por coseno
+    normalize: true
+    # Longitud máxima de tokens para el modelo
+    max_length: 512
+    batch_size: 32
+  
+  # Configuración para CDE-small
+  cde-small:
+    model_name: "jxm/cde-small-v2"
+    normalize: true
+    max_length: 384
+    batch_size: 32
+  
+  # Configuración para E5-small
+  e5-small:
+    model_name: "intfloat/multilingual-e5-small"
+    normalize: true
+    max_length: 512
+    batch_size: 32
+    prefix_queries: true
+    prefix_passages: true
+
+# Configuración de la base de datos
+database:
+  # Tipo de base de datos (sqlite, duckdb, ...)
+  type: "sqlite"
+  
+  # Configuración para SQLite
+  sqlite:
+    # Ruta al archivo de base de datos
+    db_dir: "modulos/databases/db"
+    db_name: ""  # Nombre vacío para que siempre se genere automáticamente
+    similarity_threshold: 0.3
+    # Habilitar extensión sqlite-vec para búsqueda vectorial optimizada
+    use_vector_extension: true
+
+# Configuración para clientes de IA
+ai_client:
+  # Tipo de cliente (openai, gemini, ollama)
+  type: "gemini"
+  
+  # Parámetros generales para modelos de IA (aplicables a todos los modelos)
+  general:
+    # Temperatura para la generación (0.0 a 1.0)
+    temperature: 0.7
+    # Tokens máximos para la respuesta
+    max_tokens: 1000
+    # Top-k para muestreo
+    top_k: 40
+    # Top-p para muestreo (nucleus sampling)
+    top_p: 0.95
+    # Frecuencia de penalización
+    frequency_penalty: 0.0
+    # Penalización por presencia
+    presence_penalty: 0.0
+    # Prompt inicial de sistema
+    system_prompt: "Eres un asistente útil y preciso. Responde a la pregunta usando sólo la información proporcionada en el contexto. Si la información no está en el contexto, di que no puedes responder la pregunta basándote en el contexto disponible."
+  
+  # Configuración para OpenAI
+  openai:
+    # Modelo a utilizar
+    model: "gpt-3.5-turbo"
+    # Nombre de la variable de entorno para la API key
+    api_key_env: "OPENAI_API_KEY"
+    # Nombre de la variable de entorno para la URL base de la API (opcional)
+    api_base_env: "OPENAI_API_BASE"
+    # Parámetros específicos que sobrescriben los generales (opcional)
+    temperature: 0.0
+    max_tokens: 1024
+    timeout: 30
+  
+  # Configuración para Gemini
+  gemini:
+    # Modelo a utilizar
+    model: "gemini-pro"
+    # Nombre de la variable de entorno para la API key
+    api_key_env: "GEMINI_API_KEY"
+    # Tipo de respuesta MIME
+    response_mime_type: "text/plain"
+    # Usar streaming para respuestas (true/false)
+    stream: false
+    temperature: 0.0
+    max_output_tokens: 1024
+  
+  # Configuración para Ollama
+  ollama:
+    model: "llama2"
+    api_url: "http://localhost:11434/api"
+    # Nombre de la variable de entorno para la URL de la API (opcional)
+    api_url_env: "OLLAMA_API_URL"
+    temperature: 0.0
+    max_tokens: 1024
+    timeout: 60
+
+# Parámetros para procesamiento de documentos
+processing:
+  # Número máximo de chunks a recuperar para cada consulta
+  max_chunks_to_retrieve: 5
+
+  # Habilitar procesamiento paralelo para embeddings
+  parallel_processing: true
+  # Número máximo de workers para procesamiento paralelo
+  max_workers: 4
