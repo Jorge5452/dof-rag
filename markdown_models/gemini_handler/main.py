@@ -15,8 +15,8 @@ genai.configure(api_key=os.getenv("GOOGLE_API_KEY"))
 poppler_path = r"C:\poppler-24.08.0\Library\bin"
 
 # Definir rutas de entrada y salida
-input_pdf = "../_pdf/11012023-MAT-20pages.pdf"
-output_md = "./markdown/2024/11012023-MAT.md"
+input_pdf = "../_pdf/tables/01042024-MAT_pages_53_to_54.pdf"
+output_md = "./markdown/test/01042024-MAT_pages_53_to_54.md"
 
 # Asegurar que la carpeta de salida exista
 pathlib.Path(output_md).parent.mkdir(parents=True, exist_ok=True)

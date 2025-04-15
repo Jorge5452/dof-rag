@@ -21,8 +21,8 @@ def pdf_to_markdown_llm(pdf_path, output_dir):
     return output_path
 
 if __name__ == "__main__":
-    pdf_path = "../_pdf/11012023-MAT-20pages.pdf"
-    output_dir = "./markdown/2024/11012023-MAT.md"
+    pdf_path = "../_pdf/tables/01042024-MAT_pages_53_to_54.pdf"
+    output_dir = "./markdown/test/"
 
     try:
         pdf_to_markdown_llm(pdf_path, output_dir)

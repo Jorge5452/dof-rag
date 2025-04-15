@@ -12,8 +12,8 @@ start_time = time.time()
 poppler_path = r"C:\poppler-24.08.0\Library\bin"
 
 # Define input and output paths
-input_pdf = "../_pdf/11012023-MAT-20pages.pdf"
-output_md = "./markdown/2024/11012023-MAT.md"
+input_pdf = "../_pdf/tables/11012023-MAT-20pages.pdf"
+output_md = "./markdown/test/11012023-MAT-20pages.md"
 
 # Ensure the output directory exists
 pathlib.Path(output_md).parent.mkdir(parents=True, exist_ok=True)

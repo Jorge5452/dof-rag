@@ -5,8 +5,8 @@ from marker.output import text_from_rendered
 from marker.config.parser import ConfigParser
 
 # Rutas de entrada y salida
-pdf_path = "../_pdf/11012023-MAT-20pages.pdf"
-output_dir = "./markdown/2024/11012023-MAT.md"
+pdf_path = "../_pdf/tables/01042024-MAT_pages_53_to_54.pdf"
+output_dir = "./markdown/test"
 
 # Crear el directorio de salida si no existe
 os.makedirs(output_dir, exist_ok=True)
@@ -38,7 +38,7 @@ try:
     markdown_text, metadata, images = text_from_rendered(rendered)
     
     # Guardar el resultado en un archivo
-    output_path = os.path.join(output_dir, "18032024-MAT.md")
+    output_path = os.path.join(output_dir, "01042024-MAT_pages_53_to_54.md")
     with open(output_path, "w", encoding="utf-8") as f:
         f.write(markdown_text)
     

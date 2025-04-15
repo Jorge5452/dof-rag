@@ -6,8 +6,8 @@ import time
 start_time = time.time()
 
 # Definir rutas de entrada y salida
-input_pdf = "../_pdf/11012023-MAT-20pages.pdf"
-output_md = "./markdown/2024/11012023-MAT.md"
+input_pdf = "../_pdf/tables/11012023-MAT-20pages.pdf"
+output_md = "./markdown/test/11012023-MAT-20pages.md"
 
 # Asegurar que la ruta de salida exista
 output_path = pathlib.Path(output_md)
