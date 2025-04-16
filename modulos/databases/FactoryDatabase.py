@@ -29,7 +29,9 @@ class DatabaseFactory:
                              embedding_model: Optional[str] = None,
                              chunking_method: Optional[str] = None,
                              session_id: Optional[str] = None,
-                             custom_name: Optional[str] = None) -> VectorialDatabase:
+                             custom_name: Optional[str] = None,
+                             load_existing: bool = False,
+                             db_path: Optional[str] = None) -> VectorialDatabase:
         """
         Obtiene una instancia de base de datos del tipo especificado con configuración específica.
         
@@ -40,6 +42,8 @@ class DatabaseFactory:
             chunking_method: Método de chunking utilizado (para tracking).
             session_id: Identificador de sesión único (si se proporciona, se usa para identificar la base de datos).
             custom_name: Nombre personalizado para la base de datos (tiene prioridad sobre el generado).
+            load_existing: Si es True, se cargará una base de datos existente en db_path sin crear una nueva.
+            db_path: Ruta a una base de datos existente que se cargará si load_existing=True.
             
         Returns:
             Instancia de VectorialDatabase.
@@ -71,6 +75,52 @@ class DatabaseFactory:
         # Verificar que la implementación existe
         db_class = cls._get_db_class(db_type)
         
+        # Si estamos cargando una base de datos existente y se proporciona la ruta
+        if load_existing and db_path:
+            # Verificar que el archivo existe
+            if not os.path.exists(db_path):
+                raise ValueError(f"La base de datos en {db_path} no existe")
+            
+            # Crear clave única para esta instancia
+            instance_key = f"{db_type}:{db_path}:{embedding_dim}"
+            
+            # Si ya existe una instancia para esta base de datos, devolverla
+            if instance_key in cls._instances:
+                logger.debug(f"Reutilizando instancia existente para {db_path}")
+                return cls._instances[instance_key]
+            
+            # Crear nueva instancia conectada a la base de datos existente
+            logger.info(f"Cargando base de datos existente {db_type} desde {db_path}")
+            db_instance = db_class(embedding_dim=embedding_dim)
+            
+            # Configurar atributos de seguimiento
+            db_instance._embedding_model = embedding_model
+            db_instance._chunking_method = chunking_method
+            db_instance._session_id = session_id
+            
+            # Conectar a la base de datos existente
+            try:
+                db_instance.connect(db_path)
+                logger.info(f"Conexión exitosa a base de datos existente: {db_path}")
+                
+                # Actualizar metadatos de último uso
+                metadata = cls._load_db_metadata(db_path)
+                metadata.update({
+                    "last_used": time.time(),
+                    "embedding_model": embedding_model,
+                    "chunking_method": chunking_method,
+                    "embedding_dim": embedding_dim
+                })
+                cls._store_db_metadata(db_path, metadata)
+                
+                # Almacenar la instancia en el caché
+                cls._instances[instance_key] = db_instance
+                return db_instance
+            except Exception as e:
+                logger.error(f"Error al conectar con la base de datos existente {db_path}: {e}")
+                raise ValueError(f"No se pudo cargar la base de datos: {e}")
+        
+        # Código existente para crear nueva base o reutilizar instancia
         # Generar un nombre único para la base de datos basado en la configuración
         if custom_name:
             db_name = custom_name
@@ -80,7 +130,8 @@ class DatabaseFactory:
             db_name = cls._generate_db_name(embedding_model, chunking_method, db_type)
         
         # Determinar la ruta a la base de datos
-        db_path = cls._get_db_path(db_type, db_name)
+        if not db_path:
+            db_path = cls._get_db_path(db_type, db_name)
         
         # Crear clave única que incluye la dimensión
         instance_key = f"{db_type}:{db_path}:{embedding_dim}"
@@ -249,11 +300,21 @@ class DatabaseFactory:
             
             logger.info(f"Ruta de base de datos generada: {db_path}")
             return db_path
-        
-        # Para bases de datos de servidor (PostgreSQL, etc.)
+            
+        elif db_type == "postgresql":
+            # Para PostgreSQL, la "ruta" es en realidad una cadena de conexión
+            db_config = cls._load_config()
+            pg_config = db_config.get("postgresql", {})
+            
+            # Construir cadena de conexión
+            conn_string = f"postgresql://{pg_config.get('user', 'postgres')}:{pg_config.get('password', '')}@"
+            conn_string += f"{pg_config.get('host', 'localhost')}:{pg_config.get('port', 5432)}/{pg_config.get('database', 'rag_db')}"
+            
+            return conn_string
         else:
-            # Devolvemos una cadena de conexión o identificador
-            return db_name
+            # Tipo de base de datos no soportado
+            logger.warning(f"Tipo de base de datos no soportado: {db_type}, usando SQLite")
+            return cls._get_db_path("sqlite", db_name)
     
     @classmethod
     def _store_db_metadata(cls, db_path: str, metadata: Dict[str, Any]) -> None:

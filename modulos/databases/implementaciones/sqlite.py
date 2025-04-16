@@ -4,6 +4,7 @@ import numpy as np
 import logging
 import struct
 import time
+import math
 from typing import List, Dict, Any, Optional, Tuple
 import json
 import uuid
@@ -87,6 +88,10 @@ class SQLiteVectorialDatabase(VectorialDatabase):
             # Cargar extensiones vectoriales
             self._extension_loaded = self.load_extensions()
             
+            # Si la extensión no se cargó, crear funciones manuales
+            if not self._extension_loaded:
+                self._create_manual_vector_functions()
+            
             # Crear el esquema si no existe
             self.create_schema()
             
@@ -97,6 +102,48 @@ class SQLiteVectorialDatabase(VectorialDatabase):
             if self._conn:
                 self._conn.close()
             raise
+    
+    def _create_manual_vector_functions(self):
+        """
+        Crea funciones personalizadas en SQLite para operaciones vectoriales cuando 
+        la extensión sqlite-vec no está disponible.
+        """
+        logger.info("Creando funciones vectoriales manuales en SQLite...")
+        
+        def unpack_vector(blob):
+            """Desempaqueta un BLOB en un vector numpy"""
+            if not blob:
+                return None
+            try:
+                # Determinar la dimensión a partir del tamaño del blob
+                dim = len(blob) // 4  # 4 bytes por float (float32)
+                fmt = f"{dim}f"  # formato para struct.unpack
+                return np.array(struct.unpack(fmt, blob))
+            except Exception as e:
+                logger.error(f"Error al desempaquetar vector: {e}")
+                return None
+        
+        def cosine_similarity(blob1, blob2):
+            """Calcula la similitud coseno entre dos vectores almacenados como BLOBs"""
+            vec1 = unpack_vector(blob1)
+            vec2 = unpack_vector(blob2)
+            
+            if vec1 is None or vec2 is None:
+                return 0.0
+                
+            # Calcular similitud coseno
+            dot_product = np.dot(vec1, vec2)
+            norm1 = np.linalg.norm(vec1)
+            norm2 = np.linalg.norm(vec2)
+            
+            if norm1 == 0 or norm2 == 0:
+                return 0.0
+                
+            return float(dot_product / (norm1 * norm2))
+            
+        # Registrar las funciones en SQLite
+        self._conn.create_function("vec_cosine_similarity", 2, cosine_similarity)
+        logger.info("Funciones vectoriales manuales creadas exitosamente")
     
     def load_extensions(self) -> bool:
         """
@@ -124,32 +171,85 @@ class SQLiteVectorialDatabase(VectorialDatabase):
             try:
                 sqlite_vec.load(self._conn)
                 # Verificar la carga
-                vec_version = self._conn.execute("SELECT vec_version()").fetchone()[0]
-                SQLITE_VEC_VERSION = vec_version
-                logger.info(f"Extensión sqlite-vec cargada correctamente con método 1. Versión: {vec_version}")
-                
-                # Deshabilitar la carga de extensiones por seguridad
-                self._conn.enable_load_extension(False)
-                
-                # Guardar información de la extensión
-                self.store_metadata("vector_extension_version", vec_version)
-                self.store_metadata("vector_extension_enabled", "true")
-                
-                # Si la versión es v0.1.6, establecer tabla y funciones específicas
-                if vec_version == "v0.1.6":
-                    self._vector_table_name = "vec_index"  # Nombre simple para la tabla
+                try:
+                    vec_version = self._conn.execute("SELECT vec_version()").fetchone()[0]
+                    SQLITE_VEC_VERSION = vec_version
+                    logger.info(f"Extensión sqlite-vec cargada correctamente con método 1. Versión: {vec_version}")
                     
-                return True
+                    # Deshabilitar la carga de extensiones por seguridad
+                    self._conn.enable_load_extension(False)
+                    
+                    # Guardar información de la extensión
+                    self.store_metadata("vector_extension_version", vec_version)
+                    self.store_metadata("vector_extension_enabled", "true")
+                    
+                    # Si la versión es v0.1.6, establecer tabla y funciones específicas
+                    if vec_version == "v0.1.6":
+                        self._vector_table_name = "vec_index"  # Nombre simple para la tabla
+                        
+                    return True
+                except sqlite3.OperationalError:
+                    # Si no podemos obtener la versión, es posible que la extensión no se haya cargado completamente
+                    logger.warning("Extensión sqlite-vec se cargó pero la función vec_version() no está disponible")
+                    
+                    # Verificar si otras funciones como vec_cosine_similarity están disponibles
+                    try:
+                        # Crear vectores de prueba
+                        test_vec1 = np.ones(5, dtype=np.float32).tobytes()
+                        test_vec2 = np.ones(5, dtype=np.float32).tobytes()
+                        
+                        # Intentar usar vec_cosine_similarity
+                        result = self._conn.execute("SELECT vec_cosine_similarity(?, ?)", (test_vec1, test_vec2)).fetchone()[0]
+                        logger.info(f"Función vec_cosine_similarity disponible, resultado de prueba: {result}")
+                        self.store_metadata("vector_extension_enabled", "true")
+                        self.store_metadata("vector_extension_version", "unknown")
+                        self._conn.enable_load_extension(False)
+                        return True
+                    except sqlite3.OperationalError as e:
+                        logger.warning(f"La función vec_cosine_similarity no está disponible: {e}")
             except Exception as e:
                 logger.warning(f"Error al cargar sqlite-vec con método 1: {e}")
+            
+            # Método 2: Intenta otra forma de cargar la extensión (directa con .so/.dll)
+            try:
+                # Obtiene la ruta de la biblioteca del módulo
+                import os.path
+                import sqlite_vec
+                ext_path = os.path.dirname(os.path.abspath(sqlite_vec.__file__))
+                
+                # Intenta cargar en diferentes ubicaciones posibles
+                possible_paths = [
+                    os.path.join(ext_path, "sqlite_vec"),
+                    os.path.join(ext_path, "sqlite_vec.so"),
+                    os.path.join(ext_path, "sqlite_vec.dll"),
+                    "sqlite_vec",
+                ]
+                
+                for path in possible_paths:
+                    try:
+                        self._conn.enable_load_extension(True)
+                        self._conn.load_extension(path)
+                        logger.info(f"Extensión sqlite-vec cargada desde: {path}")
+                        self.store_metadata("vector_extension_enabled", "true")
+                        self.store_metadata("vector_extension_path", path)
+                        self._conn.enable_load_extension(False)
+                        return True
+                    except Exception as e:
+                        logger.debug(f"No se pudo cargar extensión desde {path}: {e}")
+            except Exception as e:
+                logger.warning(f"Error en método alternativo de carga: {e}")
                 
             # Si llegamos aquí, no se pudo cargar la extensión
-            logger.warning("No se pudo cargar la extensión sqlite-vec. Las búsquedas vectoriales serán más lentas.")
+            logger.warning("No se pudo cargar la extensión sqlite-vec. Se utilizarán funciones vectoriales manuales.")
             self._use_vector_extension = False
             self.store_metadata("vector_extension_enabled", "false")
             
             # Deshabilitar la carga de extensiones por seguridad
-            self._conn.enable_load_extension(False)
+            try:
+                self._conn.enable_load_extension(False)
+            except:
+                pass
+                
             return False
             
         except sqlite3.Error as e:
@@ -318,17 +418,20 @@ class SQLiteVectorialDatabase(VectorialDatabase):
                 
         return struct.pack(f"{self._embedding_dim}f", *vector)
     
-    def deserialize_vector(self, blob: bytes) -> List[float]:
+    def deserialize_vector(self, blob: bytes, dim: int = None) -> List[float]:
         """
         Deserializa un blob binario a un vector de floats.
         
         Args:
             blob (bytes): Representación binaria del vector.
+            dim (int, optional): Dimensión del vector. Si es None, se usa self._embedding_dim.
             
         Returns:
             List[float]: Vector deserializado.
         """
-        return list(struct.unpack(f"{self._embedding_dim}f", blob))
+        # Si no se proporciona dim, usar la dimensión configurada en la instancia
+        embedding_dim = dim if dim is not None else self._embedding_dim
+        return list(struct.unpack(f"{embedding_dim}f", blob))
     
     def insert_document(self, document: Dict[str, Any], chunks: List[Dict[str, Any]]) -> int:
         """

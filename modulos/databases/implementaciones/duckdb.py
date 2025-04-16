@@ -63,25 +63,90 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             # Guardar la ruta de la base de datos para uso posterior
             self._db_path = db_path
             
-            # En DuckDB, la conexión en memoria se especifica con ':memory:'
+            # Leer configuración específica para DuckDB
+            from config import config
+            db_config = config.get_database_config()
+            duckdb_config = db_config.get('duckdb', {})
+            
+            # Obtener parámetros de configuración
+            memory_limit = duckdb_config.get('memory_limit', '2GB')
+            threads_config = duckdb_config.get('threads', 4)  # Default a 4 threads
+            self._similarity_threshold = duckdb_config.get('similarity_threshold', 0.3)
+            
+            # Procesar el valor de threads: DuckDB requiere al menos 1 thread
+            import multiprocessing
+            if threads_config == 'auto' or threads_config == 0:
+                # Usar el número de núcleos disponibles, al menos 1
+                threads = max(1, multiprocessing.cpu_count())
+            else:
+                # Intentar convertir a entero, asegurando que sea al menos 1
+                try:
+                    threads = max(1, int(threads_config))
+                except (ValueError, TypeError):
+                    # Si no es posible convertir, usar 1 como valor seguro por defecto
+                    logger.warning(f"Valor inválido para threads: '{threads_config}'. Usando 1 como valor por defecto.")
+                    threads = 1
+            
+            # Validación adicional para asegurar que sea un número válido
+            if not isinstance(threads, int) or threads < 1:
+                threads = 1
+                logger.warning(f"Valor corregido de threads a {threads} para cumplir con los requisitos de DuckDB")
+            
+            # Configuración para conexión DuckDB
+            connection_config = {
+                'memory_limit': memory_limit,
+                'threads': threads  # Debe ser un número entero, no string
+            }
+            
+            logger.debug(f"Configuración para conexión DuckDB: {connection_config}")
+            
             if db_path == ':memory:':
-                self._conn = duckdb.connect(database=':memory:')
+                self._conn = duckdb.connect(database=':memory:', config=connection_config)
             else:
                 # Asegurarse de que el directorio existe
-                os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
-                self._conn = duckdb.connect(database=db_path)
+                db_dir = os.path.dirname(os.path.abspath(db_path))
+                if not os.path.exists(db_dir):
+                    try:
+                        os.makedirs(db_dir, exist_ok=True)
+                        logger.info(f"Directorio creado para la base de datos: {db_dir}")
+                    except Exception as e:
+                        logger.error(f"Error al crear directorio para la base de datos: {e}")
+                        return False
+                
+                # Configuraciones mejoradas para DuckDB
+                self._conn = duckdb.connect(database=db_path, config=connection_config)
+            
+            # Verificar que la conexión se haya establecido correctamente
+            if self._conn is None:
+                logger.error("La conexión a DuckDB se creó como None")
+                return False
+                
+            # Ejecutar una consulta sencilla para verificar que la conexión funciona
+            try:
+                self._conn.execute("SELECT 1")
+                self._conn.fetchone()
+            except Exception as e:
+                logger.error(f"La conexión a DuckDB se creó pero no es funcional: {e}")
+                return False
             
             # Inicializar el cursor para compatibilidad con la clase abstracta
             self._cursor = self._conn
             
-            logger.info(f"Conexión exitosa a DuckDB: {db_path}")
+            # Cargar extensiones necesarias inmediatamente después de conectar
+            # Pero no fallar si no se pueden cargar
+            self.load_extensions()
+            
+            logger.info(f"Conexión exitosa a DuckDB: {db_path} (memoria: {memory_limit}, hilos: {threads})")
             
             # Crear el esquema tras conectar exitosamente
-            self.create_schema()
+            if not self.create_schema():
+                logger.warning("No se pudo crear el esquema completo en DuckDB, pero se continuará el proceso")
             
             return True
         except Exception as e:
             logger.error(f"Error al conectar a DuckDB: {e}")
+            self._conn = None
+            self._cursor = None
             return False
     
     def close_connection(self) -> bool:
@@ -113,10 +178,31 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             return False
         
         try:
+            # Verificar si las tablas ya existen para evitar errores
+            try:
+                self._conn.execute("CREATE SCHEMA IF NOT EXISTS main")
+            except Exception as e:
+                logger.warning(f"No se pudo crear el esquema main (puede ser ignorado): {e}")
+            
+            # Verificar si ya existen las tablas principales
+            try:
+                self._conn.execute("SELECT 1 FROM documents LIMIT 1")
+                self._conn.execute("SELECT 1 FROM chunks LIMIT 1")
+                logger.info("Las tablas ya existen en la base de datos, omitiendo creación de esquema")
+                self._schema_created = True
+                return True
+            except Exception:
+                # Si hay un error al consultar las tablas, es porque no existen y debemos crearlas
+                pass
+            
             # Crear secuencia para IDs de documentos
-            self._conn.execute("""
-                CREATE SEQUENCE IF NOT EXISTS doc_id_seq;
-            """)
+            try:
+                self._conn.execute("""
+                    CREATE SEQUENCE IF NOT EXISTS doc_id_seq;
+                """)
+            except Exception as e:
+                logger.warning(f"Error al crear secuencia doc_id_seq: {e}")
+                # Continuar a pesar del error
             
             # Crear tabla de documentos con ID autogenerado usando la secuencia
             # Usando CAST para asegurar que el tipo sea INTEGER
@@ -131,9 +217,13 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             """)
             
             # Crear secuencia para IDs de chunks
-            self._conn.execute("""
-                CREATE SEQUENCE IF NOT EXISTS chunk_id_seq;
-            """)
+            try:
+                self._conn.execute("""
+                    CREATE SEQUENCE IF NOT EXISTS chunk_id_seq;
+                """)
+            except Exception as e:
+                logger.warning(f"Error al crear secuencia chunk_id_seq: {e}")
+                # Continuar a pesar del error
             
             # Crear tabla de chunks con ID autogenerado usando la secuencia
             # Asegurando que document_id sea INTEGER para coincidir con la clave primaria
@@ -151,8 +241,23 @@ class DuckDBVectorialDatabase(VectorialDatabase):
                 )
             """)
             
+            # Crear tabla de metadatos si no existe
+            self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS db_metadata (
+                    key TEXT PRIMARY KEY,
+                    value TEXT,
+                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                );
+            """)
+            
             # Crear índice para búsquedas rápidas por document_id
             self._conn.execute("CREATE INDEX IF NOT EXISTS idx_chunks_document_id ON chunks(document_id)")
+            
+            # Guardar metadato sobre la dimensión de embeddings
+            try:
+                self.store_metadata("embedding_dim", str(self._embedding_dim))
+            except Exception as e:
+                logger.warning(f"No se pudo guardar metadata de embedding_dim: {e}")
             
             self._schema_created = True
             logger.info("Esquema de DuckDB creado correctamente")
@@ -173,17 +278,52 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             logger.debug("Extensiones DuckDB ya están cargadas")
             return True
             
+        # Evitar intentar cargar extensiones si no hay conexión
+        if not self._conn:
+            logger.error("No hay conexión a la base de datos para cargar extensiones")
+            return False
+            
         try:
-            # Intentar cargar la extensión httpfs para acceder a datos remotos
-            self._conn.execute("INSTALL httpfs;")
-            self._conn.execute("LOAD httpfs;")
+            # Leer las extensiones configuradas
+            from config import config
+            db_config = config.get_database_config()
+            duckdb_config = db_config.get('duckdb', {})
+            extensions = duckdb_config.get('extensions', [])  # Lista vacía por defecto
+            
+            # Filtrar explícitamente las extensiones no deseadas
+            excluded_extensions = ['httpfs', 'json']
+            extensions = [ext for ext in extensions if ext not in excluded_extensions]
+            
+            logger.info(f"Extensiones a cargar: {extensions}")
+            
+            # Instalar y cargar las extensiones configuradas
+            for extension in extensions:
+                try:
+                    # Comprobar si la extensión ya está cargada
+                    try:
+                        self._conn.execute(f"SELECT 1 FROM pragma_installed_extensions() WHERE extension_name = '{extension}'")
+                        already_installed = len(self._conn.fetchall()) > 0
+                    except:
+                        already_installed = False
+                    
+                    if not already_installed:
+                        logger.debug(f"Instalando extensión DuckDB '{extension}'...")
+                        self._conn.execute(f"INSTALL {extension};")
+                    
+                    logger.debug(f"Cargando extensión DuckDB '{extension}'...")
+                    self._conn.execute(f"LOAD {extension};")
+                    logger.info(f"Extensión DuckDB '{extension}' cargada correctamente")
+                except Exception as e:
+                    logger.debug(f"No se pudo cargar extensión '{extension}' (no es crítico): {e}")
             
             self._ext_loaded = True
-            logger.info("Extensiones DuckDB (httpfs) cargadas correctamente")
+            logger.info("Proceso de carga de extensiones DuckDB completado")
             return True
         except Exception as e:
-            logger.warning(f"No se pudieron cargar extensiones DuckDB: {e}")
-            return False
+            logger.warning(f"No se pudieron cargar todas las extensiones DuckDB: {e}")
+            # No fallar completamente si las extensiones no se cargan
+            self._ext_loaded = True
+            return True  # Devolver True para permitir que el proceso continúe incluso si hay problemas con las extensiones
     
     def serialize_vector(self, vector: List[float]) -> bytes:
         """
@@ -248,154 +388,286 @@ class DuckDBVectorialDatabase(VectorialDatabase):
         if not self._schema_created:
             self.create_schema()
         
-        # Verificar si el documento ya existe, usando el file_path
-        file_path = document.get("file_path", "")
-        if file_path and self.document_exists(file_path):
-            try:
-                # Obtener el ID del documento existente
-                result = self._conn.execute("SELECT id FROM documents WHERE file_path = ?", (file_path,)).fetchone()
-                if result:
-                    doc_id = result[0]
-                    logger.info(f"El documento ya existe con ID: {doc_id}, se omite la inserción")
-                    return doc_id
-            except Exception as e:
-                logger.warning(f"Error al verificar documento existente: {e}")
-                # Continuamos con la inserción normal en caso de error
-        
         try:
-            # Comenzar transacción
-            self._conn.execute("BEGIN TRANSACTION")
+            # Comenzar una transacción para garantizar consistencia
+            self.begin_transaction()
             
-            # Insertar documento sin especificar ID (se usará la secuencia doc_id_seq)
+            # Insertar el documento y obtener su ID
             self._conn.execute("""
-                INSERT INTO documents (title, url, file_path)
-                VALUES (?, ?, ?)
+                INSERT INTO documents (title, url, file_path, created_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                RETURNING id
             """, (
-                document.get("title", "Sin título"),
-                document.get("url", f"local://{file_path if file_path else 'unknown'}"),
-                file_path
+                document.get('title', ''),
+                document.get('url', ''),
+                document.get('file_path', ''),
             ))
             
-            # Obtener el ID generado para el documento
-            result = self._conn.execute("SELECT last_insert_rowid()").fetchone()
-            doc_id = result[0]
+            # Obtener el ID del documento insertado usando RETURNING
+            document_id = self._conn.fetchone()[0]
             
-            # Preparar para inserción masiva de chunks
-            chunk_params = []
+            # Insertar cada chunk
             for chunk in chunks:
-                embedding = chunk.get("embedding")
-                embedding_blob = None
+                # Procesar el embedding
+                embedding = chunk.get('embedding')
                 
-                # Procesar y serializar el embedding con la dimensión fija
+                # Serializar el embedding si existe
+                serialized_embedding = None
                 if embedding is not None:
-                    if isinstance(embedding, list):
-                        embedding_blob = self.serialize_vector(embedding)
-                    elif isinstance(embedding, np.ndarray):
-                        embedding_blob = self.serialize_vector(embedding.tolist())
+                    serialized_embedding = self.serialize_vector(embedding)
                 
-                # Añadir parámetros para este chunk (sin incluir el ID, que será generado por la secuencia)
-                chunk_params.append((
-                    doc_id,
-                    chunk.get("text", ""),
-                    chunk.get("header", None),
-                    chunk.get("page", None),
-                    embedding_blob,
-                    self._embedding_dim if embedding_blob else None
+                # Insertar el chunk con su embedding serializado
+                self._conn.execute("""
+                    INSERT INTO chunks (document_id, text, header, page, embedding, embedding_dim, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                """, (
+                    document_id,
+                    chunk.get('text', ''),
+                    chunk.get('header', None),
+                    chunk.get('page', None),
+                    serialized_embedding,
+                    self._embedding_dim if serialized_embedding else None
                 ))
             
-            # Insertar todos los chunks de una vez, sin especificar IDs
-            if chunk_params:
-                self._conn.executemany("""
-                    INSERT INTO chunks (document_id, text, header, page, embedding, embedding_dim)
-                    VALUES (?, ?, ?, ?, ?, ?)
-                """, chunk_params)
+            # Confirmar la transacción
+            self.commit_transaction()
             
-            # Confirmar transacción
-            self._conn.execute("COMMIT")
+            logger.info(f"Documento insertado con ID {document_id} y {len(chunks)} chunks")
             
-            logger.info(f"Documento insertado correctamente con ID: {doc_id} y {len(chunks)} chunks")
-            return doc_id
+            return document_id
+            
         except Exception as e:
-            # Revertir transacción en caso de error
-            self._conn.execute("ROLLBACK")
+            # Revertir los cambios en caso de error
+            self.rollback_transaction()
             logger.error(f"Error al insertar documento: {e}")
             raise
     
-    def document_exists(self, file_path: str) -> bool:
+    def optimize_database(self) -> bool:
         """
-        Verifica si un documento ya existe en la base de datos.
+        Optimiza la base de datos realizando operaciones de mantenimiento.
         
-        Args:
-            file_path: Ruta al archivo del documento
-            
         Returns:
-            True si el documento existe, False en caso contrario
+            True si la optimización fue exitosa, False en caso contrario
         """
         if not self._conn:
             logger.error("No hay conexión a la base de datos")
             return False
         
         try:
-            result = self._conn.execute(
-                "SELECT COUNT(*) FROM documents WHERE file_path = ?",
-                [file_path]
-            ).fetchone()
+            # Ejecutar vacuum para liberar espacio no utilizado
+            self._conn.execute("VACUUM")
             
-            return result[0] > 0 if result else False
+            # Analizar las tablas para mejorar el plan de consultas
+            self._conn.execute("ANALYZE chunks")
+            self._conn.execute("ANALYZE documents")
+            
+            logger.info("Base de datos DuckDB optimizada correctamente")
+            return True
         except Exception as e:
-            logger.error(f"Error al verificar existencia del documento: {e}")
+            logger.error(f"Error al optimizar la base de datos: {e}")
             return False
     
-    def get_chunks_by_document(self, document_id: int, offset: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
+    def vector_search(self, 
+                     query_embedding: List[float], 
+                     filters: Optional[Dict[str, Any]] = None, 
+                     n_results: int = 5, 
+                     include_neighbors: bool = False) -> List[Dict[str, Any]]:
         """
-        Obtiene todos los chunks asociados a un documento.
+        Realiza una búsqueda por similitud vectorial entre el embedding de consulta y los embeddings almacenados.
         
         Args:
-            document_id: ID del documento
-            offset: Desplazamiento para paginación
-            limit: Límite de resultados para paginación
+            query_embedding: Vector de embedding de la consulta
+            filters: Filtros adicionales para la búsqueda (ej. {'document_id': 123})
+            n_results: Número máximo de resultados a retornar
+            include_neighbors: Si se incluyen chunks vecinos en los resultados
             
         Returns:
-            Lista de chunks asociados al documento
+            Lista de chunks ordenados por similitud
         """
         if not self._conn:
             logger.error("No hay conexión a la base de datos")
             return []
         
+        # Verificar que el embedding no sea None o vacío
+        if query_embedding is None or len(query_embedding) == 0:
+            logger.error("El embedding de consulta es None o está vacío")
+            return []
+            
         try:
-            # Obtener todos los chunks del documento
-            result = self._conn.execute("""
-                SELECT c.id, c.document_id, c.text, c.embedding, c.embedding_dim, c.header, c.page,
-                       d.title, d.url, d.file_path, c.created_at
+            # Convertir a numpy array para cálculos más eficientes
+            query_embedding_np = np.array(query_embedding, dtype=np.float32)
+            
+            # Verificar dimensiones
+            if len(query_embedding_np) != self._embedding_dim:
+                logger.warning(f"Dimensión de embedding de consulta ({len(query_embedding_np)}) difiere "
+                              f"de la configurada ({self._embedding_dim}). Ajustando dimensiones.")
+                # Adaptar dimensiones
+                if len(query_embedding_np) > self._embedding_dim:
+                    # Truncar si es más grande
+                    query_embedding_np = query_embedding_np[:self._embedding_dim]
+                else:
+                    # Rellenar con ceros si es más pequeño
+                    pad_width = self._embedding_dim - len(query_embedding_np)
+                    query_embedding_np = np.pad(query_embedding_np, (0, pad_width), 'constant')
+            
+            # Normalizar para calcular similitud coseno
+            query_norm = np.linalg.norm(query_embedding_np)
+            if query_norm > 0:
+                query_embedding_np = query_embedding_np / query_norm
+            
+            # Decidir qué método de búsqueda usar
+            # Para búsquedas más grandes, usar el método por lotes
+            total_chunks = 0
+            try:
+                self._cursor.execute("SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL")
+                total_chunks = self._cursor.fetchone()[0]
+            except Exception as e:
+                logger.warning(f"No se pudo determinar el número de chunks: {e}")
+            
+            # Si hay muchos chunks, usar búsqueda por lotes
+            if total_chunks > 10000 and not filters:  # Solo usar fast_search si no hay filtros específicos
+                logger.info(f"Usando búsqueda vectorial por lotes para {total_chunks} chunks")
+                results = self.fast_vector_search(
+                    query_embedding=query_embedding_np.tolist(),
+                    n_results=n_results
+                )
+                
+                # Si se solicitan vecinos, agregarlos
+                if include_neighbors and results:
+                    results = self._add_neighbors_to_results(results)
+                    
+                return results
+            else:
+                # Usar búsqueda estándar
+                results = self._vector_search_manual(
+                    query_embedding=query_embedding_np.tolist(),
+                    filters=filters,
+                    n_results=n_results,
+                    include_neighbors=include_neighbors
+                )
+                
+                return results
+                
+        except Exception as e:
+            logger.error(f"Error en vector_search: {e}")
+            # En caso de error, intentar con el método manual
+            try:
+                return self._vector_search_manual(
+                    query_embedding=query_embedding,
+                    filters=filters,
+                    n_results=n_results,
+                    include_neighbors=include_neighbors
+                )
+            except Exception as e2:
+                logger.error(f"Error en búsqueda vectorial de respaldo: {e2}")
+                return []
+    
+    def _vector_search_manual(self, query_embedding: List[float], filters=None, n_results=5, include_neighbors=False):
+        """
+        Implementación manual de búsqueda vectorial cuando no hay extensiones especializadas.
+        
+        Args:
+            query_embedding: Vector de embedding de la consulta
+            filters: Filtros para la búsqueda
+            n_results: Número máximo de resultados
+            include_neighbors: Si se incluyen chunks vecinos en los resultados
+        
+        Returns:
+            Lista de chunks ordenados por similitud
+        """
+        results = []
+        
+        try:
+            # Serializar el embedding de consulta para comparación
+            query_embedding_blob = self.serialize_vector(query_embedding)
+            
+            # Construir la consulta base
+            base_query = """
+                SELECT c.id, c.document_id, c.text, c.header, c.page, c.embedding,
+                       d.title, d.url, d.file_path
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
-                WHERE c.document_id = ?
-                ORDER BY c.id
-                LIMIT ? OFFSET ?
-            """, [document_id, limit, offset]).fetchall()
+                WHERE c.embedding IS NOT NULL
+            """
             
-            chunks = []
-            for row in result:
-                chunk_id, doc_id, text, embedding_blob, embedding_dim, header, page, title, url, file_path, created_at = row
+            # Añadir condiciones de filtro si existen
+            params = []
+            if filters:
+                for key, value in filters.items():
+                    if key == 'document_id':
+                        base_query += " AND c.document_id = ?"
+                        params.append(value)
+                    elif key == 'header':
+                        base_query += " AND c.header LIKE ?"
+                        params.append(f"%{value}%")
+                    # Añadir más filtros según sea necesario
+            
+            # Ejecutar la consulta
+            self._cursor.execute(base_query, params)
+            all_chunks = self._cursor.fetchall()
+            
+            # Calcular similitud con cada chunk
+            chunk_similarities = []
+            for chunk in all_chunks:
+                # Extraer los campos del chunk
+                chunk_id = chunk[0]
+                document_id = chunk[1]
+                text = chunk[2]
+                header = chunk[3]
+                page = chunk[4]
+                embedding_blob = chunk[5]
+                title = chunk[6]
+                url = chunk[7]
+                file_path = chunk[8]
                 
-                chunks.append({
-                    "id": chunk_id,
-                    "document_id": doc_id,
-                    "text": text,
-                    "header": header,
-                    "page": page,
-                    "title": title,
-                    "url": url,
-                    "file_path": file_path,
-                    "created_at": created_at
-                })
+                # Deserializar el embedding
+                if embedding_blob:
+                    embedding = self.deserialize_vector(embedding_blob)
+                    
+                    # Calcular similitud por coseno
+                    similarity = self._cosine_similarity(
+                        np.array(query_embedding), 
+                        np.array(embedding)
+                    )
+                    
+                    # Filtrar por umbral de similitud
+                    if similarity >= self._similarity_threshold:
+                        chunk_similarities.append({
+                            'id': chunk_id,
+                            'document_id': document_id,
+                            'text': text,
+                            'header': header,
+                            'page': page,
+                            'title': title,
+                            'url': url,
+                            'file_path': file_path,
+                            'similarity': float(similarity)
+                        })
             
-            logger.info(f"Recuperados {len(chunks)} chunks para el documento ID: {document_id} (offset: {offset}, limit: {limit})")
-            return chunks
+            # Ordenar por similitud descendente
+            chunk_similarities.sort(key=lambda x: x['similarity'], reverse=True)
+            
+            # Limitar resultados
+            results = chunk_similarities[:n_results]
+            
+            # Incluir chunks vecinos si se solicita
+            if include_neighbors and results:
+                for i, result in enumerate(results.copy()):
+                    neighbors = self._get_adjacent_chunks(result['document_id'], result['id'])
+                    
+                    # Añadir vecinos a los resultados, marcándolos como vecinos
+                    for neighbor in neighbors:
+                        neighbor['is_neighbor'] = True
+                        neighbor['neighbor_of'] = result['id']
+                        # Asegurar que no estemos duplicando chunks
+                        if not any(r['id'] == neighbor['id'] for r in results):
+                            results.append(neighbor)
+            
         except Exception as e:
-            logger.error(f"Error al obtener chunks del documento {document_id}: {e}")
-            return []
-
+            logger.error(f"Error en búsqueda vectorial: {e}")
+        
+        return results
+    
     def _cosine_similarity(self, vec1: np.ndarray, vec2: np.ndarray) -> float:
         """
         Calcula la similitud de coseno entre dos vectores.
@@ -405,183 +677,131 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             vec2: Segundo vector
             
         Returns:
-            Valor de similitud de coseno entre 0 y 1
+            Similitud de coseno (float entre -1 y 1)
         """
-        # Asegurar que los vectores tengan la misma dimensión
-        min_dim = min(len(vec1), len(vec2))
-        vec1 = vec1[:min_dim]
-        vec2 = vec2[:min_dim]
-        
-        # Calcular similitud de coseno: cos(θ) = (a·b)/(|a|·|b|)
-        dot_product = np.dot(vec1, vec2)
-        norm_a = np.linalg.norm(vec1)
-        norm_b = np.linalg.norm(vec2)
+        # Manejar vectores vacíos
+        if len(vec1) == 0 or len(vec2) == 0:
+            return 0.0
+            
+        # Calcular normas
+        norm1 = np.linalg.norm(vec1)
+        norm2 = np.linalg.norm(vec2)
         
         # Evitar división por cero
-        if norm_a == 0 or norm_b == 0:
+        if norm1 == 0 or norm2 == 0:
             return 0.0
-        
-        return dot_product / (norm_a * norm_b)
-    
-    def vector_search(self, 
-                      query_embedding: List[float], 
-                      n_results: int = 5, 
-                      include_neighbors: bool = False) -> List[Dict[str, Any]]:
-        """
-        Realiza una búsqueda vectorial por similitud de coseno.
-        
-        El embedding de consulta se adapta automáticamente a la dimensión fija configurada.
-        
-        Args:
-            query_embedding: Vector de consulta
-            n_results: Número máximo de resultados a devolver
-            include_neighbors: Si es True, incluye chunks vecinos (mismo documento)
             
-        Returns:
-            Lista de chunks más similares al vector de consulta
-        """
-        if not self._conn:
-            logger.error("No hay conexión a la base de datos")
-            return []
-        
-        try:
-            # Adaptar el embedding a la dimensión fija
-            if len(query_embedding) != self._embedding_dim:
-                if len(query_embedding) > self._embedding_dim:
-                    query_embedding = query_embedding[:self._embedding_dim]
-                    logger.debug(f"Embedding de consulta truncado a {self._embedding_dim} dimensiones")
-                else:
-                    query_embedding = query_embedding + [0.0] * (self._embedding_dim - len(query_embedding))
-                    logger.debug(f"Embedding de consulta rellenado a {self._embedding_dim} dimensiones")
-            
-            # Convertir embedding de consulta a array numpy
-            query_vector = np.array(query_embedding, dtype=np.float32)
-            
-            # Normalizar el vector de consulta para similitud por coseno
-            query_norm = np.linalg.norm(query_vector)
-            if query_norm > 0:
-                query_vector = query_vector / query_norm
-            
-            # Obtener todos los chunks con sus embeddings
-            result = self._conn.execute("""
-                SELECT c.id, c.document_id, c.text, c.embedding, c.embedding_dim, 
-                       c.header, c.page, d.file_path, d.title, d.url
-                FROM chunks c
-                JOIN documents d ON c.document_id = d.id
-                WHERE c.embedding IS NOT NULL
-                ORDER BY c.id
-            """).fetchall()
-            
-            # Calcular similitud de coseno manualmente
-            similarities = []
-            for row in result:
-                chunk_id, doc_id, text, embedding_blob, _, header, page, file_path, title, url = row
-                
-                if not embedding_blob:
-                    continue
-                
-                # Deserializar embedding - siempre usar la dimensión fija de la clase
-                try:
-                    chunk_vector = np.array(self.deserialize_vector(embedding_blob), dtype=np.float32)
-                except Exception as e:
-                    logger.warning(f"Error al deserializar vector del chunk {chunk_id}: {e}")
-                    continue
-                
-                # Normalizar el vector del chunk para similitud por coseno
-                chunk_norm = np.linalg.norm(chunk_vector)
-                if chunk_norm > 0:
-                    chunk_vector = chunk_vector / chunk_norm
-                
-                # Calcular similitud de coseno
-                similarity = np.dot(query_vector, chunk_vector)
-                
-                # Solo incluir resultados por encima del umbral de similitud
-                if similarity >= self._similarity_threshold:
-                    similarities.append({
-                        "id": chunk_id,
-                        "document_id": doc_id,
-                        "text": text,
-                        "header": header,
-                        "page": page,
-                        "file_path": file_path,
-                        "title": title,
-                        "url": url,
-                        "similarity": float(similarity)
-                    })
-            
-            # Ordenar por similitud descendente
-            similarities.sort(key=lambda x: x["similarity"], reverse=True)
-            
-            # Tomar los primeros n_results
-            top_results = similarities[:n_results]
-            
-            # Si se solicita incluir vecinos, añadir chunks del mismo documento
-            if include_neighbors and top_results:
-                best_match = top_results[0]
-                neighbors = self._get_adjacent_chunks(best_match["document_id"], best_match["id"])
-                
-                if neighbors:
-                    # Agregar los vecinos al principio de los resultados
-                    results = neighbors + [best_match] + top_results[1:]
-                    return results
-            
-            logger.info(f"Búsqueda vectorial completada. Encontrados {len(top_results)} resultados.")
-            return top_results
-        except Exception as e:
-            logger.error(f"Error en búsqueda vectorial: {e}")
-            return []
+        # Calcular similitud de coseno
+        return np.dot(vec1, vec2) / (norm1 * norm2)
     
     def _get_adjacent_chunks(self, document_id: int, chunk_id: int) -> List[Dict[str, Any]]:
         """
-        Obtiene los chunks adyacentes (anterior y siguiente) a un chunk específico.
+        Obtiene los chunks adyacentes (anterior y siguiente) a un chunk dado.
         
         Args:
             document_id: ID del documento
-            chunk_id: ID del chunk de referencia
+            chunk_id: ID del chunk
             
         Returns:
-            Lista con los chunks adyacentes (anterior y siguiente)
+            Lista de chunks adyacentes
         """
-        adjacent_chunks = []
-        
+        if not self._conn:
+            return []
+            
         try:
-            # Obtener el chunk anterior (ID menor más cercano)
-            prev_chunk = self._conn.execute("""
+            # Obtener el chunk anterior
+            self._cursor.execute("""
                 SELECT c.id, c.document_id, c.text, c.header, c.page, d.title, d.url, d.file_path
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
                 WHERE c.document_id = ? AND c.id < ?
                 ORDER BY c.id DESC
                 LIMIT 1
-            """, [document_id, chunk_id]).fetchone()
+            """, (document_id, chunk_id))
+            prev_chunk = self._cursor.fetchone()
             
-            if prev_chunk:
-                chunk_id, doc_id, text, header, page, title, url, file_path = prev_chunk
-                adjacent_chunks.append({
-                    "id": chunk_id,
-                    "document_id": doc_id,
-                    "text": text,
-                    "header": header,
-                    "page": page,
-                    "title": title,
-                    "url": url,
-                    "file_path": file_path,
-                    "similarity": 0.0  # Marcar como vecino con similitud 0
-                })
-            
-            # Obtener el chunk siguiente (ID mayor más cercano)
-            next_chunk = self._conn.execute("""
+            # Obtener el chunk siguiente
+            self._cursor.execute("""
                 SELECT c.id, c.document_id, c.text, c.header, c.page, d.title, d.url, d.file_path
                 FROM chunks c
                 JOIN documents d ON c.document_id = d.id
                 WHERE c.document_id = ? AND c.id > ?
                 ORDER BY c.id ASC
                 LIMIT 1
-            """, [document_id, chunk_id]).fetchone()
+            """, (document_id, chunk_id))
+            next_chunk = self._cursor.fetchone()
             
-            if next_chunk:
-                chunk_id, doc_id, text, header, page, title, url, file_path = next_chunk
+            # Procesar los resultados
+            adjacent_chunks = []
+            
+            if prev_chunk:
                 adjacent_chunks.append({
+                    'id': prev_chunk[0],
+                    'document_id': prev_chunk[1],
+                    'text': prev_chunk[2],
+                    'header': prev_chunk[3],
+                    'page': prev_chunk[4],
+                    'title': prev_chunk[5],
+                    'url': prev_chunk[6],
+                    'file_path': prev_chunk[7],
+                    'position': 'previous'
+                })
+                
+            if next_chunk:
+                adjacent_chunks.append({
+                    'id': next_chunk[0],
+                    'document_id': next_chunk[1],
+                    'text': next_chunk[2],
+                    'header': next_chunk[3],
+                    'page': next_chunk[4],
+                    'title': next_chunk[5],
+                    'url': next_chunk[6],
+                    'file_path': next_chunk[7],
+                    'position': 'next'
+                })
+                
+            return adjacent_chunks
+            
+        except Exception as e:
+            logger.error(f"Error al obtener chunks adyacentes: {e}")
+            return []
+    
+    def get_chunks_by_document(self, document_id: int, offset: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
+        """
+        Obtiene los chunks asociados a un documento específico a partir de su ID.
+        
+        Args:
+            document_id: ID del documento del cual se desean obtener los chunks.
+            offset: Desfase para la paginación (por defecto 0).
+            limit: Número máximo de chunks a retornar (por defecto 100).
+            
+        Returns:
+            Lista de diccionarios, cada uno representando un chunk.
+        """
+        if not self._conn:
+            logger.error("No hay conexión establecida en DuckDBVectorialDatabase")
+            return []
+        
+        try:
+            # Obtener chunks con la información del documento
+            query = """
+                SELECT c.id, c.document_id, c.text, c.header, c.page, c.embedding, 
+                       d.title, d.url, d.file_path, c.created_at
+                FROM chunks c
+                JOIN documents d ON c.document_id = d.id
+                WHERE c.document_id = ?
+                ORDER BY c.id ASC
+                LIMIT ? OFFSET ?
+            """
+            self._cursor.execute(query, (document_id, limit, offset))
+            rows = self._cursor.fetchall()
+            
+            chunks = []
+            for row in rows:
+                chunk_id, doc_id, text, header, page, embedding_blob, title, url, file_path, created_at = row
+                
+                # Construir el diccionario del chunk
+                chunk = {
                     "id": chunk_id,
                     "document_id": doc_id,
                     "text": text,
@@ -590,81 +810,67 @@ class DuckDBVectorialDatabase(VectorialDatabase):
                     "title": title,
                     "url": url,
                     "file_path": file_path,
-                    "similarity": 0.0  # Marcar como vecino con similitud 0
-                })
+                    "created_at": created_at
+                }
+                
+                # Si hay embedding, deserializarlo
+                if embedding_blob is not None:
+                    chunk["embedding"] = self.deserialize_vector(embedding_blob)
+                
+                chunks.append(chunk)
             
-            return adjacent_chunks
+            logger.info(f"Recuperados {len(chunks)} chunks para el documento ID: {document_id} (offset: {offset}, limit: {limit})")
+            return chunks
+            
         except Exception as e:
-            logger.error(f"Error al obtener chunks adyacentes: {e}")
+            logger.error(f"Error en get_chunks_by_document: {e}")
             return []
     
-    def create_vector_index(self, force_rebuild: bool = False) -> bool:
+    def batch_insert_chunks(self, chunks: List[Dict[str, Any]], document_id: int) -> bool:
         """
-        Crea o reconstruye un índice vectorial para búsquedas rápidas.
+        Inserta múltiples chunks en la base de datos de forma optimizada.
         
         Args:
-            force_rebuild: Si es True, fuerza la reconstrucción del índice aunque ya exista
+            chunks: Lista de diccionarios con información de chunks
+            document_id: ID del documento al que pertenecen estos chunks
             
         Returns:
-            True si se creó correctamente, False en caso contrario
+            True si la inserción fue exitosa, False en caso contrario
         """
-        # DuckDB actualmente no soporta índices vectoriales nativos
-        # Esta función es un placeholder para compatibilidad con la interfaz
-        logger.info("Índices vectoriales no soportados nativamente en DuckDB")
-        return True
-    
-    def insert_chunks(self, chunks: List[Dict[str, Any]]) -> bool:
-        """
-        Inserta múltiples chunks en la base de datos.
-        
-        Los embeddings se adaptan automáticamente a la dimensión fija configurada.
-        
-        Args:
-            chunks: Lista de diccionarios con los datos de los chunks
-                Cada chunk debe contener al menos 'text' y 'embedding'
-        
-        Returns:
-            bool: True si la inserción fue exitosa, False en caso contrario.
-        """
-        if not self._conn:
-            logger.error("No hay conexión a la base de datos")
+        if not self._conn or not self._schema_created:
+            logger.error("No hay conexión a la base de datos o el esquema no está creado")
             return False
             
+        if not chunks:
+            logger.warning("No hay chunks para insertar")
+            return True
+            
         try:
-            # Iniciar transacción
-            self._conn.execute("BEGIN TRANSACTION")
+            # Comenzar transacción para optimizar rendimiento
+            self.begin_transaction()
             
             # Preparar parámetros para inserción masiva
             chunk_params = []
             
             for chunk in chunks:
-                # Serializar el embedding usando la dimensión fija
+                # Procesar el embedding
                 embedding = chunk.get('embedding')
-                embedding_blob = None
+                serialized_embedding = None
                 
                 if embedding is not None:
-                    if isinstance(embedding, list):
-                        embedding_blob = self.serialize_vector(embedding)
-                    elif isinstance(embedding, np.ndarray):
-                        embedding_blob = self.serialize_vector(embedding.tolist())
+                    serialized_embedding = self.serialize_vector(embedding)
                 
-                # Extraer otros campos
-                document_id = chunk.get('document_id')
-                text = chunk.get('text', '')
-                header = chunk.get('header')
-                page = chunk.get('page')
-                
-                # Añadir a la lista de parámetros (sin incluir el ID, que será generado por la secuencia)
+                # Preparar parámetros para este chunk
                 chunk_params.append((
                     document_id,
-                    text,
-                    header,
-                    page,
-                    embedding_blob,
-                    self._embedding_dim if embedding_blob else None
+                    chunk.get('text', ''),
+                    chunk.get('header', None),
+                    chunk.get('page', None),
+                    serialized_embedding,
+                    self._embedding_dim if serialized_embedding else None
                 ))
             
-            # Insertar todos los chunks de una vez, sin especificar IDs
+            # Realizar inserción masiva
             if chunk_params:
                 self._conn.executemany("""
                     INSERT INTO chunks (document_id, text, header, page, embedding, embedding_dim)
@@ -672,189 +878,243 @@ class DuckDBVectorialDatabase(VectorialDatabase):
                 """, chunk_params)
             
             # Confirmar transacción
-            self._conn.execute("COMMIT")
+            self.commit_transaction()
             
-            logger.info(f"Se insertaron {len(chunks)} chunks en la base de datos DuckDB")
+            logger.info(f"Insertados {len(chunks)} chunks en lote para el documento {document_id}")
             return True
-            
         except Exception as e:
-            self._conn.execute("ROLLBACK")
-            logger.error(f"Error al insertar chunks en DuckDB: {e}")
+            # Revertir cambios en caso de error
+            self.rollback_transaction()
+            logger.error(f"Error al insertar chunks en lote: {e}")
             return False
-    
-    def insert_chunk(self, text: str, embedding: List[float], metadata: Dict[str, Any] = None) -> str:
+            
+    def convert_embedding_dimension(self, embedding: List[float], target_dim: int) -> np.ndarray:
         """
-        Inserta un único chunk en la base de datos.
+        Adapta la dimensión de un embedding al tamaño deseado.
         
         Args:
-            text: Texto del chunk
-            embedding: Vector de embedding
-            metadata: Metadatos asociados al chunk
+            embedding: Vector original
+            target_dim: Dimensión objetivo
             
         Returns:
-            ID del chunk insertado como string, None si falla
+            Vector redimensionado como numpy array
+        """
+        embedding_np = np.array(embedding, dtype=np.float32)
+        current_dim = len(embedding_np)
+        
+        if current_dim == target_dim:
+            return embedding_np
+            
+        logger.debug(f"Adaptando dimensión de embedding de {current_dim} a {target_dim}")
+        
+        if current_dim > target_dim:
+            # Truncar si es más grande
+            return embedding_np[:target_dim]
+        else:
+            # Rellenar con ceros si es más pequeño
+            padding = np.zeros(target_dim - current_dim, dtype=np.float32)
+            return np.concatenate([embedding_np, padding])
+            
+    def fast_vector_search(self, query_embedding: List[float], n_results: int = 5) -> List[Dict[str, Any]]:
+        """
+        Versión optimizada de búsqueda vectorial para grandes volúmenes de datos.
+        
+        Utiliza técnicas de procesamiento por lotes para mejorar el rendimiento.
+        
+        Args:
+            query_embedding: Vector de embedding de la consulta
+            n_results: Número máximo de resultados a retornar
+            
+        Returns:
+            Lista de chunks ordenados por similitud
         """
         if not self._conn:
             logger.error("No hay conexión a la base de datos")
-            return None
+            return []
+        
+        try:    
+            # Normalizar y adaptar el embedding de consulta
+            query_embedding_np = np.array(query_embedding, dtype=np.float32)
+            query_norm = np.linalg.norm(query_embedding_np)
+            if query_norm > 0:
+                query_embedding_np = query_embedding_np / query_norm
+                
+            if len(query_embedding_np) != self._embedding_dim:
+                query_embedding_np = self.convert_embedding_dimension(query_embedding, self._embedding_dim)
+                
+            # Serializar embedding para comparación
+            query_embedding_blob = self.serialize_vector(query_embedding_np.tolist())
+            
+            # Obtener todos los IDs de chunks con embeddings en un solo paso
+            try:
+                self._cursor.execute("""
+                    SELECT id FROM chunks WHERE embedding IS NOT NULL
+                """)
+                chunk_ids = [row[0] for row in self._cursor.fetchall()]
+                
+                # Si no hay chunks, retornar lista vacía
+                if not chunk_ids:
+                    logger.warning("No se encontraron chunks con embeddings en la base de datos")
+                    return []
+            except Exception as db_error:
+                logger.error(f"Error al obtener IDs de chunks: {db_error}")
+                return []
+                
+            # Procesar en lotes para evitar sobrecarga de memoria
+            batch_size = 1000
+            all_similarities = []
+            total_processed = 0
+            
+            for i in range(0, len(chunk_ids), batch_size):
+                batch_ids = chunk_ids[i:i+batch_size]
+                placeholders = ', '.join(['?' for _ in batch_ids])
+                
+                try:
+                    # Obtener embeddings para este lote
+                    self._cursor.execute(f"""
+                        SELECT c.id, c.document_id, c.text, c.header, c.page, c.embedding,
+                               d.title, d.url, d.file_path
+                        FROM chunks c
+                        JOIN documents d ON c.document_id = d.id
+                        WHERE c.id IN ({placeholders})
+                    """, batch_ids)
+                    
+                    batch_results = self._cursor.fetchall()
+                    
+                    # Calcular similitudes para cada chunk en el lote
+                    for row in batch_results:
+                        if row is None or len(row) < 6:
+                            continue
+                            
+                        chunk_id, doc_id, text, header, page, embedding_blob = row[:6]
+                        title, url, file_path = row[6:9] if len(row) >= 9 else (None, None, None)
+                        
+                        if embedding_blob:
+                            try:
+                                # Deserializar embedding
+                                embedding = self.deserialize_vector(embedding_blob)
+                                
+                                # Calcular similitud
+                                similarity = self._cosine_similarity(
+                                    query_embedding_np, 
+                                    np.array(embedding, dtype=np.float32)
+                                )
+                                
+                                # Agregar a resultados si supera el umbral
+                                if similarity >= self._similarity_threshold:
+                                    all_similarities.append({
+                                        'id': chunk_id,
+                                        'document_id': doc_id,
+                                        'text': text,
+                                        'header': header,
+                                        'page': page,
+                                        'title': title,
+                                        'url': url,
+                                        'file_path': file_path,
+                                        'similarity': float(similarity)
+                                    })
+                            except Exception as vec_error:
+                                logger.debug(f"Error procesando vector para chunk {chunk_id}: {vec_error}")
+                                continue
+                    
+                    total_processed += len(batch_results)
+                    
+                except Exception as batch_error:
+                    logger.error(f"Error procesando lote de chunks {i}-{i+batch_size}: {batch_error}")
+                    # Continuar con el siguiente lote
+            
+            # Log informativo sobre el procesamiento
+            logger.info(f"Procesados {total_processed} chunks en búsqueda vectorial. Encontrados {len(all_similarities)} resultados relevantes.")
+            
+            # Ordenar por similitud y limitar resultados
+            all_similarities.sort(key=lambda x: x['similarity'], reverse=True)
+            return all_similarities[:n_results]
+                
+        except Exception as e:
+            logger.error(f"Error en búsqueda vectorial rápida: {e}")
+            return []
+    
+    def store_metadata(self, key: str, value: Any) -> bool:
+        """
+        Almacena un metadato en la base de datos.
+        
+        Args:
+            key: Clave del metadato
+            value: Valor del metadato
+            
+        Returns:
+            True si se almacenó correctamente, False en caso contrario
+        """
+        if not self._conn:
+            logger.warning(f"No se puede almacenar metadato '{key}': no hay conexión a la base de datos")
+            
+            # Si tenemos una ruta de base de datos guardada, intentar reconectar
+            if self._db_path:
+                logger.info(f"Intentando reconectar a la base de datos {self._db_path} para guardar metadatos")
+                if self.connect(self._db_path):
+                    logger.info("Reconexión exitosa, continuando con el almacenamiento de metadatos")
+                else:
+                    logger.error(f"No se pudo reconectar a la base de datos {self._db_path}")
+                    return False
+            else:
+                return False
             
         try:
-            # Preparar el embedding
-            embedding_blob = self.serialize_vector(embedding) if embedding else None
+            # Verificar si la tabla existe
+            try:
+                self._conn.execute("SELECT 1 FROM db_metadata LIMIT 1")
+            except Exception:
+                # Si hay error, crear la tabla
+                self._conn.execute("""
+                    CREATE TABLE IF NOT EXISTS db_metadata (
+                        key TEXT PRIMARY KEY,
+                        value TEXT,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
             
-            # Extraer campos específicos de metadata si existen
-            document_id = None
-            header = None
-            page = None
+            # Convertir el valor a string si es necesario
+            if not isinstance(value, str):
+                if isinstance(value, (int, float, bool, type(None))):
+                    value = str(value)
+                else:
+                    value = json.dumps(value)
             
-            if metadata:
-                document_id = metadata.get('document_id')
-                header = metadata.get('header')
-                page = metadata.get('page')
-            
-            # Insertar el chunk sin especificar ID (se usará la secuencia chunk_id_seq)
+            # Insertar o actualizar el metadato
             self._conn.execute("""
-                INSERT INTO chunks (document_id, text, header, page, embedding, embedding_dim)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, [
-                document_id,
-                text,
-                header,
-                page,
-                embedding_blob,
-                self._embedding_dim if embedding_blob else None
-            ])
+                INSERT OR REPLACE INTO db_metadata (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP);
+            """, (key, value))
             
-            # Obtener el ID generado
-            result = self._conn.execute("SELECT last_insert_rowid()").fetchone()
-            chunk_id = result[0]
-            
-            return str(chunk_id)
-            
-        except Exception as e:
-            logger.error(f"Error al insertar chunk en DuckDB: {e}")
-            return None
-            
-    def optimize_database(self) -> bool:
-        """
-        Optimiza la base de datos realizando operaciones de limpieza y compactación.
-        
-        Returns:
-            True si se optimizó correctamente, False en caso contrario
-        """
-        if not self._conn:
-            logger.error("No hay conexión a la base de datos")
-            return False
-        
-        if self._db_path == ':memory:':
-            logger.info("Base de datos en memoria, no se requiere optimización")
-            return True
-            
-        try:
-            self._conn.execute("VACUUM;")
-            logger.info("Base de datos DuckDB optimizada correctamente")
             return True
         except Exception as e:
-            logger.error(f"Error al optimizar la base de datos DuckDB: {e}")
+            logger.error(f"Error al almacenar metadato '{key}': {e}")
             return False
     
-    def vector_search(self, 
-                     query_embedding: List[float], 
-                     filters: Optional[Dict[str, Any]] = None, 
-                     n_results: int = 5, 
-                     include_neighbors: bool = False) -> List[Dict[str, Any]]:
+    def _add_neighbors_to_results(self, results: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """
-        Realiza una búsqueda vectorial por similitud de coseno.
-        
-        El embedding de consulta se adapta automáticamente a la dimensión fija configurada.
+        Añade chunks vecinos a los resultados de búsqueda.
         
         Args:
-            query_embedding: Vector de consulta
-            filters: Filtros para la búsqueda (por ejemplo, document_id, min_similarity)
-            n_results: Número máximo de resultados a devolver
-            include_neighbors: Si es True, incluye chunks vecinos (mismo documento)
+            results: Lista de resultados de búsqueda
             
         Returns:
-            Lista de chunks más similares al vector de consulta
+            Lista aumentada con chunks vecinos
         """
-        if not self._conn:
-            logger.error("No hay conexión a la base de datos")
-            return []
+        if not results:
+            return results
+            
+        final_results = results.copy()
         
-        # DuckDB no tiene una implementación nativa de búsqueda vectorial
-        # así que usamos la implementación manual de la clase base
-        return self._vector_search_manual(
-            query_embedding=query_embedding,
-            filters=filters,
-            n_results=n_results,
-            include_neighbors=include_neighbors
-        )
-    
-    def _get_adjacent_chunks(self, document_id: int, chunk_id: int) -> List[Dict[str, Any]]:
-        """
-        Obtiene los chunks adyacentes (anterior y siguiente) a un chunk específico.
+        for result in results:
+            neighbors = self._get_adjacent_chunks(result['document_id'], result['id'])
+            
+            # Añadir vecinos a los resultados, marcándolos como vecinos
+            for neighbor in neighbors:
+                neighbor['is_neighbor'] = True
+                neighbor['neighbor_of'] = result['id']
+                # Asegurar que no estemos duplicando chunks
+                if not any(r['id'] == neighbor['id'] for r in final_results):
+                    final_results.append(neighbor)
         
-        Args:
-            document_id: ID del documento
-            chunk_id: ID del chunk de referencia
-            
-        Returns:
-            Lista con los chunks adyacentes (anterior y siguiente)
-        """
-        # Implementación específica para DuckDB
-        adjacent_chunks = []
-        
-        try:
-            # Obtener el chunk anterior (ID menor más cercano)
-            prev_chunk = self._conn.execute("""
-                SELECT c.id, c.document_id, c.text, c.header, c.page, d.title, d.url, d.file_path
-                FROM chunks c
-                JOIN documents d ON c.document_id = d.id
-                WHERE c.document_id = ? AND c.id < ?
-                ORDER BY c.id DESC
-                LIMIT 1
-            """, [document_id, chunk_id]).fetchone()
-            
-            if prev_chunk:
-                chunk_id, doc_id, text, header, page, title, url, file_path = prev_chunk
-                adjacent_chunks.append({
-                    "id": chunk_id,
-                    "document_id": doc_id,
-                    "text": text,
-                    "header": header,
-                    "page": page,
-                    "title": title,
-                    "url": url,
-                    "file_path": file_path,
-                    "similarity": 0.0  # Marcar como vecino con similitud 0
-                })
-            
-            # Obtener el chunk siguiente (ID mayor más cercano)
-            next_chunk = self._conn.execute("""
-                SELECT c.id, c.document_id, c.text, c.header, c.page, d.title, d.url, d.file_path
-                FROM chunks c
-                JOIN documents d ON c.document_id = d.id
-                WHERE c.document_id = ? AND c.id > ?
-                ORDER BY c.id ASC
-                LIMIT 1
-            """, [document_id, chunk_id]).fetchone()
-            
-            if next_chunk:
-                chunk_id, doc_id, text, header, page, title, url, file_path = next_chunk
-                adjacent_chunks.append({
-                    "id": chunk_id,
-                    "document_id": doc_id,
-                    "text": text,
-                    "header": header,
-                    "page": page,
-                    "title": title,
-                    "url": url,
-                    "file_path": file_path,
-                    "similarity": 0.0  # Marcar como vecino con similitud 0
-                })
-            
-            return adjacent_chunks
-            
-        except Exception as e:
-            logger.error(f"Error al obtener chunks adyacentes en DuckDB: {e}")
-            return []
+        return final_results

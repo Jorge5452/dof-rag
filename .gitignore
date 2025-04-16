@@ -9,3 +9,5 @@ sessions/
 test/analisis_resultados/
 test/resultados_db_tests/
 test/resultados_pruebas/
+
+rag_system.log

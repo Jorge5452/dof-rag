@@ -18,29 +18,27 @@ import sys
 import time
 from pathlib import Path
 from typing import Optional, List, Tuple, Dict, Any
+from datetime import datetime
 
-# Importar colorama para salida con colores
-from colorama import init, Fore, Style
+# Importación global necesaria para evitar errores de referencia
+from config import config
 
-# Inicializar colorama para que funcione en todas las plataformas
-init(autoreset=True)
-
-# Configuración de colores para el formato de salida
-C_TITLE = Fore.CYAN + Style.BRIGHT
-C_SUBTITLE = Fore.BLUE + Style.BRIGHT
-C_SUCCESS = Fore.GREEN + Style.BRIGHT
-C_ERROR = Fore.RED + Style.BRIGHT
-C_WARNING = Fore.YELLOW + Style.BRIGHT
-C_HIGHLIGHT = Fore.MAGENTA + Style.BRIGHT
-C_COMMAND = Fore.YELLOW
-C_PARAM = Fore.GREEN
-C_INFO = Fore.WHITE
-C_VALUE = Fore.CYAN
-C_PROMPT = Style.BRIGHT + Fore.GREEN
-C_RESET = Style.RESET_ALL
+# Importar utilidades del sistema
+from modulos.utils.formatting import (
+    C_TITLE, C_SUBTITLE, C_SUCCESS, C_ERROR, C_WARNING, C_HIGHLIGHT, 
+    C_COMMAND, C_PARAM, C_INFO, C_VALUE, C_PROMPT, C_RESET, C_SEPARATOR, Style,
+    print_header, print_separator, print_status, print_formatted_response,
+    print_command_help, print_useful_commands
+)
+from modulos.utils.logging_utils import setup_logging, silence_verbose_loggers
 
 # Configurar logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+setup_logging(level=logging.INFO, log_file="rag_system.log")
+
+# Silenciar módulos verbosos
+silence_verbose_loggers()
+
+# Obtener logger para este módulo
 logger = logging.getLogger(__name__)
 
 def main() -> int:
@@ -50,9 +48,6 @@ def main() -> int:
     Returns:
         int: Código de salida (0 para éxito, 1 para error)
     """
-    # Importaciones aquí para evitar cargarlas cuando no sean necesarias
-    from config import config
-    
     # Configurar el parser de argumentos
     parser = argparse.ArgumentParser(
         description="Sistema RAG para ingestión de documentos y consultas",
@@ -143,7 +138,7 @@ def handle_ingest_mode(args: argparse.Namespace) -> int:
         return 1
         
     # Procesar documentos
-    logger.info(f"{C_SUCCESS}Iniciando ingestión de documentos desde: {args.files}")
+    logger.info(f"{C_HIGHLIGHT}Iniciando ingestión de documentos desde: {C_VALUE}{args.files}")
     process_documents(args.files, session_name=args.session_name)
     return 0
 
@@ -160,35 +155,117 @@ def handle_query_mode(args: argparse.Namespace) -> int:
     # Cargar módulos solo cuando se necesiten para consulta
     from main import process_query
     
+    # Configurar nivel de logging basado en el modo de depuración
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+    else:
+        # Reducir verbosidad de logging en modo normal
+        logging.getLogger().setLevel(logging.WARNING)
+        silence_verbose_loggers()
+    
     # Verificar si estamos en modo interactivo (consulta vacía)
     interactive_mode = args.query == ''
     
     # En modo consulta, verificar si se solicita mostrar las bases de datos
-    if args.show_dbs:
-        sorted_dbs = show_available_databases()
+    if args.show_dbs or args.db_index is None:
+        # Mostrar un resumen simple de las bases de datos
+        print("\n" + C_TITLE + " BASES DE DATOS DISPONIBLES " + C_RESET)
+        print_separator()
+        
+        sorted_dbs = show_available_databases(show_output=False)
+        
+        # Mostrar lista simplificada de bases de datos (solo las más recientes)
+        for i, (name, db) in enumerate(sorted_dbs[:5]):  # Limitar a 5 bases de datos
+            created_date = datetime.fromtimestamp(db.get('created_at', 0)).strftime('%Y-%m-%d')
+            model = db.get('embedding_model', 'desconocido')
+            
+            if i == 0:  # Resaltar la más reciente
+                print(f"{C_SUCCESS}[{i}] {C_HIGHLIGHT}{name}{C_RESET} - {created_date} - Modelo: {C_VALUE}{model}{C_RESET}")
+            else:
+                print(f"[{i}] {C_HIGHLIGHT}{name}{C_RESET} - {created_date} - Modelo: {model}")
+        
+        print_separator()
+        
         # Si solo se pidió mostrar las bases de datos y no se proporcionó índice, preguntar
         if args.db_index is None:
             try:
-                db_index = input(f"\n{C_PROMPT}Seleccione el índice de la base de datos a utilizar (Enter para usar la más reciente): ")
+                db_index = input(f"\n{C_PROMPT}Seleccione índice de base de datos (Enter para usar la más reciente): ")
                 if db_index.strip():
                     args.db_index = int(db_index)
             except ValueError:
-                print(f"{C_WARNING}Entrada inválida. Usando la base de datos más reciente.")
+                print_status("warning", "Entrada inválida. Usando la base de datos más reciente.")
     
+    # Mostrar un mensaje de inicio
     if interactive_mode:
         # Modo interactivo
         run_interactive_mode(args.chunks, args.model, args.session, args.db_index)
     else:
-        # Modo de consulta única
-        logger.info(f"{C_SUCCESS}Procesando consulta: {args.query}")
-        response = process_query(
-            args.query, 
-            n_chunks=args.chunks, 
-            model=args.model, 
-            session_id=args.session,
-            db_index=args.db_index
-        )
-        print_formatted_response("RESPUESTA", response)
+        # Modo de consulta única - Interfaz simplificada
+        print("\n" + C_SUBTITLE + " CONSULTA: " + C_VALUE + f"{args.query}" + C_RESET)
+        
+        # Timer para medir tiempo de respuesta
+        start_time = time.time()
+        
+        # Reducir temporalmente el nivel de log durante la consulta si no estamos en modo debug
+        original_log_level = logging.getLogger().level
+        if not args.debug:
+            logging.getLogger().setLevel(logging.WARNING)
+            
+        try:
+            # Procesar la consulta
+            response = process_query(
+                args.query, 
+                n_chunks=args.chunks, 
+                model=args.model, 
+                session_id=args.session,
+                db_index=args.db_index
+            )
+        except Exception as e:
+            # En caso de error, mostrar mensaje claro
+            response = f"Error al procesar consulta: {str(e)}"
+        finally:
+            # Restaurar nivel de log original
+            logging.getLogger().setLevel(original_log_level)
+        
+        # Mostrar la respuesta con mejor formato
+        print("\n" + C_TITLE + " RESPUESTA " + C_RESET)
+        print_separator()
+        
+        # Extraer solo la sección de respuesta si contiene separadores de formato
+        if "=======================  RESPUESTA  =======================" in response:
+            parts = response.split("=======================  RESPUESTA  =======================")
+            if len(parts) > 1:
+                # Extraer la parte de respuesta (sin encabezado)
+                response_text = parts[1].split("=======================  CONTEXTO  =======================")[0].strip()
+                context_text = response.split("=======================  CONTEXTO  =======================")
+                
+                # Imprimir solo la respuesta primero
+                print(response_text)
+                
+                # Mostrar tiempo de respuesta después de la respuesta principal
+                elapsed_time = time.time() - start_time
+                print_separator()
+                print_status("info", f"Tiempo de respuesta: {elapsed_time:.2f} segundos")
+                
+                # Imprimir contexto si existe - Ahora siempre mostramos el contexto
+                if len(context_text) > 1:
+                    print("\n" + C_TITLE + " CONTEXTO UTILIZADO " + C_RESET)
+                    print_separator()
+                    print(context_text[1].strip())
+            else:
+                print(response)
+                
+                # Mostrar tiempo de respuesta
+                elapsed_time = time.time() - start_time
+                print_separator()
+                print_status("info", f"Tiempo de respuesta: {elapsed_time:.2f} segundos")
+        else:
+            print(response)
+            
+            # Mostrar tiempo de respuesta
+            elapsed_time = time.time() - start_time
+            print_separator()
+            print_status("info", f"Tiempo de respuesta: {elapsed_time:.2f} segundos")
     
     return 0
 
@@ -228,20 +305,28 @@ def run_interactive_mode(n_chunks: int = 5, model: Optional[str] = None,
     """
     # Importar solo cuando sea necesario para el modo interactivo
     from main import process_query
+    from colorama import Style  # Asegurar que Style está disponible
     
-    print_header("MODO INTERACTIVO DEL SISTEMA RAG")
+    # Configurar nivel de logging para el modo interactivo
+    logging.getLogger().setLevel(logging.WARNING)
+    silence_verbose_loggers()
     
-    print_command_help([
-        f"{C_INFO}• Escribe tus preguntas y presiona Enter para obtener respuestas.",
-        f"{C_INFO}• Escribe {C_COMMAND}'salir'{C_INFO}, {C_COMMAND}'exit'{C_INFO} o {C_COMMAND}'q'{C_INFO} para terminar la sesión.",
-        f"{C_INFO}• Escribe {C_COMMAND}'dbs'{C_INFO} para mostrar las bases de datos disponibles.",
-        f"{C_INFO}• Escribe {C_COMMAND}'cambiar <n>'{C_INFO} para cambiar a la base de datos con índice <n>."
-    ])
+    print("\n" + C_TITLE + " MODO INTERACTIVO " + C_RESET)
+    print_separator()
+    
+    # Mostrar instrucciones simplificadas
+    print_status("info", "Escribe tus preguntas y presiona Enter para obtener respuestas.")
+    print_status("info", f"Para salir: {C_COMMAND}salir{C_RESET}, {C_COMMAND}exit{C_RESET} o {C_COMMAND}q{C_RESET}")
+    print_status("info", f"Para ver bases de datos: {C_COMMAND}dbs{C_RESET}")
+    print_status("info", f"Para cambiar base de datos: {C_COMMAND}cambiar <n>{C_RESET}")
+    print_status("info", f"Para ver ayuda: {C_COMMAND}ayuda{C_RESET} o {C_COMMAND}help{C_RESET}")
+    print_separator()
     
     # Variables para mantener estado
     current_db_index = db_index
     current_session_id = session_id
     current_model = model
+    history = []
     
     # Bucle principal del modo interactivo
     while True:
@@ -250,119 +335,168 @@ def run_interactive_mode(n_chunks: int = 5, model: Optional[str] = None,
             query = input(f"\n{C_PROMPT}> ")
             
             # Verificar comandos especiales
-            query = query.strip()
-            if not query:
-                continue
-                
-            # Comandos para salir
-            if query.lower() in ['salir', 'exit', 'q', 'quit']:
-                print(f"{C_SUCCESS}¡Hasta luego! Saliendo del modo interactivo.")
+            if query.lower() in ["salir", "exit", "q", "quit"]:
+                print_status("success", "Sesión finalizada.")
                 break
                 
-            # Comando para mostrar bases de datos
-            if query.lower() == 'dbs':
-                show_available_databases()
+            elif query.lower() == "dbs":
+                # Mostrar bases de datos disponibles
+                sorted_dbs = show_available_databases()
                 continue
                 
-            # Comando para cambiar de base de datos
-            if query.lower().startswith('cambiar '):
+            elif query.lower().startswith("cambiar "):
+                # Cambiar la base de datos activa
                 try:
-                    new_db_index = int(query.lower().split('cambiar ')[1])
-                    print(f"{C_SUCCESS}Cambiando a base de datos con índice {new_db_index}")
-                    current_db_index = new_db_index
-                    continue
-                except (ValueError, IndexError):
-                    print(f"{C_ERROR}Índice de base de datos inválido. Formato: 'cambiar <número>'")
-                    continue
+                    new_index = int(query.split()[1])
+                    current_db_index = new_index
+                    print_status("success", f"Base de datos cambiada a índice {C_VALUE}{new_index}")
+                except (IndexError, ValueError):
+                    print_status("error", "Formato inválido. Uso: cambiar <número>")
+                continue
+                
+            elif query.lower() in ["ayuda", "help", "?"]:
+                # Mostrar comandos de ayuda
+                print("\n" + C_TITLE + " COMANDOS DISPONIBLES " + C_RESET)
+                print_separator()
+                print(f"{C_INFO}• {C_COMMAND}salir{C_RESET}, {C_COMMAND}exit{C_RESET}, {C_COMMAND}q{C_RESET} - Salir del modo interactivo")
+                print(f"{C_INFO}• {C_COMMAND}dbs{C_RESET} - Mostrar bases de datos disponibles")
+                print(f"{C_INFO}• {C_COMMAND}cambiar <n>{C_RESET} - Cambiar a la base de datos con índice <n>")
+                print(f"{C_INFO}• {C_COMMAND}ayuda{C_RESET}, {C_COMMAND}help{C_RESET}, {C_COMMAND}?{C_RESET} - Mostrar esta ayuda")
+                print_separator()
+                continue
+                
+            elif not query.strip():
+                # Ignorar consultas vacías
+                continue
             
-            # Procesar la consulta
-            logger.info(f"[Modo Interactivo] Procesando consulta: {query}")
+            # Procesar consulta normal - Reducir verbosidad
+            # No mostramos mensaje de procesamiento para una experiencia más limpia
             
             # Medir tiempo de respuesta
             start_time = time.time()
             
-            response = process_query(
-                query, 
-                n_chunks=n_chunks, 
-                model=current_model, 
-                session_id=current_session_id,
-                db_index=current_db_index
-            )
-            
-            # Calcular tiempo transcurrido
-            elapsed_time = time.time() - start_time
-            
-            # Mostrar respuesta
-            print(f"\n{Style.BRIGHT}{Fore.CYAN}" + "-"*80)
-            print(f"{C_SUBTITLE}RESPUESTA (tiempo: {elapsed_time:.2f}s):")
-            print(f"{Style.BRIGHT}{Fore.CYAN}" + "-"*80)
-            print(response)
-            print(f"{Style.BRIGHT}{Fore.CYAN}" + "-"*80)
+            # Procesar la consulta con manejo de errores
+            try:
+                response = process_query(
+                    query, 
+                    n_chunks=n_chunks, 
+                    model=current_model,
+                    session_id=current_session_id,
+                    db_index=current_db_index
+                )
+                
+                # Agregar a historial
+                history.append((query, response))
+                
+                # Mostrar respuesta con formato mejorado
+                # Extraer solo la sección de respuesta si contiene separadores de formato
+                if "=======================  RESPUESTA  =======================" in response:
+                    parts = response.split("=======================  RESPUESTA  =======================")
+                    if len(parts) > 1:
+                        # Extraer la parte de respuesta (sin encabezado)
+                        response_text = parts[1].split("=======================  CONTEXTO  =======================")[0].strip()
+                        context_text = response.split("=======================  CONTEXTO  =======================")
+                        
+                        # Imprimir solo la respuesta
+                        print("\n" + C_TITLE + " RESPUESTA " + C_RESET)
+                        print_separator()
+                        print(response_text)
+                        
+                        # Mostrar tiempo de respuesta de forma discreta
+                        elapsed_time = time.time() - start_time
+                        print_separator()
+                        print_status("info", f"Tiempo: {elapsed_time:.2f} segundos")
+                        
+                        # Imprimir contexto si existe
+                        if len(context_text) > 1:
+                            print("\n" + C_TITLE + " CONTEXTO UTILIZADO " + C_RESET)
+                            print_separator()
+                            print(context_text[1].strip())
+                    else:
+                        # Si no podemos separar la respuesta, mostrar todo
+                        print("\n" + C_TITLE + " RESPUESTA " + C_RESET)
+                        print_separator()
+                        print(response)
+                        
+                        # Mostrar tiempo de respuesta
+                        elapsed_time = time.time() - start_time
+                        print_separator()
+                        print_status("info", f"Tiempo: {elapsed_time:.2f} segundos")
+                else:
+                    # Si no está formateada, mostrar la respuesta completa
+                    print("\n" + C_TITLE + " RESPUESTA " + C_RESET)
+                    print_separator()
+                    print(response)
+                    
+                    # Mostrar tiempo de respuesta
+                    elapsed_time = time.time() - start_time
+                    print_separator()
+                    print_status("info", f"Tiempo: {elapsed_time:.2f} segundos")
+                
+            except Exception as e:
+                print_status("error", f"Error al procesar consulta: {str(e)}")
             
         except KeyboardInterrupt:
-            print(f"\n\n{C_WARNING}Interrupción detectada. Saliendo del modo interactivo.")
+            print_status("info", "\nSesión interrumpida por el usuario.")
             break
+            
         except Exception as e:
-            logger.error(f"{C_ERROR}Error en modo interactivo: {e}")
-            print(f"{C_ERROR}Error: {str(e)}")
+            print_status("error", f"Error: {str(e)}")
+            
+    print_status("info", "¡Gracias por usar el sistema RAG!")
+    print()
 
 def show_available_databases(show_output: bool = True) -> List[Tuple[str, Dict[str, Any]]]:
     """
-    Muestra las bases de datos disponibles de forma numerada.
+    Lista las bases de datos disponibles.
     
     Args:
-        show_output: Si es True, muestra información en pantalla
+        show_output: Si se debe mostrar la salida en pantalla
         
     Returns:
-        Lista ordenada de tuplas (nombre, metadata) de bases de datos
+        Lista ordenada de bases de datos (nombre, metadatos)
     """
-    # Importar solo cuando sea necesario
+    # Importar el gestor de sesiones
     from modulos.session_manager.session_manager import SessionManager
-    from config import config
+    from colorama import Style  # Asegurar que Style está disponible
     
-    # Obtener las bases de datos disponibles
+    # Usar el gestor de sesiones para listar bases de datos
     session_manager = SessionManager()
     databases = session_manager.list_available_databases()
     
-    # Crear una lista ordenada para presentar las bases de datos
+    # Convertir el diccionario a una lista ordenada por último uso (más reciente primero)
     sorted_dbs = []
     for name, metadata in databases.items():
         sorted_dbs.append((name, metadata))
     
-    # Ordenar por último uso si está disponible
     sorted_dbs.sort(key=lambda x: x[1].get('last_used', 0), reverse=True)
     
+    # Si se solicita mostrar en pantalla
     if show_output:
-        print_header(f"BASES DE DATOS DISPONIBLES ({len(databases)})")
+        # Mostrar título
+        print("\n" + C_TITLE + " BASES DE DATOS DISPONIBLES " + C_RESET)
+        print_separator()
         
         if not sorted_dbs:
-            print(f"{C_WARNING}No se encontraron bases de datos. Asegúrate de ingestar documentos primero.")
-            print(f"{C_INFO}Directorio buscado: " + str(Path(config.get_database_config().get("sqlite", {}).get("db_dir", "modulos/databases/db")).absolute()))
-            print(Style.BRIGHT + "="*80 + "\n")
+            print_status("warning", "No hay bases de datos disponibles")
             return sorted_dbs
-        
-        # Mostrar la información numerada
-        for i, (name, metadata) in enumerate(sorted_dbs):
-            print(f"{C_HIGHLIGHT}{i}. {C_INFO}Nombre: {name}")
-            print(f"   {C_INFO}Tipo: {metadata.get('db_type', 'desconocido')}")
-            print(f"   {C_INFO}Modelo: {metadata.get('embedding_model', 'desconocido')}")
-            print(f"   {C_INFO}Chunking: {metadata.get('chunking_method', 'desconocido')}")
             
-            # Mostrar la ruta de manera adaptativa según el tipo
-            db_path = metadata.get('db_path', 'desconocida')
-            if db_path and os.path.exists(db_path):
-                file_size = os.path.getsize(db_path)
-                print(f"   {C_INFO}Ruta: {db_path} ({file_size/1024/1024:.2f} MB)")
+        # Mostrar información resumida de cada base de datos
+        for i, (name, db) in enumerate(sorted_dbs):
+            created_date = datetime.fromtimestamp(db.get('created_at', 0)).strftime('%Y-%m-%d')
+            model = db.get('embedding_model', 'desconocido')
+            chunks = db.get('chunking_method', 'desconocido')
+            db_type = db.get('db_type', 'desconocido').upper()  # Tipo de base de datos
+            
+            # Formato más compacto y visual, incluyendo el tipo de base de datos
+            if i == 0:  # Resaltar la más reciente
+                print(f"{C_SUCCESS}[{i}] {C_HIGHLIGHT}{name}{C_RESET} - {created_date} - DB: {C_VALUE}{db_type}{C_RESET} - Modelo: {C_VALUE}{model}{C_RESET} - Chunking: {chunks}")
             else:
-                print(f"   {C_INFO}Ruta: {db_path} ({C_ERROR}No encontrado)")
-            
-            if metadata.get('custom_name'):
-                print(f"   {C_INFO}Nombre personalizado: {metadata['custom_name']}")
-                
-            # Mostrar el comando de ejemplo para utilizar esta base de datos
-            print(f"   {C_INFO}Para usar esta base: python run.py --query \"tu pregunta\" --db-index {i}")
-            print()
+                print(f"[{i}] {C_HIGHLIGHT}{name}{C_RESET} - {created_date} - DB: {db_type} - Modelo: {model} - Chunking: {chunks}")
         
+        print_separator()
+        
+        # Mostrar comandos útiles
         print_useful_commands()
     
     return sorted_dbs
@@ -498,67 +632,6 @@ def show_database_statistics() -> None:
                     print(f"{C_INFO}• Creada: {C_VALUE}{db_stats['db_created']}")
     
     print(Style.BRIGHT + "=" * 80)
-
-# Funciones de utilidad para formateo de la salida
-def print_header(title: str) -> None:
-    """
-    Imprime un encabezado formateado.
-    
-    Args:
-        title: Título del encabezado
-    """
-    print("\n" + Style.BRIGHT + "="*80)
-    print(C_TITLE + title)
-    print(Style.BRIGHT + "="*80)
-
-def print_formatted_response(title: str, response: str) -> None:
-    """
-    Imprime una respuesta con formato.
-    
-    Args:
-        title: Título de la respuesta
-        response: Texto de la respuesta
-    """
-    print("\n" + Style.BRIGHT + "="*80)
-    print(C_TITLE + title + ":")
-    print(Style.BRIGHT + "="*80)
-    print(response)
-    print(Style.BRIGHT + "="*80 + "\n")
-
-def print_command_help(commands: List[str]) -> None:
-    """
-    Imprime la ayuda de comandos.
-    
-    Args:
-        commands: Lista de comandos con formato
-    """
-    for command in commands:
-        print(command)
-    print(Style.BRIGHT + "=" * 80 + "\n")
-
-def print_useful_commands() -> None:
-    """
-    Imprime una lista de comandos útiles.
-    """
-    print(Style.BRIGHT + "="*80)
-    print(f"{C_SUBTITLE}COMANDOS ÚTILES:")
-    print("  • Para consultar usando la base de datos más reciente:")
-    print(f"    {C_COMMAND}python run.py --query {C_PARAM}\"tu pregunta\"")
-    print("  • Para consultar usando una base de datos específica por índice:")
-    print(f"    {C_COMMAND}python run.py --query {C_PARAM}\"tu pregunta\" --db-index {C_PARAM}<número>")
-    print("  • Para ver esta lista de nuevo:")
-    print(f"    {C_COMMAND}python run.py --list-dbs")
-    print("  • Para mostrar las bases de datos antes de preguntar:")
-    print(f"    {C_COMMAND}python run.py --query {C_PARAM}\"tu pregunta\" --show-dbs")
-    print("  • Para optimizar una base de datos específica:")
-    print(f"    {C_COMMAND}python run.py --optimize-db {C_PARAM}<número>")
-    print("  • Para optimizar todas las bases de datos:")
-    print(f"    {C_COMMAND}python run.py --optimize-all")
-    print("  • Para ver estadísticas de las bases de datos:")
-    print(f"    {C_COMMAND}python run.py --db-stats")
-    print("  • Para modo interactivo:")
-    print(f"    {C_COMMAND}python run.py --query")
-    print(Style.BRIGHT + "="*80 + "\n")
 
 if __name__ == "__main__":
     sys.exit(main())

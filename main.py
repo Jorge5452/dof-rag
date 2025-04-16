@@ -16,18 +16,35 @@ from typing import List, Optional, Dict, Any, Union
 logger = logging.getLogger(__name__)
 
 # Importación de lo necesario para colorama
-from colorama import init, Fore, Style
+from colorama import init, Fore, Style, Back
 
 # Inicializar colorama para que funcione en todas las plataformas
 init(autoreset=True)
 
 # Definir colores y estilos para mejorar la legibilidad
+C_TITLE = Back.BLUE + Fore.WHITE + Style.BRIGHT
+C_SUBTITLE = Fore.BLUE + Style.BRIGHT
 C_SUCCESS = Fore.GREEN + Style.BRIGHT
 C_ERROR = Fore.RED + Style.BRIGHT
-C_WARNING = Fore.YELLOW + Style.BRIGHT
-C_INFO = Fore.WHITE
+C_WARNING = Fore.YELLOW
 C_HIGHLIGHT = Fore.MAGENTA + Style.BRIGHT
-C_VALUE = Fore.CYAN
+C_COMMAND = Fore.YELLOW
+C_INFO = Style.RESET_ALL
+C_VALUE = Fore.CYAN + Style.BRIGHT
+C_PROMPT = Style.BRIGHT + Fore.GREEN
+C_RESET = Style.RESET_ALL
+C_SEPARATOR = Style.DIM + Fore.BLUE
+
+# Reducir verbosidad de logging en algunos módulos
+logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
+logging.getLogger('modulos.databases').setLevel(logging.ERROR)
+logging.getLogger('modulos.databases.implementaciones').setLevel(logging.ERROR)
+logging.getLogger('modulos.databases.implementaciones.sqlite').setLevel(logging.ERROR)
+logging.getLogger('modulos.databases.implementaciones.duckdb').setLevel(logging.ERROR)
+logging.getLogger('modulos.session_manager').setLevel(logging.WARNING)
+logging.getLogger('transformers').setLevel(logging.ERROR)
+logging.getLogger('filelock').setLevel(logging.ERROR)
+logging.getLogger('huggingface_hub').setLevel(logging.ERROR)
 
 def process_documents(file_path: str, session_name: Optional[str] = None) -> None:
     """
@@ -65,7 +82,7 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
     embedding_model = embeddings_config.get("model", "modernbert")
     db_type = database_config.get("type", "sqlite")
     
-    logger.info(f"Iniciando ingestión con chunking: {chunking_method}, embeddings: {embedding_model}, db: {db_type}")
+    logger.info(f"{C_HIGHLIGHT}Iniciando ingestión con chunking: {C_VALUE}{chunking_method}{C_HIGHLIGHT}, embeddings: {C_VALUE}{embedding_model}{C_HIGHLIGHT}, db: {C_VALUE}{db_type}")
     
     # Inicializar componentes
     embedding_manager = EmbeddingFactory.get_embedding_manager(embedding_model)
@@ -226,58 +243,139 @@ def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
     from config import config  
     from modulos.session_manager.session_manager import SessionManager
     from modulos.embeddings.embeddings_factory import EmbeddingFactory
-    
-    logger.info(f"{C_INFO}Recibida consulta: {C_HIGHLIGHT}'{query}'")
-    logger.info(f"{C_INFO}Se recuperarán {C_VALUE}{n_chunks} {C_INFO}chunks más relevantes")
-    
-    # Usar session_manager para obtener la configuración correcta
-    session_manager = SessionManager()
+    from modulos.clientes.FactoryClient import ClientFactory
     
     try:
+        # Usar session_manager para obtener la configuración correcta
+        session_manager = SessionManager()
+    
         # Obtener la base de datos y configuración
         if db_index is not None:
             # Si se especificó un índice, usamos ese índice
             db, session = session_manager.get_database_by_index(db_index)
-            logger.info(f"{C_INFO}Usando base de datos con índice: {C_VALUE}{db_index}")
         elif session_id:
             # Si se especificó un ID de sesión, usamos esa sesión
             db, session = session_manager.get_session_database(session_id)
-            logger.info(f"{C_INFO}Usando sesión especificada: {C_VALUE}{session_id}")
         else:
             # Si no se especificó nada, usamos la sesión más reciente
             db, session = session_manager.get_session_database()
-            logger.info(f"{C_INFO}Usando sesión más reciente: {C_VALUE}{session['id']}")
         
-        # Cargar el modelo de embeddings correcto para esta sesión
-        embedding_model = session["embedding_model"]
+        # Inicialización del modelo específico que usa esta base de datos
+        embedding_model = session.get("embedding_model", "modernbert")
         embedding_manager = EmbeddingFactory.get_embedding_manager(embedding_model)
-        embedding_manager.load_model()
         
-        # Ahora que tenemos la configuración correcta, podríamos implementar el proceso completo:
-        # 1. Crear embedding para la consulta
-        # 2. Buscar chunks relevantes
-        # 3. Generar respuesta con un modelo de IA
+        try:
+            # Cargar modelo con manejo de excepciones específico
+            embedding_manager.load_model()
+        except Exception as e:
+            logger.error(f"Error al cargar el modelo de embeddings: {e}")
+            return "No se pudo cargar el modelo de embeddings. Por favor, verifica la configuración o intenta con otra base de datos."
         
-        if model:
-            logger.info(f"{C_INFO}Usando modelo específico: {C_VALUE}{model}")
+        # Generar embedding de la consulta
+        query_embedding = embedding_manager.get_query_embedding(query)
         
-        # Por ahora, solo devolvemos un mensaje informativo
-        return (
-            f"Esta funcionalidad no está implementada todavía.\n"
-            f"Se procesaría la consulta '{query}' usando la sesión '{session['id']}'\n"
-            f"- Modelo de embedding: {embedding_model}\n"
-            f"- Método de chunking: {session['chunking_method']}\n"
-            f"- Base de datos: {session['db_type']}\n"
-            f"- Dimensión de embedding: {embedding_manager.embedding_dim}\n"
-            f"- Chunks a recuperar: {n_chunks}\n"
-            f"- Modelo de IA: {model or 'predeterminado'}"
-        )
-    
-    except ValueError as e:
-        return f"{C_ERROR}Error: {str(e)}"
+        # Buscar los chunks más relevantes con manejo de errores mejorado
+        try:
+            search_results = db.vector_search(query_embedding, n_results=n_chunks)
+        except Exception as e:
+            logger.error(f"Error en la búsqueda vectorial: {e}")
+            return "Hubo un problema al buscar información relevante. Es posible que la base de datos seleccionada no sea compatible con la consulta actual."
+        
+        if not search_results:
+            return "No se encontró información relevante para responder a esta consulta."
+        
+        # Usar el modelo de IA especificado o el predeterminado
+        if model is None:
+            ai_config = config.get_ai_client_config()
+            model = ai_config.get("type", "openai")
+            
+        # Obtener cliente de IA con manejo de errores mejorado
+        try:
+            ai_client = ClientFactory.get_client(client_type=model)
+        except Exception as e:
+            logger.error(f"Error al crear cliente IA: {e}")
+            return "No se pudo inicializar el modelo de IA. Por favor, verifica tu configuración y API keys."
+        
+        # Preparar contexto para la respuesta
+        context_chunks = []
+        for chunk in search_results:
+            context_chunks.append({
+                "text": chunk["text"],
+                "header": chunk.get("header", ""),
+                "similarity": chunk.get("similarity", 0.0),
+                "page": chunk.get("page", "N/A")  # Asegurar que se incluya el número de página
+            })
+        
+        # Generar respuesta con manejo de errores mejorado
+        try:
+            # Siempre mostrar el contexto usado para la respuesta
+            response = ai_client.generate_response(query, context=context_chunks, show_context=True)
+            
+            # Si estamos usando streaming, necesitamos asegurarnos de que se muestre el resultado completo
+            if hasattr(response, '__iter__') and not isinstance(response, str):
+                # Consumir el generador y devolver el texto completo
+                try:
+                    # Intentar iterar sobre la respuesta
+                    chunks = list(response)
+                    
+                    # Unir los chunks en una respuesta completa
+                    full_response = "".join(chunks)
+                    
+                    if full_response:
+                        return full_response
+                    else:
+                        # Si la respuesta está vacía después de iterar, significa que el generador no produjo nada
+                        # En este caso, vamos a obtener la respuesta original de Gemini directamente
+                        if hasattr(ai_client, 'last_response_text') and ai_client.last_response_text:
+                            return ai_client._format_response_with_context(ai_client.last_response_text, query)
+                        else:
+                            # Si todo lo demás falla, usar una respuesta genérica
+                            return "La respuesta se generó correctamente pero no se pudo mostrar. Por favor, intenta nuevamente."
+                except Exception as e:
+                    # Si hay un error al iterar, intentar usar la respuesta como string
+                    if response:
+                        return str(response)
+                    else:
+                        return "Error al procesar la respuesta. Por favor, intenta nuevamente."
+            
+            # Si llegamos aquí, ya tenemos la respuesta como texto
+            # Nos aseguramos de que la respuesta no sea None
+            if response is None:
+                return "No se recibió respuesta del modelo. Esto puede ser un problema de conexión o API."
+                
+            # Retornamos la respuesta (ya formateada si show_context=True)
+            return response
+            
+        except Exception as e:
+            logger.error(f"Error al generar respuesta: {e}")
+            return "Hubo un problema al generar la respuesta. Verifica tu configuración y conexión a internet."
+        
     except Exception as e:
-        logger.error(f"{C_ERROR}Error al procesar consulta: {e}")
-        return f"{C_ERROR}Error inesperado al procesar la consulta: {str(e)}"
+        # Actualizar el timestamp de último uso de la base de datos
+        try:
+            session_manager.update_database_metadata(
+                db_name=session.get("id", ""),
+                new_metadata={"last_used": time.time()}
+            )
+        except Exception as update_err:
+            # No mostramos este error al usuario final
+            logger.debug(f"Error al actualizar metadatos: {update_err}")
+    
+        # Manejo de errores generales
+        try:
+            error_msg = f"{e.__class__.__name__}: {str(e)}"
+        except Exception:
+            error_msg = "Error desconocido durante el procesamiento"
+            
+        logger.error(f"Error al procesar consulta: {error_msg}")
+        
+        # Mensaje de error más amigable
+        if "database" in error_msg.lower():
+            return "Error al acceder a la base de datos. Por favor, verifica que la base de datos seleccionada existe y es accesible."
+        elif "embedding" in error_msg.lower() or "model" in error_msg.lower():
+            return "Error con el modelo de embeddings. Por favor, verifica la configuración o intenta con otro modelo."
+        else:
+            return f"Se produjo un error al procesar tu consulta: {error_msg}. Por favor, intenta nuevamente o selecciona otra base de datos."
 
 def verify_database_file(db_path: str) -> bool:
     """

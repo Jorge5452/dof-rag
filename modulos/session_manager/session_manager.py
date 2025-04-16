@@ -11,700 +11,700 @@ import logging
 import time
 import uuid
 import re
+import threading
+import psutil
+import gc
+import glob
 from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 from datetime import datetime
+import weakref
 
-from config import config
+from config import Config
 from modulos.databases.FactoryDatabase import DatabaseFactory
 from modulos.embeddings.embeddings_factory import EmbeddingFactory
 
 logger = logging.getLogger(__name__)
 
+# Instanciar la clase Config correctamente
+config = Config()
+
+# Método get_value personalizado para mantener compatibilidad
+def get_value(section, key, default=None):
+    """
+    Obtiene un valor de configuración específico.
+    
+    Args:
+        section: Sección de la configuración
+        key: Clave del valor
+        default: Valor por defecto si no se encuentra
+        
+    Returns:
+        Valor de configuración o valor por defecto
+    """
+    try:
+        # Intentar obtener el método getter correspondiente
+        getter_method = getattr(config, f"get_{section}_config", None)
+        if getter_method is None:
+            # Si el método no existe, buscar en la configuración general
+            general_config = config.get_general_config() or {}
+            if section in general_config:
+                return general_config[section].get(key, default)
+            return default
+            
+        # Obtener la configuración de la sección
+        section_config = getter_method()
+        # Verificar que section_config no sea None antes de llamar a get()
+        if section_config is None:
+            return default
+            
+        return section_config.get(key, default)
+    except (AttributeError, KeyError, Exception) as e:
+        logger.warning(f"Error al obtener valor de configuración {section}.{key}: {e}")
+        return default
+
+# Configuración de límites y timeouts para sesiones
+try:
+    # Intentar obtener configuración de sesiones con manejo de errores
+    MAX_SESSIONS = get_value("sessions", "max_sessions", 50)  
+    SESSION_TIMEOUT = get_value("sessions", "timeout", 3600)  # 1 hora por defecto
+    CLEANUP_INTERVAL = get_value("sessions", "cleanup_interval", 300)  # 5 minutos por defecto
+    MAX_CONTEXTS_PER_SESSION = get_value("sessions", "max_contexts", 50)  # Máximo número de contextos por sesión
+except Exception as e:
+    # Si falla, usar valores predeterminados y registrar el error
+    logger.debug(f"Usando valores predeterminados para configuración de sesiones: {e}")
+    MAX_SESSIONS = 50
+    SESSION_TIMEOUT = 3600
+    CLEANUP_INTERVAL = 300
+    MAX_CONTEXTS_PER_SESSION = 50
+
 class SessionManager:
     """
-    Gestor de sesiones para el sistema RAG.
+    Gestiona las sesiones de usuarios y sus datos asociados.
     
-    Permite:
-    - Crear nuevas sesiones
-    - Recuperar sesiones anteriores
-    - Listar bases de datos disponibles
-    - Asegurar compatibilidad entre ingestión y consulta
+    Implementa un patrón singleton para asegurar una única instancia global.
+    Incluye funcionalidades para:
+    - Crear y mantener sesiones
+    - Almacenar datos de contexto por mensaje
+    - Limpiar sesiones inactivas
+    - Monitorear uso de recursos
     """
     
     _instance = None
+    _lock = threading.RLock()
+    
+    # Valores predeterminados de configuración
+    MAX_SESSIONS = 100            # Límite máximo de sesiones activas
+    SESSION_TIMEOUT = 3600        # Tiempo de inactividad (en segundos) antes de eliminar sesión
+    CLEANUP_INTERVAL = 60         # Intervalo (en segundos) entre limpiezas automáticas
+    MAX_CONTEXTS_PER_SESSION = 30 # Número máximo de contextos almacenados por sesión
     
     def __new__(cls):
-        """Implementa el patrón Singleton."""
-        if cls._instance is None:
-            cls._instance = super(SessionManager, cls).__new__(cls)
-            cls._instance._initialized = False
-        return cls._instance
+        """
+        Implementación del patrón singleton.
+        """
+        with cls._lock:
+            if cls._instance is None:
+                cls._instance = super(SessionManager, cls).__new__(cls)
+                cls._instance._initialized = False
+            return cls._instance
     
     def __init__(self):
-        """Inicializa el gestor de sesiones."""
+        """
+        Inicializa el gestor de sesiones.
+        """
+        # Evitar reinicialización del singleton
         if self._initialized:
             return
             
-        self._initialized = True
-        self._sessions = {}
-        self._current_session = None
-        self._sessions_file = Path("sessions.json")
-        self._load_sessions()
-        
-        # Directorio donde se almacenan las sesiones
-        self.sessions_dir = Path(config.get_general_config().get("sessions_dir", "sessions"))
-        self.sessions_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Verificar si el directorio existe y crearlo si es necesario
-        if not self.sessions_dir.exists():
-            logger.info(f"Creando directorio de sesiones en: {self.sessions_dir}")
-            try:
-                self.sessions_dir.mkdir(parents=True, exist_ok=True)
-                logger.info(f"Directorio de sesiones creado exitosamente: {self.sessions_dir}")
-            except Exception as e:
-                logger.error(f"Error al crear directorio de sesiones {self.sessions_dir}: {e}")
-                raise RuntimeError(f"No se pudo crear el directorio de sesiones: {e}")
-        else:
-            logger.debug(f"Directorio de sesiones ya existe: {self.sessions_dir}")
-        
-        # Verificar permisos de escritura en el directorio
-        if not os.access(self.sessions_dir, os.W_OK):
-            logger.warning(f"¡ADVERTENCIA! El directorio de sesiones no tiene permisos de escritura: {self.sessions_dir}")
-            logger.warning("Esto puede causar errores al guardar sesiones o metadatos")
-        else:
-            logger.debug(f"Directorio de sesiones tiene permisos de escritura: {self.sessions_dir}")
-        
-        # Archivo que mapea las bases de datos a sus metadatos
-        self.db_metadata_file = self.sessions_dir / "db_metadata.json"
-        
-        # Cargar o crear el archivo de metadatos si no existe
-        self.db_metadata = self._load_db_metadata()
-    
-    def _load_sessions(self) -> None:
-        """Carga las sesiones guardadas desde el archivo."""
-        if self._sessions_file.exists():
-            try:
-                with open(self._sessions_file, 'r') as f:
-                    self._sessions = json.load(f)
-                logger.info(f"Sesiones cargadas: {len(self._sessions)}")
-            except Exception as e:
-                logger.error(f"Error al cargar sesiones: {e}")
-                self._sessions = {}
-    
-    def _save_sessions(self) -> None:
-        """Guarda las sesiones actuales en el archivo."""
-        try:
-            with open(self._sessions_file, 'w') as f:
-                json.dump(self._sessions, f, indent=2)
-            logger.debug("Sesiones guardadas correctamente")
-        except Exception as e:
-            logger.error(f"Error al guardar sesiones: {e}")
-    
-    def _load_db_metadata(self) -> Dict[str, Any]:
-        """
-        Carga los metadatos de las bases de datos desde el archivo y los archivos .meta.json.
-        
-        Returns:
-            Dict con los metadatos de las bases de datos
-        """
-        metadata = {}
-        
-        # 1. Cargar metadatos del archivo central (si existe)
-        if self.db_metadata_file.exists():
-            try:
-                with open(self.db_metadata_file, 'r') as f:
-                    metadata = json.load(f)
-                logger.info(f"Metadatos centrales cargados: encontradas {len(metadata)} bases de datos registradas")
-            except json.JSONDecodeError:
-                logger.warning("Error al cargar metadatos centrales. Archivo posiblemente corrupto.")
-                metadata = {}
-        
-        # 2. Buscar archivos de base de datos y sus metadatos individuales
-        db_config = config.get_database_config()
-        db_dir = Path(db_config.get("sqlite", {}).get("db_dir", "modulos/databases/db"))
-        
-        # Buscar todas las bases de datos físicas
-        db_files = list(db_dir.glob("*.db"))
-        
-        # Buscar sus archivos .meta.json correspondientes
-        for db_file in db_files:
-            db_name = db_file.stem
-            meta_file = Path(str(db_file) + ".meta.json")
+        with self._lock:
+            # Sesiones y contextos
+            self.sessions = {}              # {session_id: session_data}
+            self.contexts = {}              # {session_id: {message_id: context_data}}
             
-            if meta_file.exists():
-                try:
-                    with open(meta_file, 'r') as f:
-                        db_meta = json.load(f)
+            # Monitoreo de recursos
+            self.resource_usage = {
+                "memory_percent": 0.0,      # Porcentaje de memoria utilizada
+                "cpu_percent": 0.0,         # Porcentaje de CPU utilizada
+                "active_sessions": 0,       # Número de sesiones activas
+                "last_check": time.time(),  # Timestamp de la última verificación
+                "cleanup_count": 0          # Contador de limpiezas realizadas
+            }
+            
+            # Cargar configuración
+            self._load_config()
+            
+            # Iniciar hilo de limpieza
+            self._start_cleanup_thread()
+            
+            logger.info(f"SessionManager inicializado: max_sessions={self.MAX_SESSIONS}, "
+                      f"timeout={self.SESSION_TIMEOUT}s, cleanup_interval={self.CLEANUP_INTERVAL}s")
+            
+            self._initialized = True
+    
+    def _load_config(self):
+        """
+        Carga los valores de configuración desde config.py
+        """
+        try:
+            # Cargar configuración de sesiones
+            session_config = get_value("sessions", {})
+            
+            # Establecer valores desde configuración o usar predeterminados
+            self.MAX_SESSIONS = session_config.get("max_sessions", self.MAX_SESSIONS)
+            self.SESSION_TIMEOUT = session_config.get("timeout", self.SESSION_TIMEOUT)
+            self.CLEANUP_INTERVAL = session_config.get("cleanup_interval", self.CLEANUP_INTERVAL)
+            self.MAX_CONTEXTS_PER_SESSION = session_config.get("max_contexts", self.MAX_CONTEXTS_PER_SESSION)
+            
+            # Validar valores
+            if self.MAX_SESSIONS < 1:
+                logger.warning("max_sessions debe ser al menos 1, usando valor 10")
+                self.MAX_SESSIONS = 10
+                
+            if self.SESSION_TIMEOUT < 60:
+                logger.warning("timeout debe ser al menos 60 segundos, usando valor 3600")
+                self.SESSION_TIMEOUT = 3600
+            
+            logger.debug(f"Configuración cargada: max_sessions={self.MAX_SESSIONS}, "
+                       f"timeout={self.SESSION_TIMEOUT}s")
+                       
+        except Exception as e:
+            # Cambiar nivel de log de error a debug ya que manejamos el error correctamente
+            logger.debug(f"Usando valores predeterminados para configuración: {e}")
+            # Valores predeterminados ya definidos en la clase
+    
+    def _start_cleanup_thread(self):
+        """
+        Inicia el hilo de limpieza automática de sesiones.
+        """
+        def cleanup_thread():
+            try:
+                while True:
+                    # Dormir el intervalo configurado
+                    time.sleep(self.CLEANUP_INTERVAL)
                     
-                    # Añadir o actualizar metadatos
-                    if db_name not in metadata or metadata[db_name].get("last_used", 0) < db_meta.get("last_used", 0):
-                        # El meta.json tiene información más reciente
-                        metadata[db_name] = db_meta
-                        # Asegurar que la ruta es correcta
-                        metadata[db_name]["db_path"] = str(db_file)
-                        logger.debug(f"Metadatos actualizados desde {meta_file}")
-                except Exception as e:
-                    logger.error(f"Error al cargar metadatos desde {meta_file}: {e}")
+                    # Actualizar uso de recursos
+                    self._update_resource_usage()
+                    
+                    # Verificar si es necesario realizar limpieza
+                    current_time = time.time()
+                    memory_high = self.resource_usage["memory_percent"] > 80
+                    cpu_high = self.resource_usage["cpu_percent"] > 70
+                    many_sessions = len(self.sessions) > self.MAX_SESSIONS * 0.8
+                    
+                    # Realizar limpieza normal o agresiva según uso de recursos
+                    if memory_high or cpu_high or many_sessions:
+                        logger.info(f"Limpieza agresiva - Memoria: {self.resource_usage['memory_percent']:.1f}%, "
+                                  f"CPU: {self.resource_usage['cpu_percent']:.1f}%, "
+                                  f"Sesiones: {len(self.sessions)}/{self.MAX_SESSIONS}")
+                        self.clean_expired_sessions(aggressive=True)
+                    else:
+                        # Limpieza normal
+                        self.clean_expired_sessions()
+            
+            except Exception as e:
+                logger.error(f"Error en hilo de limpieza: {e}")
         
-        return metadata
+        # Iniciar hilo de limpieza como daemon
+        cleanup_thread = threading.Thread(target=cleanup_thread, daemon=True)
+        cleanup_thread.name = "SessionCleanupThread"
+        cleanup_thread.start()
+        logger.debug("Hilo de limpieza de sesiones iniciado")
     
-    def _save_db_metadata(self) -> None:
-        """Guarda los metadatos de las bases de datos en el archivo central y en los archivos individuales."""
-        # 1. Guardar en archivo central
+    def _update_resource_usage(self):
+        """
+        Actualiza información sobre uso de recursos del sistema.
+        """
         try:
-            with open(self.db_metadata_file, 'w') as f:
-                json.dump(self.db_metadata, f, indent=2)
-            logger.debug(f"Metadatos centrales guardados: {len(self.db_metadata)} bases de datos")
+            # Obtener proceso actual
+            process = psutil.Process(os.getpid())
+            
+            # Actualizar métricas
+            self.resource_usage["memory_percent"] = process.memory_percent()
+            self.resource_usage["cpu_percent"] = process.cpu_percent(interval=0.1)
+            self.resource_usage["active_sessions"] = len(self.sessions)
+            self.resource_usage["last_check"] = time.time()
+            
+            # Log informativo periódico (cada 10 limpiezas)
+            if self.resource_usage["cleanup_count"] % 10 == 0:
+                logger.info(f"Estado del sistema - Memoria: {self.resource_usage['memory_percent']:.1f}%, "
+                          f"CPU: {self.resource_usage['cpu_percent']:.1f}%, "
+                          f"Sesiones activas: {len(self.sessions)}")
+            
+            self.resource_usage["cleanup_count"] += 1
+            
         except Exception as e:
-            logger.error(f"Error al guardar metadatos centrales: {e}")
-        
-        # 2. Guardar metadatos individuales para cada base de datos
-        for db_name, metadata in self.db_metadata.items():
-            db_path = metadata.get("db_path")
-            if db_path and os.path.exists(db_path) and db_path.endswith((".db", ".sqlite", ".duckdb")):
-                metadata_path = f"{db_path}.meta.json"
-                try:
-                    with open(metadata_path, 'w') as f:
-                        json.dump(metadata, f, indent=2)
-                    logger.debug(f"Metadatos guardados para {db_name} en {metadata_path}")
-                except Exception as e:
-                    logger.error(f"Error al guardar metadatos para {db_name}: {e}")
+            logger.error(f"Error al actualizar uso de recursos: {e}")
     
-    def register_database(self, db_name: str, metadata: Dict[str, Any]) -> None:
+    def clean_expired_sessions(self, aggressive: bool = False):
         """
-        Registra una base de datos con sus metadatos.
+        Elimina sesiones inactivas basadas en su último tiempo de actividad.
         
         Args:
-            db_name: Nombre de la base de datos
-            metadata: Diccionario con metadatos (embedding_model, chunking_method, etc.)
+            aggressive: Si es True, usa un timeout más corto para limpieza agresiva
         """
-        # Asegurar que tengamos todos los metadatos críticos
-        required_fields = ["embedding_model", "embedding_dim", "chunking_method", "db_type"]
-        for field in required_fields:
-            if field not in metadata:
-                raise ValueError(f"Falta el campo obligatorio '{field}' en los metadatos de la base de datos")
-        
-        # Agregar timestamp de creación si no existe
-        if "created_at" not in metadata:
-            metadata["created_at"] = time.time()
-        
-        # Actualizar metadatos
-        self.db_metadata[db_name] = metadata
-        self._save_db_metadata()
+        with self._lock:
+            try:
+                # Determinar el timeout a utilizar
+                timeout = self.SESSION_TIMEOUT
+                if aggressive:
+                    # En modo agresivo, reducir el timeout a la mitad o menos
+                    timeout = min(self.SESSION_TIMEOUT // 2, 600)  # Máx 10 minutos en modo agresivo
+                
+                current_time = time.time()
+                sessions_to_remove = []
+                
+                # Identificar sesiones expiradas
+                for session_id, session_data in self.sessions.items():
+                    last_activity = session_data.get("last_activity", 0)
+                    if current_time - last_activity > timeout:
+                        sessions_to_remove.append(session_id)
+                
+                # Eliminar sesiones expiradas
+                for session_id in sessions_to_remove:
+                    self.delete_session(session_id)
+                
+                # Si hay demasiadas sesiones incluso después de limpiar las expiradas,
+                # eliminar las más antiguas (excepto las activas recientemente)
+                if aggressive and len(self.sessions) > self.MAX_SESSIONS * 0.9:
+                    # Ordenar por actividad (más antiguas primero)
+                    sorted_sessions = sorted(
+                        self.sessions.items(),
+                        key=lambda x: x[1].get("last_activity", 0)
+                    )
+                    
+                    # Determinar cuántas sesiones eliminar (hasta un 25% de las más antiguas)
+                    sessions_to_force_remove = sorted_sessions[:max(1, len(sorted_sessions) // 4)]
+                    
+                    for session_id, _ in sessions_to_force_remove:
+                        logger.warning(f"Eliminando sesión {session_id} por restricción de recursos")
+                        self.delete_session(session_id)
+                
+                # Forzar recolección de basura si la limpieza fue agresiva
+                if aggressive:
+                    gc.collect()
+                
+                if sessions_to_remove:
+                    logger.info(f"Limpieza completada: {len(sessions_to_remove)} sesiones eliminadas, "
+                              f"{len(self.sessions)} activas")
+                
+            except Exception as e:
+                logger.error(f"Error durante limpieza de sesiones: {e}")
     
-    def update_database_metadata(self, db_name: str, new_metadata: Dict[str, Any]) -> None:
+    def create_session(self, session_id: Optional[str] = None, 
+                      metadata: Optional[Dict[str, Any]] = None) -> str:
         """
-        Actualiza los metadatos de una base de datos existente.
+        Crea una nueva sesión.
         
         Args:
-            db_name: Nombre de la base de datos
-            new_metadata: Nuevos metadatos a incorporar
-        """
-        if db_name not in self.db_metadata:
-            raise ValueError(f"Base de datos '{db_name}' no encontrada")
-            
-        # Actualizar metadatos manteniendo timestamp original
-        self.db_metadata[db_name].update(new_metadata)
-        self.db_metadata[db_name]["last_used"] = time.time()
-        self._save_db_metadata()
-    
-    def get_database_metadata(self, db_name: str) -> Dict[str, Any]:
-        """
-        Obtiene los metadatos de una base de datos.
+            session_id: ID de sesión personalizado (opcional)
+            metadata: Datos adicionales para la sesión
         
-        Args:
-            db_name: Nombre de la base de datos
-            
         Returns:
-            Diccionario con los metadatos
-        """
-        if db_name not in self.db_metadata:
-            return {}
-        return self.db_metadata[db_name]
-    
-    def create_session(self, 
-                      embedding_model: Optional[str] = None,
-                      chunking_method: Optional[str] = None,
-                      db_type: Optional[str] = None,
-                      custom_name: Optional[str] = None) -> str:
-        """
-        Crea una nueva sesión con la configuración especificada.
-        Si ya existe una sesión con la misma configuración, la reutiliza.
+            ID de la sesión creada
         
-        Args:
-            embedding_model: Modelo de embeddings a utilizar
-            chunking_method: Método de chunking a utilizar
-            db_type: Tipo de base de datos a utilizar
-            custom_name: Nombre personalizado para la sesión
+        Raises:
+            ValueError: Si se alcanza el límite máximo de sesiones
+        """
+        with self._lock:
+            # Verificar límite de sesiones
+            if len(self.sessions) >= self.MAX_SESSIONS:
+                # Intentar limpiar primero
+                self.clean_expired_sessions(aggressive=True)
+                
+                # Si aún hay demasiadas sesiones, rechazar la creación
+                if len(self.sessions) >= self.MAX_SESSIONS:
+                    logger.error(f"Límite de sesiones alcanzado: {self.MAX_SESSIONS}")
+                    raise ValueError(f"Se alcanzó el límite máximo de sesiones ({self.MAX_SESSIONS})")
             
-        Returns:
-            ID de la sesión creada o reutilizada
-        """
-        # Obtener valores de configuración si no se proporcionan
-        if embedding_model is None:
-            embedding_config = config.get_embedding_config()
-            embedding_model = embedding_config.get("model", "modernbert")
-        
-        if chunking_method is None:
-            chunks_config = config.get_chunks_config()
-            chunking_method = chunks_config.get("method", "context")
-        
-        if db_type is None:
-            db_config = config.get_database_config()
-            db_type = db_config.get("type", "sqlite")
-        
-        # Cargar información del modelo de embeddings para obtener dimensión
-        embedding_manager = EmbeddingFactory.get_embedding_manager(embedding_model)
-        embedding_dim = None
-        
-        try:
-            # Intentar cargar el modelo para obtener su dimensión real
-            embedding_manager.load_model()
-            embedding_dim = embedding_manager.embedding_dim
-        except Exception as e:
-            logger.warning(f"No se pudo determinar dimensión del embedding: {e}")
-            # Usar valores por defecto según el modelo si falla la carga
-            if "modernbert" in embedding_model.lower():
-                embedding_dim = 768
-            elif "e5" in embedding_model.lower():
-                embedding_dim = 1024
-            else:
-                embedding_dim = 384  # Dimensión por defecto
-        
-        # Obtener configuraciones específicas de cada componente
-        embedding_config = config.get_embedding_config()
-        chunks_config = config.get_chunks_config()
-        db_config = config.get_database_config()
-        
-        # Verificar si ya existe una sesión con esta misma configuración
-        for session_id, session_info in self._sessions.items():
-            if (session_info.get('embedding_model') == embedding_model and
-                session_info.get('chunking_method') == chunking_method and
-                session_info.get('db_type') == db_type):
-                
-                logger.info(f"Reutilizando sesión existente '{session_id}' con configuración idéntica")
-                
-                # Actualizar timestamp de último uso
-                self._sessions[session_id]["last_used"] = time.time()
-                
-                # Asegurar que tiene información de dimensión si no existía anteriormente
-                if "embedding_dim" not in self._sessions[session_id] and embedding_dim:
-                    self._sessions[session_id]["embedding_dim"] = embedding_dim
-                
-                self._current_session = session_id
-                self._save_sessions()
-                
-                return session_id
-        
-        # Si no existe una sesión con esta configuración, crear una nueva
-        session_id = custom_name or str(uuid.uuid4())[:8]
-        
-        # Generar nombre de base de datos basado en la configuración
-        db_name = self._generate_db_name(embedding_model, chunking_method, db_type)
-        db_dir = db_config.get(db_type, {}).get("db_dir", "modulos/databases/db")
-        if not os.path.isabs(db_dir):
-            db_dir = os.path.abspath(db_dir)
-        
-        # Determinar extensión correcta para el tipo de base de datos
-        extension = ".db"
-        if db_type == "sqlite":
-            extension = ".sqlite"
-        elif db_type == "duckdb":
-            extension = ".duckdb"
+            # Generar ID si no se proporciona
+            if not session_id:
+                # UUID simple basado en timestamp
+                session_id = f"session_{int(time.time() * 1000)}"
             
-        db_path = os.path.join(db_dir, f"{db_name}{extension}")
-        
-        # Crear registro de sesión con información detallada
-        session_info = {
-            "id": session_id,
-            "created_at": time.time(),
-            "embedding_model": embedding_model,
-            "embedding_dim": embedding_dim,
-            "chunking_method": chunking_method,
-            "db_type": db_type,
-            "db_path": db_path,
-            "db_name": db_name,
-            "custom_name": custom_name,
-            "last_used": time.time(),
-            # Configuraciones específicas de componentes
-            "embedding_config": embedding_config,
-            "chunks_config": chunks_config,
-            "db_config": {k: v for k, v in db_config.items() if k != "password"}  # Eliminar datos sensibles
-        }
-        
-        # Guardar sesión
-        self._sessions[session_id] = session_info
-        self._current_session = session_id
-        self._save_sessions()
-        
-        logger.info(f"Creada nueva sesión '{session_id}' con modelo {embedding_model} ({embedding_dim}d), "
-                   f"chunking {chunking_method}, DB {db_type}")
-        return session_id
-    
-    def _generate_db_name(self, embedding_model: str, chunking_method: str, db_type: str) -> str:
-        """
-        Genera un nombre para la base de datos basado en la configuración.
-        
-        Args:
-            embedding_model: Modelo de embedding utilizado
-            chunking_method: Método de chunking utilizado
-            db_type: Tipo de base de datos
+            # Verificar que no exista ya
+            if session_id in self.sessions:
+                logger.warning(f"La sesión {session_id} ya existe, actualizando")
+                return self.update_session_metadata(session_id, metadata)
             
-        Returns:
-            Nombre seguro para la base de datos
-        """
-        # Extraer nombre corto de modelos
-        if '/' in embedding_model:
-            embedding_model = embedding_model.split('/')[1]
-        
-        # Crear nombre seguro
-        safe_name = f"rag_{embedding_model}_{chunking_method}_{db_type}"
-        
-        # Reemplazar caracteres no permitidos en nombres de archivo
-        safe_name = safe_name.replace('-', '_').replace('.', '_').lower()
-        
-        return safe_name
+            # Crear la sesión
+            session_data = {
+                "id": session_id,
+                "created_at": time.time(),
+                "last_activity": time.time()
+            }
+            
+            # Añadir metadata si se proporciona
+            if metadata:
+                session_data.update(metadata)
+            
+            # Almacenar sesión
+            self.sessions[session_id] = session_data
+            
+            # Inicializar espacio para contextos
+            self.contexts[session_id] = {}
+            
+            logger.info(f"Sesión creada: {session_id} ({len(self.sessions)} sesiones activas)")
+            return session_id
     
-    def get_session(self, session_id: str) -> Dict[str, Any]:
+    def update_session_metadata(self, session_id: str, 
+                              metadata: Optional[Dict[str, Any]] = None) -> str:
         """
-        Obtiene información de una sesión específica.
+        Actualiza los metadatos de una sesión existente.
         
         Args:
             session_id: ID de la sesión
-            
-        Returns:
-            Información de la sesión
-            
-        Raises:
-            ValueError: Si la sesión no existe
-        """
-        if session_id not in self._sessions:
-            raise ValueError(f"No existe sesión con ID: {session_id}")
-        
-        # Actualizar timestamp de último uso
-        self._sessions[session_id]["last_used"] = time.time()
-        self._save_sessions()
-        
-        return self._sessions[session_id]
-    
-    def get_latest_session(self) -> Dict[str, Any]:
-        """
-        Obtiene la sesión más reciente.
+            metadata: Datos actualizados para la sesión
         
         Returns:
-            Información de la sesión más reciente
-            
-        Raises:
-            ValueError: Si no hay sesiones disponibles
-        """
-        if not self._sessions:
-            raise ValueError("No hay sesiones disponibles")
+            ID de la sesión actualizada
         
-        # Encontrar la sesión más reciente por fecha de último uso
-        latest_session_id = max(self._sessions, key=lambda x: self._sessions[x].get("last_used", 0))
-        return self.get_session(latest_session_id)
-    
-    def get_session_database(self, session_id: Optional[str] = None) -> Tuple[Any, Dict[str, Any]]:
+        Raises:
+            KeyError: Si la sesión no existe
         """
-        Obtiene la base de datos asociada a una sesión.
+        with self._lock:
+            # Verificar que exista la sesión
+            if session_id not in self.sessions:
+                logger.warning(f"Intento de actualizar sesión inexistente: {session_id}, creando nueva")
+                return self.create_session(session_id, metadata)
+            
+            # Actualizar timestamp de actividad
+            self.sessions[session_id]["last_activity"] = time.time()
+            
+            # Añadir o actualizar metadata si se proporciona
+            if metadata:
+                self.sessions[session_id].update(metadata)
+            
+            return session_id
+    
+    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Obtiene los datos de una sesión.
         
         Args:
-            session_id: ID de la sesión. Si es None, se usa la sesión más reciente.
-            
-        Returns:
-            Tupla con (instancia_db, metadata_sesión)
-            
-        Raises:
-            ValueError: Si no se encuentra la sesión o hay incompatibilidad
-        """
-        try:
-            # Obtener información de sesión
-            if session_id is None:
-                session = self.get_latest_session()
-            else:
-                session = self.get_session(session_id)
-            
-            # Obtener modelo de embeddings para determinar dimensión
-            embedding_model = session["embedding_model"]
-            chunking_method = session["chunking_method"]
-            db_type = session["db_type"]
-            
-            # Usar dimensión almacenada en la sesión si está disponible
-            embedding_dim = session.get("embedding_dim")
-            
-            # Si no está disponible, cargar el modelo para determinar la dimensión
-            if embedding_dim is None:
-                # Cargar el mismo modelo de embeddings usado en la sesión
-                embedding_manager = EmbeddingFactory.get_embedding_manager(embedding_model)
-                embedding_manager.load_model()
-                embedding_dim = embedding_manager.embedding_dim
-                
-                # Actualizar la sesión con esta información
-                session["embedding_dim"] = embedding_dim
-                self._sessions[session_id] = session
-                self._save_sessions()
-            
-            # Verificar si existe una ruta específica para la base de datos
-            db_path = session.get("db_path")
-            
-            # Obtener instancia de base de datos con la configuración exacta de la sesión
-            db = DatabaseFactory().get_database_instance(
-                db_type=db_type,
-                embedding_dim=embedding_dim,
-                embedding_model=embedding_model,
-                chunking_method=chunking_method,
-                session_id=session_id,
-                custom_name=session.get("custom_name")
-            )
-            
-            # Si tenemos una ruta específica y el archivo existe, asegurar que conecta a esa ruta
-            if db_path and os.path.exists(db_path):
-                logger.info(f"Conectando a base de datos existente: {db_path}")
-                db.connect(db_path)
-            
-            return db, session
-            
-        except Exception as e:
-            logger.error(f"Error al obtener base de datos de sesión: {e}")
-            raise
-    
-    def list_sessions(self) -> List[Dict[str, Any]]:
-        """
-        Lista todas las sesiones disponibles.
+            session_id: ID de la sesión
         
         Returns:
-            Lista de información de sesiones
+            Datos de la sesión o None si no existe
         """
-        # Devolver lista ordenada por último uso (más reciente primero)
-        sessions_list = list(self._sessions.values())
-        sessions_list.sort(key=lambda x: x.get("last_used", 0), reverse=True)
-        return sessions_list
+        with self._lock:
+            if session_id not in self.sessions:
+                return None
+            
+            # Actualizar timestamp de actividad al acceder
+            self.sessions[session_id]["last_activity"] = time.time()
+            
+            # Devolver copia para evitar modificaciones no controladas
+            return dict(self.sessions[session_id])
+    
+    def delete_session(self, session_id: str) -> bool:
+        """
+        Elimina una sesión y sus datos asociados.
+        
+        Args:
+            session_id: ID de la sesión a eliminar
+        
+        Returns:
+            True si se eliminó correctamente, False si no existía
+        """
+        with self._lock:
+            if session_id not in self.sessions:
+                return False
+            
+            # Eliminar contextos asociados
+            if session_id in self.contexts:
+                del self.contexts[session_id]
+            
+            # Registrar metadata antes de eliminar
+            created_at = self.sessions[session_id].get("created_at", 0)
+            last_activity = self.sessions[session_id].get("last_activity", 0)
+            duration = int(time.time() - created_at)
+            
+            # Eliminar sesión
+            del self.sessions[session_id]
+            
+            logger.info(f"Sesión eliminada: {session_id} (duración: {duration}s, "
+                      f"inactividad: {int(time.time() - last_activity)}s)")
+            return True
+    
+    def get_all_sessions(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Obtiene todas las sesiones activas.
+        
+        Returns:
+            Diccionario con todas las sesiones {session_id: session_data}
+        """
+        with self._lock:
+            # Devolver copia para evitar modificaciones no controladas
+            return {sid: dict(data) for sid, data in self.sessions.items()}
+    
+    def store_message_context(self, session_id: str, message_id: str, 
+                            context_data: List[Dict[str, Any]]) -> bool:
+        """
+        Almacena el contexto utilizado para generar una respuesta.
+        
+        Args:
+            session_id: ID de la sesión
+            message_id: ID del mensaje
+            context_data: Datos de contexto a almacenar
+        
+        Returns:
+            True si se almacenó correctamente, False en caso contrario
+        """
+        with self._lock:
+            # Verificar que exista la sesión
+            if session_id not in self.sessions:
+                logger.warning(f"Intento de almacenar contexto en sesión inexistente: {session_id}")
+                return False
+            
+            # Actualizar timestamp de actividad
+            self.sessions[session_id]["last_activity"] = time.time()
+            
+            # Inicializar diccionario de contextos si no existe
+            if session_id not in self.contexts:
+                self.contexts[session_id] = {}
+            
+            # Verificar límite de contextos por sesión
+            contexts = self.contexts[session_id]
+            if len(contexts) >= self.MAX_CONTEXTS_PER_SESSION:
+                # Eliminar el contexto más antiguo
+                oldest_message_id = min(contexts.keys())
+                del contexts[oldest_message_id]
+                logger.debug(f"Límite de contextos alcanzado para sesión {session_id}, eliminando el más antiguo")
+            
+            # Almacenar contexto
+            self.contexts[session_id][message_id] = context_data
+            
+            logger.debug(f"Contexto almacenado: sesión={session_id}, mensaje={message_id}, "
+                       f"fragmentos={len(context_data)}")
+            return True
+    
+    def get_message_context(self, session_id: str, message_id: str) -> Optional[List[Dict[str, Any]]]:
+        """
+        Obtiene el contexto utilizado para un mensaje específico.
+        
+        Args:
+            session_id: ID de la sesión
+            message_id: ID del mensaje
+        
+        Returns:
+            Datos de contexto o None si no existe
+        """
+        with self._lock:
+            # Verificar que exista la sesión
+            if session_id not in self.sessions or session_id not in self.contexts:
+                return None
+            
+            # Actualizar timestamp de actividad al acceder
+            self.sessions[session_id]["last_activity"] = time.time()
+            
+            # Obtener contexto
+            if message_id not in self.contexts[session_id]:
+                return None
+            
+            # Devolver copia para evitar modificaciones no controladas
+            return list(self.contexts[session_id][message_id])
+    
+    def get_resource_usage(self) -> Dict[str, Any]:
+        """
+        Obtiene información sobre el uso de recursos.
+        
+        Returns:
+            Diccionario con métricas de recursos
+        """
+        with self._lock:
+            # Actualizar información antes de devolver
+            self._update_resource_usage()
+            
+            # Devolver copia para evitar modificaciones no controladas
+            return dict(self.resource_usage)
     
     def list_available_databases(self) -> Dict[str, Dict[str, Any]]:
         """
-        Lista todas las bases de datos disponibles.
+        Lista todas las bases de datos disponibles con sus metadatos.
         
         Returns:
-            Diccionario con nombres de bases de datos y sus metadatos
+            Diccionario de bases de datos {db_name: metadata}
         """
-        # Actualizar información de la ruta del archivo
-        db_config = config.get_database_config()
-        db_dir = Path(db_config.get("sqlite", {}).get("db_dir", "modulos/databases/db"))
+        # Obtener la configuración de base de datos
+        database_config = config.get_database_config()
+        
+        # Determinar el directorio de bases de datos
+        db_dir = database_config.get("sqlite", {}).get("db_dir", "modulos/databases/db")
         
         # Asegurar que la ruta es absoluta
-        if not db_dir.is_absolute():
-            db_dir = Path(os.path.abspath(db_dir))
-            
+        if not os.path.isabs(db_dir):
+            db_dir = os.path.join(os.path.abspath(os.getcwd()), db_dir)
+        
         # Verificar que el directorio existe
-        if not db_dir.exists():
+        if not os.path.exists(db_dir):
             logger.warning(f"El directorio de bases de datos no existe: {db_dir}")
             return {}
-            
-        logger.info(f"Buscando bases de datos en: {db_dir}")
         
-        # Buscar todas las bases de datos físicas con diferentes extensiones
-        db_files = []
-        for ext in [".db", ".sqlite", ".duckdb"]:
-            ext_files = list(db_dir.glob(f"*{ext}"))
-            db_files.extend(ext_files)
-            logger.debug(f"Encontrados {len(ext_files)} archivos con extensión {ext}")
-        
-        logger.info(f"Total de archivos de base de datos encontrados: {len(db_files)}")
-        
-        # Actualizar la estructura de metadatos
         databases = {}
         
-        # Recorrer los archivos existentes
-        for db_file in db_files:
-            db_name = db_file.stem
-            extension = db_file.suffix
+        # Buscar archivos SQLite
+        sqlite_files = glob.glob(os.path.join(db_dir, "*.sqlite"))
+        for file_path in sqlite_files:
+            db_name = os.path.basename(file_path).replace(".sqlite", "")
             
-            # Buscar archivo de metadatos asociado
-            metadata_file = Path(f"{db_file}.meta.json")
+            # Intentar leer metadatos
+            meta_path = f"{file_path}.meta.json"
+            metadata = {}
             
-            # Incluir metadatos existentes o crear nuevos
-            if metadata_file.exists():
-                # Cargar metadatos desde el archivo .meta.json
+            if os.path.exists(meta_path):
                 try:
-                    with open(metadata_file, 'r', encoding='utf-8') as f:
+                    with open(meta_path, 'r') as f:
                         metadata = json.load(f)
-                    # Asegurar que la ruta es correcta
-                    metadata["db_path"] = str(db_file)
-                    # Determinar el tipo de base de datos basado en la extensión
-                    if extension == ".sqlite":
-                        metadata["db_type"] = "sqlite"
-                    elif extension == ".duckdb":
-                        metadata["db_type"] = "duckdb"
-                    # Actualizar metadatos centrales si es necesario
-                    self.db_metadata[db_name] = metadata
-                    logger.debug(f"Metadatos cargados desde {metadata_file}")
-                except json.JSONDecodeError as e:
-                    logger.error(f"Error al cargar metadatos desde {metadata_file}: {e}")
-                    if db_name in self.db_metadata:
-                        metadata = self.db_metadata[db_name]
-                        metadata["db_path"] = str(db_file)
-                    else:
-                        metadata = self._create_default_metadata(db_file)
-            elif db_name in self.db_metadata:
-                # Usar metadatos existentes en memoria
-                metadata = self.db_metadata[db_name]
-                metadata["db_path"] = str(db_file)
-                # Actualizar tipo si no coincide con la extensión
-                if extension == ".sqlite" and metadata.get("db_type") != "sqlite":
-                    metadata["db_type"] = "sqlite"
-                    logger.debug(f"Tipo actualizado a sqlite para {db_name} basado en extensión")
-                elif extension == ".duckdb" and metadata.get("db_type") != "duckdb":
-                    metadata["db_type"] = "duckdb"
-                    logger.debug(f"Tipo actualizado a duckdb para {db_name} basado en extensión")
-            else:
-                # Crear metadatos mínimos para bases de datos no registradas
-                metadata = self._create_default_metadata(db_file)
-                # Inferir tipo basado en extensión
-                if extension == ".sqlite":
-                    metadata["db_type"] = "sqlite"
-                elif extension == ".duckdb":
-                    metadata["db_type"] = "duckdb"
-                logger.debug(f"Creados metadatos por defecto para {db_name} ({extension})")
-                
-            databases[db_name] = metadata
+                except Exception as e:
+                    logger.warning(f"Error al leer metadatos de {meta_path}: {e}")
+            
+            db_info = {
+                "id": db_name,
+                "name": db_name,
+                "db_type": "sqlite",
+                "db_path": file_path,
+                "size": os.path.getsize(file_path),
+                "created_at": metadata.get("created_at", os.path.getctime(file_path)),
+                "last_used": metadata.get("last_used", os.path.getmtime(file_path)),
+                "embedding_model": metadata.get("embedding_model", "desconocido"),
+                "chunking_method": metadata.get("chunking_method", "desconocido"),
+                "embedding_dim": metadata.get("embedding_dim", 0)
+            }
+            
+            databases[db_name] = db_info
         
-        # Guardar cambios en caso de haber actualizado algún metadato
-        self._save_db_metadata()
-        
-        # Mostrar información resumida
-        db_types = {}
-        for name, meta in databases.items():
-            db_type = meta.get("db_type", "unknown")
-            db_types[db_type] = db_types.get(db_type, 0) + 1
-        
-        for db_type, count in db_types.items():
-            logger.info(f"- Bases de datos de tipo {db_type}: {count}")
+        # Buscar archivos DuckDB
+        duckdb_files = glob.glob(os.path.join(db_dir, "*.duckdb"))
+        for file_path in duckdb_files:
+            db_name = os.path.basename(file_path).replace(".duckdb", "")
+            
+            # Intentar leer metadatos
+            meta_path = f"{file_path}.meta.json"
+            metadata = {}
+            
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, 'r') as f:
+                        metadata = json.load(f)
+                except Exception as e:
+                    logger.warning(f"Error al leer metadatos de {meta_path}: {e}")
+            
+            db_info = {
+                "id": db_name,
+                "name": db_name,
+                "db_type": "duckdb",
+                "db_path": file_path,
+                "size": os.path.getsize(file_path),
+                "created_at": metadata.get("created_at", os.path.getctime(file_path)),
+                "last_used": metadata.get("last_used", os.path.getmtime(file_path)),
+                "embedding_model": metadata.get("embedding_model", "desconocido"),
+                "chunking_method": metadata.get("chunking_method", "desconocido"),
+                "embedding_dim": metadata.get("embedding_dim", 0)
+            }
+            
+            databases[db_name] = db_info
         
         return databases
     
-    def _create_default_metadata(self, db_file: Path) -> Dict[str, Any]:
+    def list_sessions(self) -> List[Dict[str, Any]]:
         """
-        Crea metadatos por defecto para una base de datos.
+        Lista todas las sesiones activas.
         
-        Args:
-            db_file: Ruta al archivo de base de datos
-            
         Returns:
-            Dict con metadatos por defecto
+            Lista de sesiones con sus metadatos
         """
-        # Determinar el tipo de base de datos basado en la extensión
-        extension = db_file.suffix.lower()
-        db_type = "sqlite"  # Valor por defecto
-        
-        if extension == ".sqlite":
-            db_type = "sqlite"
-        elif extension == ".duckdb":
-            db_type = "duckdb"
-        elif extension == ".db":
-            # Para archivos .db, intentar inferir por el nombre
-            if "duckdb" in db_file.stem.lower():
-                db_type = "duckdb"
-        
-        logger.debug(f"Inferido tipo de base de datos {db_type} para {db_file} basado en extensión {extension}")
-        
-        metadata = {
-            "db_path": str(db_file),
-            "db_type": db_type,
-            "embedding_model": "desconocido",
-            "embedding_dim": 0,
-            "chunking_method": "desconocido",
-            "created_at": os.path.getctime(db_file),
-            "note": f"Metadatos inferidos automáticamente basados en extensión {extension}"
-        }
-        
-        # Registrar para futuras consultas
-        self.db_metadata[db_file.stem] = metadata
-        return metadata
+        with self._lock:
+            # Crear una lista con todas las sesiones
+            sessions_list = []
+            for session_id, session_data in self.sessions.items():
+                # Crear una copia para evitar modificaciones no controladas
+                session_copy = dict(session_data)
+                session_copy["id"] = session_id
+                sessions_list.append(session_copy)
+            
+            # Ordenar por último uso (más reciente primero)
+            sessions_list.sort(key=lambda x: x.get("last_activity", 0), reverse=True)
+            
+            return sessions_list
     
     def get_database_by_index(self, index: int) -> Tuple[Any, Dict[str, Any]]:
         """
-        Obtiene una base de datos por su índice en la lista de bases de datos disponibles.
+        Obtiene una instancia de base de datos y sus metadatos por índice.
         
         Args:
-            index: Índice de la base de datos (0 es la más reciente)
+            index: Índice de la base de datos en la lista ordenada
             
         Returns:
-            Tupla con (instancia_db, metadata)
+            Tupla (instancia de base de datos, metadatos)
             
         Raises:
-            ValueError: Si el índice está fuera de rango
+            IndexError: Si el índice está fuera de rango
+            ValueError: Si no se puede cargar la base de datos
         """
-        # Obtener las bases de datos disponibles
+        # Obtener lista ordenada de bases de datos
         databases = self.list_available_databases()
-        
-        # Crear una lista ordenada de las bases de datos
         sorted_dbs = []
+        
+        # Convertir a lista y ordenar por último uso
         for name, metadata in databases.items():
             sorted_dbs.append((name, metadata))
         
-        # Ordenar por último uso si está disponible
         sorted_dbs.sort(key=lambda x: x[1].get('last_used', 0), reverse=True)
         
-        # Verificar que el índice es válido
+        # Verificar índice
         if index < 0 or index >= len(sorted_dbs):
-            raise ValueError(f"Índice de base de datos fuera de rango: {index}. Rango válido: 0-{len(sorted_dbs)-1}")
+            raise IndexError(f"Índice de base de datos fuera de rango: {index}")
         
-        # Obtener la base de datos seleccionada
-        name, metadata = sorted_dbs[index]
-        
-        # Obtener información necesaria para cargar la base de datos
-        embedding_model = metadata.get("embedding_model", "modernbert")
-        chunking_method = metadata.get("chunking_method", "context") 
-        db_type = metadata.get("db_type", "sqlite")
-        session_id = metadata.get("session_id")
-        
-        # Cargar el modelo de embeddings para determinar la dimensión
-        embedding_manager = EmbeddingFactory.get_embedding_manager(embedding_model)
-        embedding_manager.load_model()
-        embedding_dim = embedding_manager.embedding_dim
-        
-        # Obtener instancia de base de datos
-        db = DatabaseFactory().get_database_instance(
-            db_type=db_type,
-            embedding_dim=embedding_dim,
-            embedding_model=embedding_model,
-            chunking_method=chunking_method,
-            session_id=session_id
-        )
-        
-        # Conectar a la base de datos
+        # Obtener nombre y metadatos
+        db_name, metadata = sorted_dbs[index]
         db_path = metadata.get('db_path')
-        if db_path:
-            db.connect(db_path)
+        embedding_dim = metadata.get('embedding_dim', 768)  # Valor por defecto si no se conoce
         
-        # Actualizar last_used en los metadatos
-        metadata["last_used"] = time.time()
-        self._store_db_metadata(name, metadata)
-        
-        return db, metadata
-
-    def _store_db_metadata(self, name: str, metadata: Dict[str, Any]) -> None:
+        # Cargar la base de datos
+        try:
+            from modulos.databases.FactoryDatabase import DatabaseFactory
+            db = DatabaseFactory.get_database_instance(
+                db_type=metadata.get('db_type', 'sqlite'),
+                embedding_dim=embedding_dim,
+                load_existing=True,
+                db_path=db_path
+            )
+            return db, metadata
+        except Exception as e:
+            logger.error(f"Error al cargar base de datos {db_name}: {e}")
+            raise ValueError(f"No se pudo cargar la base de datos: {e}")
+    
+    def register_database(self, db_name: str, metadata: Dict[str, Any]) -> bool:
         """
-        Almacena los metadatos actualizados de una base de datos.
+        Registra una nueva base de datos en el sistema con sus metadatos asociados.
         
         Args:
-            name: Nombre de la base de datos
-            metadata: Metadatos actualizados
+            db_name: Nombre de la base de datos
+            metadata: Metadatos de la base de datos (tipo, modelo, dimensiones, etc.)
+            
+        Returns:
+            True si se registró correctamente, False en caso contrario
         """
-        # 1. Actualizar el repositorio central de metadatos
-        self.db_metadata[name] = metadata
-        
-        # 2. Guardar en el archivo individual
-        db_path = metadata.get('db_path')
-        if db_path and db_path.endswith((".db", ".sqlite", ".duckdb")):
-            metadata_path = f"{db_path}.meta.json"
-            try:
-                with open(metadata_path, 'w') as f:
-                    json.dump(metadata, f, indent=2)
-                logger.debug(f"Metadatos individuales actualizados para {name} en {metadata_path}")
-            except Exception as e:
-                logger.error(f"Error al guardar metadatos individuales para {name}: {e}")
-        
-        # 3. Guardar todos los metadatos centrales también
-        self._save_db_metadata()
+        try:
+            # Asegurar que existe la ruta del archivo de metadatos
+            db_path = metadata.get('db_path')
+            if not db_path:
+                logger.error(f"No se pudo registrar la base de datos {db_name}: falta la ruta del archivo")
+                return False
+                
+            # Guardar metadatos en un archivo JSON junto a la base de datos
+            meta_path = f"{db_path}.meta.json"
+            
+            # Actualizar timestamp
+            metadata["last_used"] = time.time()
+            
+            # Guardar metadatos en formato JSON
+            with open(meta_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
+                
+            logger.info(f"Base de datos registrada correctamente: {db_name}")
+            return True
+        except Exception as e:
+            logger.error(f"Error al registrar base de datos {db_name}: {e}")
+            return False

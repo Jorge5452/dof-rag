@@ -127,7 +127,25 @@ class Config:
         Returns:
             Diccionario con la configuración de la base de datos.
         """
+        # Obtener la configuración de la base de datos o un diccionario vacío si no existe
         db_config = self.config.get("database", {})
+        
+        # Si db_config es None (lo que no debería ocurrir, pero por seguridad)
+        if db_config is None:
+            db_config = {}
+            
+        # Asegurar que existe la entrada del tipo de base de datos
+        if "type" not in db_config:
+            db_config["type"] = "sqlite"  # Valor por defecto
+            
+        # Asegurar que existen entradas para cada tipo de base de datos
+        if "sqlite" not in db_config:
+            db_config["sqlite"] = {"db_dir": "modulos/databases/db", "db_name": ""}
+            
+        if "duckdb" not in db_config:
+            db_config["duckdb"] = {"db_dir": "modulos/databases/db", "db_name": ""}
+        
+        # Actualizar rutas y procesar variables de entorno
         db_config = self._update_db_paths(db_config)
         return self._process_env_vars(db_config)
     
@@ -142,21 +160,49 @@ class Config:
         Returns:
             Configuración actualizada con rutas absolutas.
         """
+        # Verificar que db_config es un diccionario válido
+        if not isinstance(db_config, dict):
+            db_config = {}
+            
+        # Asegurar que existe un tipo de base de datos
         db_type = db_config.get("type", "sqlite")
         
         # Obtener la configuración específica del tipo de base de datos
         type_config = db_config.get(db_type, {})
         
-        if "db_dir" in type_config and "db_name" in type_config:
-            db_dir = Path(type_config["db_dir"])
-            db_name = type_config["db_name"]
+        # Verificar que type_config es un diccionario válido
+        if not isinstance(type_config, dict):
+            type_config = {}
+            db_config[db_type] = type_config
+        
+        # Verificar y proporcionar valores predeterminados si faltan
+        if "db_dir" not in type_config:
+            type_config["db_dir"] = "modulos/databases/db"
             
+        if "db_name" not in type_config:
+            type_config["db_name"] = ""
+        
+        # Crear directorio si no existe
+        try:
+            db_dir = Path(type_config["db_dir"])
             # Asegurar que el directorio exista
             os.makedirs(db_dir, exist_ok=True)
             
             # Calcular y agregar la ruta completa
+            db_name = type_config.get("db_name", "")
             db_path = db_dir / db_name
             type_config["db_path"] = str(db_path)
+            db_config[db_type] = type_config
+        except Exception as e:
+            # Si hay un error, utilizar rutas predeterminadas
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(f"Error al configurar rutas de BD: {e}, usando valores predeterminados")
+            
+            # Establecer valores predeterminados seguros
+            type_config["db_dir"] = "modulos/databases/db"
+            type_config["db_name"] = ""
+            type_config["db_path"] = "modulos/databases/db/"
             db_config[db_type] = type_config
         
         return db_config
@@ -197,13 +243,15 @@ class Config:
     
     def get_specific_ai_config(self, ai_type: str) -> Dict[str, Any]:
         """
-        Obtiene la configuración específica de un cliente de IA.
+        Obtiene la configuración específica de un cliente de IA, combinando
+        parámetros generales con específicos y filtrando según los parámetros
+        admitidos por cada cliente.
         
         Args:
             ai_type: Tipo de cliente (ej. 'openai', 'gemini', 'ollama')
         
         Returns:
-            Configuración específica del cliente de IA.
+            Configuración específica del cliente de IA con parámetros filtrados.
         """
         ai_config = self.get_ai_client_config()
         specific_config = ai_config.get(ai_type, {})
@@ -211,9 +259,48 @@ class Config:
         # Combinar con los parámetros generales si existen
         general_params = ai_config.get("general", {})
         
+        # Asegurarse de que el system_prompt siempre esté disponible
+        if "system_prompt" not in specific_config and "system_prompt" in general_params:
+            specific_config["system_prompt"] = general_params["system_prompt"]
+        
         # Los parámetros específicos tienen prioridad sobre los generales
         combined_config = {**general_params, **specific_config}
-        return combined_config
+        
+        # Definir parámetros soportados por cada cliente
+        client_params = {
+            # Parámetros comunes a todos los clientes
+            "common": [
+                "model", "temperature", "max_tokens", "top_p", "top_k", "system_prompt", 
+                "stream", "response_mime_type", "context_format", "instruction_style"
+            ],
+            
+            # Parámetros específicos de OpenAI
+            "openai": ["api_key", "api_key_env", "organization", "api_base", "api_base_env", 
+                      "frequency_penalty", "presence_penalty", "timeout", "embedding_model"],
+            
+            # Parámetros específicos de Gemini
+            "gemini": ["api_key", "api_key_env", "max_output_tokens", 
+                      "embedding_model"],
+            
+            # Parámetros específicos de Ollama
+            "ollama": ["base_url", "api_url", "api_url_env", "timeout", 
+                      "num_predict", "embedding_model"]
+        }
+        
+        # Obtener parámetros válidos para este tipo de cliente
+        valid_params = client_params["common"] + client_params.get(ai_type, [])
+        
+        # Filtrar configuración solo para parámetros válidos
+        filtered_config = {k: v for k, v in combined_config.items() if k in valid_params}
+        
+        # Manejar nombres de parámetros alternativos
+        if ai_type == "gemini" and "max_tokens" in filtered_config and "max_output_tokens" not in filtered_config:
+            filtered_config["max_output_tokens"] = filtered_config.pop("max_tokens")
+        
+        if ai_type == "ollama" and "max_tokens" in filtered_config and "num_predict" not in filtered_config:
+            filtered_config["num_predict"] = filtered_config.get("max_tokens")
+        
+        return filtered_config
     
     def get_chunker_method_config(self, method: Optional[str] = None) -> Dict[str, Any]:
         """

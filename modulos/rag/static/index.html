@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Chat</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,0..200" />
+    <!-- Highlight.js para resaltado de código -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/styles/github.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.7.0/highlight.min.js"></script>
+    <!-- Marked.js para procesamiento de Markdown -->
+    <script src="https://cdn.jsdelivr.net/npm/marked@4.3.0/marked.min.js"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header class="app-header">
+        <div class="header-content">
+            <h1>RAG Chat</h1>
+            <div class="theme-selector">
+                <label for="theme-select">Tema:</label>
+                <select id="theme-select">
+                    <option value="dark">Oscuro</option>
+                    <option value="light">Claro</option>
+                    <option value="aqua">Verde Agua</option>
+                </select>
+            </div>
+            <button id="export-chat" title="Exportar chat">
+                <span class="material-symbols-outlined">download</span>
+            </button>
+            <button id="settings-button" title="Configuración">
+                <span class="material-symbols-outlined">settings</span>
+            </button>
+        </div>
+    </header>
+
+    <main>
+        <!-- Welcome Screen - Added for database selection -->
+        <div id="welcome-screen">
+            <h2>Bienvenido al Chatbot RAG</h2>
+            <p>Este chatbot utiliza Recuperación Aumentada de Generación (RAG) para proporcionar respuestas basadas en documentos y bases de datos.</p>
+            <div class="database-selection">
+                <h3>Para comenzar, seleccione una base de datos:</h3>
+                <select id="database">
+                    <option value="" disabled selected>Cargando bases de datos...</option>
+                </select>
+                <p class="hint">Si no hay bases de datos disponibles, primero debe ingestar documentos utilizando el comando de ingesta.</p>
+            </div>
+        </div>
+
+        <div id="chat-container">
+            <!-- Mensaje de bienvenida del sistema -->
+            <div class="message system-message">
+                <div class="message-bubble">
+                    <span class="material-symbols-outlined">info</span>
+                    <span>Bienvenido a RAG Chat. ¿En qué puedo ayudarte hoy?</span>
+                </div>
+            </div>
+
+            <!-- Ejemplo de mensaje del usuario -->
+            <div class="message user-message">
+                <div class="message-content-container">
+                    <div class="message-bubble">
+                        <div class="message-content">¿Puedes explicarme qué es RAG?</div>
+                    </div>
+                    <div class="message-avatar">U</div>
+                </div>
+                <div class="message-timestamp">12:05</div>
+            </div>
+
+            <!-- Ejemplo de mensaje del bot -->
+            <div class="message bot-message">
+                <div class="message-content-container">
+                    <div class="message-avatar">AI</div>
+                    <div class="message-bubble">
+                        <div class="message-content">RAG significa Recuperación Aumentada de Generación. Es una técnica que combina la recuperación de información de una base de conocimientos con la generación de respuestas por un modelo de lenguaje. Esto permite que las respuestas sean más precisas y estén respaldadas por fuentes de información confiables.</div>
+                    </div>
+                </div>
+                <div class="message-timestamp">12:06</div>
+                
+                <!-- Panel de fuentes -->
+                <div class="sources-panel">
+                    <div class="sources-header">
+                        <span class="material-symbols-outlined">menu_book</span>
+                        <span>Fuentes (3)</span>
+                    </div>
+                    <div class="sources-list">
+                        <div class="source-item">
+                            <div class="source-title">Introducción a RAG</div>
+                            <div class="source-context">RAG (Recuperación Aumentada de Generación) es un modelo híbrido que combina la recuperación de documentos con la generación de texto.</div>
+                        </div>
+                        <div class="source-item">
+                            <div class="source-title">Aplicaciones de RAG</div>
+                            <div class="source-context">RAG se utiliza en chatbots, asistentes virtuales y sistemas de respuesta a preguntas para proporcionar información precisa y confiable.</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="input-area">
+            <div class="input-container">
+                <button id="clear-chat" title="Limpiar chat">
+                    <span class="material-symbols-outlined">delete</span>
+                </button>
+                <button id="input-settings-button" title="Configuración">
+                    <span class="material-symbols-outlined">settings</span>
+                </button>
+                <button id="input-export-chat" title="Exportar chat">
+                    <span class="material-symbols-outlined">download</span>
+                </button>
+                <textarea id="chat-input" placeholder="Escribe tu mensaje aquí..." rows="1"></textarea>
+                <div id="char-counter" class="char-counter">0</div>
+                <button id="send-button" title="Enviar">
+                    <span class="material-symbols-outlined">send</span>
+                </button>
+            </div>
+        </div>
+    </main>
+
+    <!-- Modal de configuración -->
+    <div id="settings-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Configuración</h2>
+                <button class="close-button">
+                    <span class="material-symbols-outlined">close</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="settings-section">
+                    <h3>Apariencia</h3>
+                    <div class="setting-row">
+                        <label for="modal-theme-select">Tema:</label>
+                        <select id="modal-theme-select">
+                            <option value="dark">Oscuro</option>
+                            <option value="light">Claro</option>
+                            <option value="aqua">Verde Agua</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="settings-section">
+                    <h3>Opciones de chat</h3>
+                    <div class="setting-row">
+                        <label for="show-sources">Mostrar fuentes:</label>
+                        <input type="checkbox" id="show-sources" checked>
+                    </div>
+                    <div class="setting-row">
+                        <label for="message-density">Densidad de mensajes:</label>
+                        <div class="range-with-value">
+                            <input type="range" id="message-density" min="1" max="3" value="2">
+                            <span id="message-density-value">Normal</span>
+                        </div>
+                    </div>
+                </div>
+                <div class="settings-section">
+                    <h3>Accesibilidad</h3>
+                    <div class="setting-row">
+                        <label for="reduced-motion">Reducir animaciones:</label>
+                        <input type="checkbox" id="reduced-motion">
+                    </div>
+                    <div class="setting-row">
+                        <label for="high-contrast">Alto contraste:</label>
+                        <input type="checkbox" id="high-contrast">
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="reset-settings">Restablecer</button>
+                <button id="save-settings">Guardar</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+    
+    <!-- Debug script -->
+    <script>
+        // Wait for document to be fully loaded
+        document.addEventListener('DOMContentLoaded', function() {
+            console.log('Debug script loaded');
+            
+            // Check if elements exist
+            console.log('Database select element:', document.getElementById('database'));
+            console.log('Welcome screen element:', document.getElementById('welcome-screen'));
+            console.log('Chat container:', document.getElementById('chat-container'));
+            console.log('Input area:', document.querySelector('.input-area'));
+            
+            // Log app initialization state
+            console.log('App initialization state:');
+            console.log('- Welcome screen display:', getComputedStyle(document.getElementById('welcome-screen')).display);
+            console.log('- Chat container display:', getComputedStyle(document.getElementById('chat-container')).display);
+            console.log('- Input area display:', getComputedStyle(document.querySelector('.input-area')).display);
+            
+            // Force reload of databases after 2 seconds
+            setTimeout(function() {
+                console.log('Manual database reload triggered');
+                
+                // Direct API call to debug
+                fetch('/api/databases')
+                    .then(response => {
+                        console.log('API Response status:', response.status);
+                        return response.json();
+                    })
+                    .then(data => {
+                        console.log('Database API data:', data);
+                        
+                        const databaseSelect = document.getElementById('database');
+                        if (databaseSelect) {
+                            console.log('Manually populating database select');
+                            console.log('Current database select content:', databaseSelect.innerHTML);
+                            
+                            // Clear current options
+                            databaseSelect.innerHTML = '<option value="" disabled selected>Seleccione una base de datos</option>';
+                            
+                            // Add options from API response
+                            if (data.database_details && Array.isArray(data.database_details)) {
+                                data.database_details.forEach(db => {
+                                    const option = document.createElement('option');
+                                    option.value = db.id;
+                                    option.textContent = db.display_name || `${db.name} (${db.type})`;
+                                    option.dataset.type = db.type;
+                                    option.dataset.size = db.size_formatted || '';
+                                    databaseSelect.appendChild(option);
+                                });
+                                
+                                console.log(`Added ${data.database_details.length} database options`);
+                                console.log('Updated database select content:', databaseSelect.innerHTML);
+                            }
+                        }
+                    })
+                    .catch(error => {
+                        console.error('Debug API error:', error);
+                    });
+            }, 2000);
+        });
+    </script>
+</body>
+</html>

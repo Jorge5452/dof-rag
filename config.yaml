@@ -12,7 +12,7 @@ general:
 # Configuración para chunking de documentos
 chunks:
   # Método de chunking a utilizar (character, token, context)
-  method: "context"
+  method: "character"
   
   # Configuración para chunker por caracteres
   character:
@@ -33,7 +33,7 @@ chunks:
     # tokenizer: "intfloat/multilingual-e5-small"
     tokenizer: "nomic-ai/modernbert-embed-base"
     # Cantidad máxima de tokens por chunk
-    max_tokens: 512
+    max_tokens: 2048
     # Solapamiento entre chunks en tokens
     token_overlap: 100
   
@@ -94,30 +94,49 @@ database:
     similarity_threshold: 0.3
     # Habilitar extensión sqlite-vec para búsqueda vectorial optimizada
     use_vector_extension: true
+  
+  # Configuración para DuckDB
+  duckdb:
+    # Ruta al archivo de base de datos
+    db_dir: "modulos/databases/db"
+    db_name: ""  # Nombre vacío para que siempre se genere automáticamente
+    similarity_threshold: 0.3
+    # Límite de memoria para operaciones de DuckDB (2GB por defecto)
+    memory_limit: "2GB"
+    # Número de hilos para procesamiento paralelo (4 es un valor seguro para la mayoría de sistemas)
+    threads: 4
+    # Extensiones a instalar (httpfs, json)
+    extensions: ["httpfs", "json"]
 
 # Configuración para clientes de IA
 ai_client:
-  # Tipo de cliente (openai, gemini, ollama)
+  # Tipo de cliente por defecto (openai, gemini, ollama)
   type: "gemini"
   
   # Parámetros generales para modelos de IA (aplicables a todos los modelos)
   general:
-    # Temperatura para la generación (0.0 a 1.0)
-    temperature: 0.7
-    # Tokens máximos para la respuesta
-    max_tokens: 1000
-    # Top-k para muestreo
-    top_k: 40
-    # Top-p para muestreo (nucleus sampling)
-    top_p: 0.95
-    # Frecuencia de penalización
-    frequency_penalty: 0.0
-    # Penalización por presencia
-    presence_penalty: 0.0
     # Prompt inicial de sistema
-    system_prompt: "Eres un asistente útil y preciso. Responde a la pregunta usando sólo la información proporcionada en el contexto. Si la información no está en el contexto, di que no puedes responder la pregunta basándote en el contexto disponible."
+    system_prompt: "Eres un asistente preciso especializado en responder preguntas basándote únicamente en la información proporcionada. Tu objetivo es analizar cuidadosamente el contexto y extraer respuestas relevantes sin añadir información externa. Responde SIEMPRE en español, usando un tono claro y profesional. Si la información proporcionada no es suficiente para responder a la pregunta, indícalo claramente sin intentar adivinar. Prioriza la precisión sobre la creatividad, asegurándote de que cada afirmación pueda ser respaldada por el contexto proporcionado. El formato en el que recibiras el contexto los es en markdown, responde del mejor formato para que el usuario pueda leerlo, no markdown."
+    
+    # Parámetros optimizados para RAG (aplicables a todos los modelos)
+    # Temperatura baja para favorecer respuestas factuales y precisas
+    temperature: 0.4
+    # Tokens máximos para la respuesta
+    max_tokens: 2048
+    # Top-p para muestreo (nucleus sampling)
+    top_p: 0.65
+    # Top-k para diversidad controlada
+    top_k: 35
+    # Utilizar streaming (tiempo-real) para respuestas
+    stream: false
+    # Formato de respuesta
+    response_mime_type: "text/plain"
+    # Instrucciones para el formateo de contexto
+    context_format: "fragments"  # options: fragments, simple, numbered
+    # Estilo de formateo de instrucciones
+    instruction_style: "detailed"  # options: minimal, detailed, standard
   
-  # Configuración para OpenAI
+  # Configuración específica para OpenAI (solo lo específico de la plataforma)
   openai:
     # Modelo a utilizar
     model: "gpt-3.5-turbo"
@@ -125,32 +144,33 @@ ai_client:
     api_key_env: "OPENAI_API_KEY"
     # Nombre de la variable de entorno para la URL base de la API (opcional)
     api_base_env: "OPENAI_API_BASE"
-    # Parámetros específicos que sobrescriben los generales (opcional)
-    temperature: 0.0
-    max_tokens: 1024
+    # Modelo para embeddings
+    embedding_model: "text-embedding-ada-002"
+    # Parámetros únicos para OpenAI (que no estén en general)
+    frequency_penalty: 0.0
+    presence_penalty: 0.0
     timeout: 30
   
-  # Configuración para Gemini
+  # Configuración específica para Gemini
   gemini:
     # Modelo a utilizar
-    model: "gemini-pro"
+    model: "gemini-2.0-flash"
     # Nombre de la variable de entorno para la API key
     api_key_env: "GEMINI_API_KEY"
-    # Tipo de respuesta MIME
-    response_mime_type: "text/plain"
-    # Usar streaming para respuestas (true/false)
-    stream: false
-    temperature: 0.0
-    max_output_tokens: 1024
+    # Modelo para embeddings
+    embedding_model: "embedding-001"
   
-  # Configuración para Ollama
+  # Configuración específica para Ollama
   ollama:
-    model: "llama2"
+    # Modelo a utilizar
+    model: "gemma2:4b"
+    # URL de la API
     api_url: "http://localhost:11434/api"
     # Nombre de la variable de entorno para la URL de la API (opcional)
     api_url_env: "OLLAMA_API_URL"
-    temperature: 0.0
-    max_tokens: 1024
+    # Modelo para embeddings
+    embedding_model: "all-minilm"
+    # Timeout específico para Ollama
     timeout: 60
 
 # Parámetros para procesamiento de documentos
