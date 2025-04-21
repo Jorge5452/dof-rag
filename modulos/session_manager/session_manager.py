@@ -519,91 +519,83 @@ class SessionManager:
             # Devolver copia para evitar modificaciones no controladas
             return dict(self.resource_usage)
     
-    def list_available_databases(self) -> Dict[str, Dict[str, Any]]:
+    def list_available_databases(self, force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
         """
         Lista todas las bases de datos disponibles con sus metadatos.
         
+        Args:
+            force_refresh: Si es True, fuerza una nueva búsqueda en disco
+            
         Returns:
             Diccionario de bases de datos {db_name: metadata}
         """
+        # Usar caché si está disponible y no se fuerza actualización
+        if hasattr(self, '_db_cache') and not force_refresh:
+            # Verificar si el caché no es muy viejo (5 minutos)
+            if hasattr(self, '_db_cache_time') and time.time() - self._db_cache_time < 300:
+                return self._db_cache
+        
         # Obtener la configuración de base de datos
         database_config = config.get_database_config()
         
-        # Determinar el directorio de bases de datos
-        db_dir = database_config.get("sqlite", {}).get("db_dir", "modulos/databases/db")
-        
-        # Asegurar que la ruta es absoluta
-        if not os.path.isabs(db_dir):
-            db_dir = os.path.join(os.path.abspath(os.getcwd()), db_dir)
-        
-        # Verificar que el directorio existe
-        if not os.path.exists(db_dir):
-            logger.warning(f"El directorio de bases de datos no existe: {db_dir}")
-            return {}
-        
+        # Lista para todas las bases de datos encontradas
         databases = {}
         
-        # Buscar archivos SQLite
-        sqlite_files = glob.glob(os.path.join(db_dir, "*.sqlite"))
-        for file_path in sqlite_files:
-            db_name = os.path.basename(file_path).replace(".sqlite", "")
-            
-            # Intentar leer metadatos
-            meta_path = f"{file_path}.meta.json"
-            metadata = {}
-            
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, 'r') as f:
-                        metadata = json.load(f)
-                except Exception as e:
-                    logger.warning(f"Error al leer metadatos de {meta_path}: {e}")
-            
-            db_info = {
-                "id": db_name,
-                "name": db_name,
-                "db_type": "sqlite",
-                "db_path": file_path,
-                "size": os.path.getsize(file_path),
-                "created_at": metadata.get("created_at", os.path.getctime(file_path)),
-                "last_used": metadata.get("last_used", os.path.getmtime(file_path)),
-                "embedding_model": metadata.get("embedding_model", "desconocido"),
-                "chunking_method": metadata.get("chunking_method", "desconocido"),
-                "embedding_dim": metadata.get("embedding_dim", 0)
-            }
-            
-            databases[db_name] = db_info
+        # Buscar en todos los tipos de bases de datos compatibles
+        db_types = ['sqlite', 'duckdb']
         
-        # Buscar archivos DuckDB
-        duckdb_files = glob.glob(os.path.join(db_dir, "*.duckdb"))
-        for file_path in duckdb_files:
-            db_name = os.path.basename(file_path).replace(".duckdb", "")
+        for db_type in db_types:
+            # Determinar el directorio de bases de datos para este tipo
+            db_dir = database_config.get(db_type, {}).get("db_dir", f"modulos/databases/db/{db_type}")
             
-            # Intentar leer metadatos
-            meta_path = f"{file_path}.meta.json"
-            metadata = {}
+            # Asegurar que la ruta es absoluta
+            if not os.path.isabs(db_dir):
+                db_dir = os.path.join(os.path.abspath(os.getcwd()), db_dir)
             
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, 'r') as f:
-                        metadata = json.load(f)
-                except Exception as e:
-                    logger.warning(f"Error al leer metadatos de {meta_path}: {e}")
+            # Verificar que el directorio existe
+            if not os.path.exists(db_dir):
+                logger.debug(f"El directorio de bases de datos {db_type} no existe: {db_dir}")
+                continue
             
-            db_info = {
-                "id": db_name,
-                "name": db_name,
-                "db_type": "duckdb",
-                "db_path": file_path,
-                "size": os.path.getsize(file_path),
-                "created_at": metadata.get("created_at", os.path.getctime(file_path)),
-                "last_used": metadata.get("last_used", os.path.getmtime(file_path)),
-                "embedding_model": metadata.get("embedding_model", "desconocido"),
-                "chunking_method": metadata.get("chunking_method", "desconocido"),
-                "embedding_dim": metadata.get("embedding_dim", 0)
-            }
+            # Buscar archivos de base de datos
+            extensions = ['.sqlite', '.db'] if db_type == 'sqlite' else ['.duckdb']
             
-            databases[db_name] = db_info
+            for extension in extensions:
+                db_files = glob.glob(os.path.join(db_dir, f"*{extension}"))
+                
+                for file_path in db_files:
+                    db_name = os.path.basename(file_path).replace(extension, "")
+                    
+                    # Buscar metadatos en múltiples ubicaciones
+                    metadata = self._find_database_metadata(file_path, db_name)
+                    
+                    if not metadata:
+                        # Crear metadatos básicos si no se encuentran
+                        metadata = {
+                            "id": db_name,
+                            "name": db_name,
+                            "db_type": db_type,
+                            "db_path": file_path,
+                            "size": os.path.getsize(file_path),
+                            "created_at": os.path.getctime(file_path),
+                            "last_used": os.path.getmtime(file_path)
+                        }
+                    else:
+                        # Asegurar que hay campos básicos
+                        metadata.update({
+                            "id": db_name,
+                            "name": db_name,
+                            "db_type": metadata.get("db_type", db_type),
+                            "db_path": file_path,
+                            "size": os.path.getsize(file_path)
+                        })
+                    
+                    # Añadir a la lista de bases de datos
+                    databases[db_name] = metadata
+        
+        # Guardar en caché
+        self._db_cache = databases
+        self._db_cache_time = time.time()
         
         return databases
     
@@ -628,12 +620,13 @@ class SessionManager:
             
             return sessions_list
     
-    def get_database_by_index(self, index: int) -> Tuple[Any, Dict[str, Any]]:
+    def get_database_by_index(self, index: int, session_id: Optional[str] = None) -> Tuple[Any, Dict[str, Any]]:
         """
         Obtiene una instancia de base de datos y sus metadatos por índice.
         
         Args:
             index: Índice de la base de datos en la lista ordenada
+            session_id: ID de la sesión (opcional)
             
         Returns:
             Tupla (instancia de base de datos, metadatos)
@@ -642,34 +635,87 @@ class SessionManager:
             IndexError: Si el índice está fuera de rango
             ValueError: Si no se puede cargar la base de datos
         """
-        # Obtener lista ordenada de bases de datos
-        databases = self.list_available_databases()
-        sorted_dbs = []
+        # Obtener lista de bases de datos
+        databases = {}
+        
+        if session_id:
+            # Si hay sesión, filtrar bases de datos de esa sesión
+            session_dbs = self.get_session_databases(session_id)
+            for db_info in session_dbs:
+                db_name = db_info['name']
+                # Buscar metadatos completos
+                all_dbs = self.list_available_databases()
+                if db_name in all_dbs:
+                    databases[db_name] = all_dbs[db_name]
+        else:
+            # Sin sesión, obtener todas las bases de datos
+            databases = self.list_available_databases()
         
         # Convertir a lista y ordenar por último uso
+        sorted_dbs = []
         for name, metadata in databases.items():
             sorted_dbs.append((name, metadata))
         
         sorted_dbs.sort(key=lambda x: x[1].get('last_used', 0), reverse=True)
         
         # Verificar índice
+        if not sorted_dbs:
+            raise ValueError("No hay bases de datos disponibles")
+            
         if index < 0 or index >= len(sorted_dbs):
             raise IndexError(f"Índice de base de datos fuera de rango: {index}")
         
         # Obtener nombre y metadatos
         db_name, metadata = sorted_dbs[index]
         db_path = metadata.get('db_path')
-        embedding_dim = metadata.get('embedding_dim', 768)  # Valor por defecto si no se conoce
         
-        # Cargar la base de datos
+        # Verificar campos necesarios y completar si faltan
+        required_fields = ['db_type', 'embedding_model', 'embedding_dim', 'chunking_method']
+        missing_fields = [field for field in required_fields if field not in metadata]
+        
+        if missing_fields:
+            logger.warning(f"Campos faltantes en metadatos: {missing_fields}. Intentando recuperar...")
+            
+            # Completar campos faltantes
+            if 'db_type' not in metadata and db_path:
+                if db_path.endswith('.sqlite') or db_path.endswith('.db'):
+                    metadata['db_type'] = 'sqlite'
+                elif db_path.endswith('.duckdb'):
+                    metadata['db_type'] = 'duckdb'
+            
+            if 'embedding_dim' not in metadata:
+                # Usar una dimensión estándar como valor por defecto
+                metadata['embedding_dim'] = 768
+                logger.warning("Usando dimensión de embedding por defecto: 768")
+                
+            if 'embedding_model' not in metadata:
+                embedding_config = config.get_embedding_config()
+                metadata['embedding_model'] = embedding_config.get('model', 'modernbert')
+                
+            if 'chunking_method' not in metadata:
+                chunks_config = config.get_chunks_config()
+                metadata['chunking_method'] = chunks_config.get('method', 'character')
+        
+        # Cargar la base de datos con todos los parámetros necesarios
         try:
             from modulos.databases.FactoryDatabase import DatabaseFactory
             db = DatabaseFactory.get_database_instance(
                 db_type=metadata.get('db_type', 'sqlite'),
-                embedding_dim=embedding_dim,
+                embedding_dim=metadata.get('embedding_dim', 768),
+                embedding_model=metadata.get('embedding_model', 'modernbert'),
+                chunking_method=metadata.get('chunking_method', 'character'),
                 load_existing=True,
                 db_path=db_path
             )
+            
+            # Actualizar timestamp de último uso
+            metadata['last_used'] = time.time()
+            self.register_database(db_name, metadata)
+            
+            # Si hay una sesión, asociar la base de datos
+            if session_id:
+                self.associate_database_with_session(session_id, db_name, metadata)
+            
             return db, metadata
         except Exception as e:
             logger.error(f"Error al cargar base de datos {db_name}: {e}")
@@ -693,18 +739,311 @@ class SessionManager:
                 logger.error(f"No se pudo registrar la base de datos {db_name}: falta la ruta del archivo")
                 return False
                 
+            # Verificar que todos los campos requeridos estén presentes
+            required_fields = ['db_type', 'embedding_model', 'embedding_dim', 'chunking_method']
+            missing_fields = [field for field in required_fields if field not in metadata]
+            
+            if missing_fields:
+                logger.warning(f"Campos faltantes en metadatos: {missing_fields}. Intentando recuperar...")
+                
+                # Intentar completar campos faltantes
+                if 'db_type' in missing_fields and 'db_path' in metadata:
+                    if metadata['db_path'].endswith('.sqlite'):
+                        metadata['db_type'] = 'sqlite'
+                    elif metadata['db_path'].endswith('.duckdb'):
+                        metadata['db_type'] = 'duckdb'
+                
+                if 'embedding_model' in missing_fields:
+                    embedding_config = config.get_embedding_config()
+                    metadata['embedding_model'] = embedding_config.get('model', 'modernbert')
+                    
+                if 'chunking_method' in missing_fields:
+                    chunks_config = config.get_chunks_config()
+                    metadata['chunking_method'] = chunks_config.get('method', 'character')
+                    
+                # Verificar nuevamente los campos requeridos
+                missing_fields = [field for field in required_fields if field not in metadata]
+                if missing_fields:
+                    logger.error(f"No se pudo completar los campos requeridos: {missing_fields}")
+                    return False
+                    
+            # Añadir metadatos extras de configuración que pueden ser útiles
+            # para reconstruir el entorno completo
+            if 'additional_config' not in metadata:
+                metadata['additional_config'] = {}
+            
+            # Añadir timestmaps si no existen
+            if 'created_at' not in metadata:
+                metadata['created_at'] = time.time()
+                
+            # Actualizar timestamp de último uso
+            metadata["last_used"] = time.time()
+            
             # Guardar metadatos en un archivo JSON junto a la base de datos
             meta_path = f"{db_path}.meta.json"
-            
-            # Actualizar timestamp
-            metadata["last_used"] = time.time()
             
             # Guardar metadatos en formato JSON
             with open(meta_path, 'w', encoding='utf-8') as f:
                 json.dump(metadata, f, indent=2, ensure_ascii=False)
+                
+            # También guardar una copia en la carpeta de sesiones si está asociada a una sesión
+            if 'session_id' in metadata and metadata['session_id']:
+                session_dir = os.path.join(
+                    config.get_general_config().get('sessions_dir', 'sessions'),
+                    metadata['session_id']
+                )
+                os.makedirs(session_dir, exist_ok=True)
+                session_meta_path = os.path.join(session_dir, f"{db_name}.meta.json")
+                
+                with open(session_meta_path, 'w', encoding='utf-8') as f:
+                    json.dump(metadata, f, indent=2, ensure_ascii=False)
+                    
+            # Intentar guardar los metadatos dentro de la base de datos también
+            try:
+                from modulos.databases.FactoryDatabase import DatabaseFactory
+                db = DatabaseFactory.get_database_instance(
+                    db_type=metadata.get('db_type', 'sqlite'),
+                    embedding_dim=metadata.get('embedding_dim', 768),
+                    load_existing=True,
+                    db_path=db_path
+                )
+                
+                # Guardar todos los metadatos dentro de la base de datos
+                for key, value in metadata.items():
+                    if isinstance(value, (str, int, float, bool, type(None))):
+                        db.store_metadata(key, value)
+                    else:
+                        # Convertir a JSON para tipos complejos
+                        db.store_metadata(key, json.dumps(value))
+            except Exception as e:
+                logger.warning(f"No se pudieron guardar metadatos dentro de la base de datos: {e}")
                 
             logger.info(f"Base de datos registrada correctamente: {db_name}")
             return True
         except Exception as e:
             logger.error(f"Error al registrar base de datos {db_name}: {e}")
             return False
+
+    def _find_database_metadata(self, file_path: str, db_name: str) -> Dict[str, Any]:
+        """
+        Busca metadatos de base de datos en múltiples ubicaciones.
+        
+        Args:
+            file_path: Ruta al archivo de base de datos
+            db_name: Nombre de la base de datos
+            
+        Returns:
+            Metadatos encontrados o diccionario vacío
+        """
+        metadata = {}
+        
+        # Lista de posibles ubicaciones para metadatos
+        meta_locations = [
+            f"{file_path}.meta.json",  # Junto a la base de datos
+        ]
+        
+        # Buscar en carpeta de sesiones
+        sessions_dir = config.get_general_config().get('sessions_dir', 'sessions')
+        if os.path.exists(sessions_dir):
+            session_folders = [f for f in os.listdir(sessions_dir) 
+                              if os.path.isdir(os.path.join(sessions_dir, f))]
+            
+            for session_id in session_folders:
+                session_meta_path = os.path.join(sessions_dir, session_id, f"{db_name}.meta.json")
+                meta_locations.append(session_meta_path)
+        
+        # Buscar metadatos en cada ubicación
+        for meta_path in meta_locations:
+            if os.path.exists(meta_path):
+                try:
+                    with open(meta_path, 'r', encoding='utf-8') as f:
+                        meta = json.load(f)
+                        
+                        # Si encontramos metadatos, actualizar y salir
+                        metadata.update(meta)
+                        logger.debug(f"Metadatos encontrados en {meta_path}")
+                        break
+                except Exception as e:
+                    logger.warning(f"Error al leer metadatos de {meta_path}: {e}")
+        
+        # Si no encontramos metadatos en archivos, intentar leerlos de la base de datos
+        if not metadata:
+            try:
+                from modulos.databases.FactoryDatabase import DatabaseFactory
+                
+                # Intentar determinar tipo de base de datos por extensión
+                db_type = 'sqlite'
+                if file_path.endswith('.duckdb'):
+                    db_type = 'duckdb'
+                    
+                # Intentar cargar la base de datos
+                db = DatabaseFactory.get_database_instance(
+                    db_type=db_type,
+                    embedding_dim=384,  # Dimensión por defecto
+                    load_existing=True,
+                    db_path=file_path
+                )
+                
+                # Leer todos los metadatos disponibles
+                db_metadata = db.list_metadata() if hasattr(db, 'list_metadata') else {}
+                metadata.update(db_metadata)
+                
+                logger.debug(f"Metadatos recuperados desde la base de datos: {len(db_metadata)} campos")
+            except Exception as e:
+                logger.debug(f"No se pudieron leer metadatos desde la base de datos: {e}")
+        
+        return metadata
+
+    def associate_database_with_session(self, session_id: str, db_name: str, db_metadata: Dict[str, Any]) -> bool:
+        """
+        Asocia una base de datos con una sesión específica.
+        
+        Args:
+            session_id: ID de la sesión
+            db_name: Nombre de la base de datos
+            db_metadata: Metadatos de la base de datos
+            
+        Returns:
+            True si se asoció correctamente, False en caso contrario
+        """
+        try:
+            # Verificar que la sesión existe
+            if session_id not in self.sessions:
+                logger.warning(f"Intento de asociar base de datos a sesión inexistente: {session_id}")
+                return False
+            
+            # Actualizar metadatos con la sesión
+            db_metadata['session_id'] = session_id
+            
+            # Registrar la base de datos
+            success = self.register_database(db_name, db_metadata)
+            
+            if not success:
+                return False
+            
+            # Actualizar información de la sesión
+            with self._lock:
+                # Inicializar lista de bases de datos si no existe
+                if 'databases' not in self.sessions[session_id]:
+                    self.sessions[session_id]['databases'] = []
+                
+                # Añadir referencia a la base de datos
+                db_info = {
+                    'name': db_name,
+                    'path': db_metadata.get('db_path', ''),
+                    'model': db_metadata.get('embedding_model', 'unknown'),
+                    'chunking': db_metadata.get('chunking_method', 'unknown'),
+                    'associated_at': time.time()
+                }
+                
+                # Verificar si ya existe
+                exists = False
+                for i, existing_db in enumerate(self.sessions[session_id]['databases']):
+                    if existing_db['name'] == db_name:
+                        # Actualizar en lugar de añadir
+                        self.sessions[session_id]['databases'][i] = db_info
+                        exists = True
+                        break
+                
+                # Añadir si no existe
+                if not exists:
+                    self.sessions[session_id]['databases'].append(db_info)
+                
+                # Actualizar timestamp de actividad
+                self.sessions[session_id]['last_activity'] = time.time()
+                
+                return True
+        except Exception as e:
+            logger.error(f"Error al asociar base de datos {db_name} con sesión {session_id}: {e}")
+            return False
+
+    def get_session_databases(self, session_id: str) -> List[Dict[str, Any]]:
+        """
+        Obtiene las bases de datos asociadas a una sesión.
+        
+        Args:
+            session_id: ID de la sesión
+            
+        Returns:
+            Lista de bases de datos asociadas a la sesión
+        """
+        with self._lock:
+            if session_id not in self.sessions:
+                return []
+            
+            # Devolver bases de datos asociadas o lista vacía
+            return self.sessions[session_id].get('databases', [])
+
+    def store_session_config(self, session_id: str, config_data: Dict[str, Any]) -> bool:
+        """
+        Almacena datos de configuración específicos de una sesión.
+        
+        Args:
+            session_id: ID de la sesión
+            config_data: Datos de configuración a almacenar
+            
+        Returns:
+            True si se guardó correctamente, False en caso contrario
+        """
+        try:
+            with self._lock:
+                # Verificar que la sesión existe
+                if session_id not in self.sessions:
+                    logger.warning(f"Intento de guardar configuración en sesión inexistente: {session_id}")
+                    return False
+                
+                # Obtener la configuración actual o inicializar
+                if 'config' not in self.sessions[session_id]:
+                    self.sessions[session_id]['config'] = {}
+                
+                # Actualizar con los nuevos datos
+                self.sessions[session_id]['config'].update(config_data)
+                
+                # Actualizar timestamp de actividad
+                self.sessions[session_id]['last_activity'] = time.time()
+                
+                # Guardar en disco si es posible
+                try:
+                    sessions_dir = config.get_general_config().get('sessions_dir', 'sessions')
+                    session_path = os.path.join(sessions_dir, session_id)
+                    os.makedirs(session_path, exist_ok=True)
+                    
+                    config_path = os.path.join(session_path, 'config.json')
+                    with open(config_path, 'w', encoding='utf-8') as f:
+                        json.dump(self.sessions[session_id]['config'], f, indent=2, ensure_ascii=False)
+                except Exception as e:
+                    logger.warning(f"No se pudo guardar configuración en disco: {e}")
+                
+                return True
+        except Exception as e:
+            logger.error(f"Error al guardar configuración en sesión {session_id}: {e}")
+            return False
+
+    def get_session_config(self, session_id: str, key: Optional[str] = None, default: Any = None) -> Any:
+        """
+        Recupera datos de configuración de una sesión.
+        
+        Args:
+            session_id: ID de la sesión
+            key: Clave específica a recuperar (opcional)
+            default: Valor por defecto si no se encuentra
+            
+        Returns:
+            Datos de configuración completos o valor específico
+        """
+        with self._lock:
+            # Verificar que la sesión existe
+            if session_id not in self.sessions:
+                logger.warning(f"Intento de recuperar configuración de sesión inexistente: {session_id}")
+                return default
+            
+            # Si no hay configuración guardada
+            if 'config' not in self.sessions[session_id]:
+                return default
+            
+            # Si se solicita una clave específica
+            if key is not None:
+                return self.sessions[session_id]['config'].get(key, default)
+            
+            # Devolver toda la configuración
+            return dict(self.sessions[session_id]['config'])

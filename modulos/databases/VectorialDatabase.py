@@ -52,6 +52,15 @@ class VectorialDatabase(ABC):
         """
         pass
     
+    def close(self):
+        """
+        Alias para close_connection() por compatibilidad.
+        
+        Returns:
+            bool: True si el cierre fue exitoso, False en caso contrario
+        """
+        return self.close_connection()
+    
     @abstractmethod
     def create_schema(self):
         """

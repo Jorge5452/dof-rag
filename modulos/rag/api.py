@@ -2,7 +2,6 @@ from flask import Flask, request, jsonify, Response, send_from_directory
 import os
 import uuid
 import json
-import glob
 import gc
 import psutil
 import threading
@@ -22,93 +21,25 @@ static_folder = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static
 app = Flask(__name__, static_folder=static_folder, static_url_path='')
 config = Config()
 
-# Configuración de límites y timeouts
-SESSION_TIMEOUT = 3600  # 1 hora de inactividad antes de limpiar una sesión
-MAX_SESSIONS = 50  # Número máximo de sesiones activas simultáneas
-MAX_CONTEXTS_PER_SESSION = 20  # Máximo número de contextos a guardar por sesión
-CLEANUP_INTERVAL = 300  # Intervalo de limpieza automática (5 minutos)
+# Instancia del gestor de sesiones
+session_manager = SessionManager()
 
-# Diccionario para almacenar las sesiones activas
-# Key: session_id, Value: tupla (RagApp instance, database_name, last_activity_timestamp)
-active_sessions: Dict[str, tuple] = {}
+# Ya no necesitamos mantener un seguimiento manual de las sesiones
+# ni definir parámetros de configuración que ya están en SessionManager
+# Las siguientes variables se conservan para compatibilidad en caso de que haya
+# referencias en otras partes del código
+SESSION_TIMEOUT = session_manager.SESSION_TIMEOUT
+MAX_SESSIONS = session_manager.MAX_SESSIONS
+MAX_CONTEXTS_PER_SESSION = session_manager.MAX_CONTEXTS_PER_SESSION
+CLEANUP_INTERVAL = session_manager.CLEANUP_INTERVAL
 
-# Últimos contextos por sesión para mostrar en la interfaz, usando deque para limitar automáticamente
-last_contexts: Dict[str, Deque[Dict[str, Any]]] = defaultdict(lambda: deque(maxlen=MAX_CONTEXTS_PER_SESSION))
+# Diccionario para almacenar instancias RagApp temporales por sesión
+# Este diccionario no almacena datos de sesión, solo las instancias RagApp
+# Key: session_id, Value: RagApp instance
+ragapp_instances: Dict[str, RagApp] = {}
 
-# Lock para operaciones de limpieza y acceso a las sesiones
-sessions_lock = threading.RLock()
-
-# Estado de limpieza en progreso
-cleanup_in_progress = False
-
-def cleanup_inactive_sessions():
-    """Limpia las sesiones inactivas basado en el tiempo de inactividad"""
-    global cleanup_in_progress
-    
-    if cleanup_in_progress:
-        return
-    
-    cleanup_in_progress = True
-    try:
-        current_time = time.time()
-        sessions_to_remove = []
-        
-        with sessions_lock:
-            for session_id, (rag_app, db_name, last_activity) in active_sessions.items():
-                if current_time - last_activity > SESSION_TIMEOUT:
-                    sessions_to_remove.append(session_id)
-            
-            # Eliminar las sesiones inactivas
-            for session_id in sessions_to_remove:
-                # Limpiar recursos de RagApp (cierra conexiones a bases de datos)
-                try:
-                    rag_app = active_sessions[session_id][0]
-                    if hasattr(rag_app, 'db') and rag_app.db:
-                        rag_app.db.close()
-                    
-                    # Limpiar referencia al cliente AI y otros objetos grandes
-                    rag_app.ai_client = None
-                    rag_app.embedding_manager = None
-                except Exception as e:
-                    app.logger.error(f"Error al limpiar recursos de sesión {session_id}: {str(e)}")
-                
-                # Eliminar la sesión
-                del active_sessions[session_id]
-                
-                # También eliminar los contextos asociados
-                if session_id in last_contexts:
-                    del last_contexts[session_id]
-            
-            if sessions_to_remove:
-                app.logger.info(f"Limpieza automática: {len(sessions_to_remove)} sesiones inactivas eliminadas")
-                # Forzar recolección de basura después de limpiar sesiones
-                gc.collect()
-    finally:
-        cleanup_in_progress = False
-
-def update_session_activity(session_id):
-    """Actualiza el timestamp de última actividad de una sesión"""
-    with sessions_lock:
-        if session_id in active_sessions:
-            rag_app, db_name, _ = active_sessions[session_id]
-            active_sessions[session_id] = (rag_app, db_name, time.time())
-
-# Iniciar un hilo para limpieza periódica
-def start_cleanup_thread():
-    def cleanup_worker():
-        while True:
-            try:
-                time.sleep(CLEANUP_INTERVAL)
-                cleanup_inactive_sessions()
-            except Exception as e:
-                app.logger.error(f"Error en hilo de limpieza: {str(e)}")
-    
-    cleanup_thread = threading.Thread(target=cleanup_worker, daemon=True)
-    cleanup_thread.start()
-    app.logger.info(f"Hilo de limpieza automática iniciado (intervalo: {CLEANUP_INTERVAL}s)")
-
-# Iniciar el hilo de limpieza cuando se inicia la aplicación
-start_cleanup_thread()
+# Lock para operaciones de acceso a las instancias RagApp
+instances_lock = threading.RLock()
 
 @app.route('/')
 def index():
@@ -127,37 +58,37 @@ def serve_css():
 
 @app.route('/api/databases', methods=['GET'])
 def list_databases():
-    """Lista las bases de datos disponibles buscando archivos en el directorio configurado"""
+    """Lista las bases de datos disponibles utilizando el SessionManager"""
     try:
-        # Utilizar el método estático de RagApp para listar bases de datos
-        databases = RagApp.list_available_databases()
+        # Utilizar el SessionManager para listar bases de datos
+        db_dict = session_manager.list_available_databases()
         
-        # Transformar la lista de bases de datos al formato esperado por el cliente
+        # Transformar el diccionario de bases de datos al formato esperado por el cliente
         database_list = []
-        for db in databases:
+        for db_name, metadata in db_dict.items():
             # Formatear tamaño
-            size_mb = db.get("size", 0) / (1024 * 1024)
+            size = metadata.get("size", 0)
+            size_mb = size / (1024 * 1024) if size else 0
             size_formatted = f"{size_mb:.2f} MB"
             
             # Formatear fecha de creación
-            created_at = db.get("created_at", 0)
+            created_at = metadata.get("created_at", 0)
             if created_at > 0:
-                from datetime import datetime
                 created_formatted = datetime.fromtimestamp(created_at).strftime("%Y-%m-%d %H:%M")
             else:
                 created_formatted = "Desconocida"
             
             # Crear entrada con información detallada
             db_entry = {
-                "id": db.get("id"),
-                "name": db.get("name"),
-                "display_name": f"{db.get('name')} ({db.get('type')}, {size_formatted})",
-                "type": db.get("type"),
-                "size": db.get("size"),
+                "id": db_name,
+                "name": metadata.get("name", db_name),
+                "display_name": f"{metadata.get('name', db_name)} ({metadata.get('db_type', 'unknown')}, {size_formatted})",
+                "type": metadata.get("db_type", "unknown"),
+                "size": size,
                 "size_formatted": size_formatted,
                 "created_at": created_at,
                 "created_formatted": created_formatted,
-                "has_metadata": bool(db.get("metadata"))
+                "has_metadata": bool(metadata.get("metadata", {}))
             }
             
             database_list.append(db_entry)
@@ -193,19 +124,18 @@ def list_databases():
 def create_session():
     """Crea una nueva sesión para la base de datos especificada"""
     try:
-        # Verificar si ya hay demasiadas sesiones activas
-        with sessions_lock:
-            if len(active_sessions) >= MAX_SESSIONS:
-                # Intentar limpiar sesiones inactivas primero
-                cleanup_inactive_sessions()
-                
-                # Si todavía hay demasiadas sesiones después de la limpieza
-                if len(active_sessions) >= MAX_SESSIONS:
-                    return jsonify({
-                        'status': 'error',
-                        'message': f'Se ha alcanzado el límite máximo de sesiones activas ({MAX_SESSIONS}). Por favor, intente más tarde.'
-                    }), 429  # Too Many Requests
-                
+        # Verificar si hay demasiadas sesiones activas
+        if len(session_manager.get_all_sessions()) >= MAX_SESSIONS:
+            # Intentar limpiar sesiones inactivas primero
+            session_manager.clean_expired_sessions()
+            
+            # Si todavía hay demasiadas sesiones después de la limpieza
+            if len(session_manager.get_all_sessions()) >= MAX_SESSIONS:
+                return jsonify({
+                    'status': 'error',
+                    'message': f'Se ha alcanzado el límite máximo de sesiones activas ({MAX_SESSIONS}). Por favor, intente más tarde.'
+                }), 429  # Too Many Requests
+        
         data = request.json
         database_name = data.get('database_name')
         
@@ -221,21 +151,30 @@ def create_session():
         
         app.logger.info(f"Creando sesión con base de datos: {database_name}")
         
-        # Inicializar la aplicación RAG con los parámetros dados
+        # Crear sesión en el SessionManager
+        session_id = session_manager.create_session(metadata={
+            "database_name": database_name,
+            "ai_client": ai_client,
+            "streaming": streaming,
+            "created_at": time.time(),
+            "api_created": True
+        })
+        
+        # Inicializar la aplicación RAG y guardar la instancia
         try:
-            rag_app = RagApp(
-                database_name=database_name,
-                ai_client=ai_client,
-                streaming=streaming
-            )
+            with instances_lock:
+                rag_app = RagApp(
+                    database_name=database_name,
+                    ai_client=ai_client,
+                    streaming=streaming,
+                    session_id=session_id
+                )
+                
+                # Almacenar la instancia RagApp
+                ragapp_instances[session_id] = rag_app
             
-            # Generar un ID de sesión único
-            session_id = str(uuid.uuid4())
-            
-            # Almacenar la sesión con timestamp de creación
-            current_time = time.time()
-            with sessions_lock:
-                active_sessions[session_id] = (rag_app, database_name, current_time)
+            # Obtener información de la sesión del SessionManager
+            session_data = session_manager.get_session(session_id)
             
             # Obtener información detallada de la base de datos
             db_info = {
@@ -252,9 +191,12 @@ def create_session():
                 'session_id': session_id,
                 'database_name': database_name,
                 'db_type': rag_app.db_type,
-                'db_info': db_info
+                'db_info': db_info,
+                'session_data': session_data
             })
         except Exception as e:
+            # Si falla, eliminar la sesión creada
+            session_manager.delete_session(session_id)
             app.logger.error(f"Error al inicializar RagApp: {str(e)}")
             return jsonify({
                 'status': 'error',
@@ -283,121 +225,177 @@ def process_query():
                 'message': 'Faltan parámetros requeridos (session_id, query)'
             }), 400
         
-        # Verificar si la sesión existe y actualizar su actividad
-        with sessions_lock:
-            if session_id not in active_sessions:
+        # Verificar si la sesión existe
+        session_data = session_manager.get_session(session_id)
+        if not session_data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Sesión no válida o expirada'
+            }), 404
+        
+        # Obtener la instancia RagApp para esta sesión
+        rag_app = None
+        with instances_lock:
+            # Si ya tenemos una instancia, usarla
+            if session_id in ragapp_instances:
+                rag_app = ragapp_instances[session_id]
+                
+                # Verificar si la instancia está cerrada o inválida
+                if getattr(rag_app, 'closed', True):
+                    # Eliminar la instancia cerrada
+                    del ragapp_instances[session_id]
+                    rag_app = None
+        
+        # Si no tenemos una instancia válida, crear una nueva
+        if rag_app is None:
+            # Obtener datos de la sesión para inicializar RagApp
+            database_name = session_data.get('database_name')
+            ai_client = session_data.get('ai_client')
+            streaming = session_data.get('streaming', True)
+            
+            if not database_name:
                 return jsonify({
                     'status': 'error',
-                    'message': 'Sesión no válida o expirada'
-                }), 404
+                    'message': 'Datos de sesión incompletos (falta database_name)'
+                }), 400
             
-            # Actualizar timestamp de actividad
-            update_session_activity(session_id)
-            
-            # Obtener la instancia de RagApp para esta sesión
-            rag_app, database_name, _ = active_sessions[session_id]
-        
-        # Generar un ID único para este mensaje para referencia futura
-        message_id = str(uuid.uuid4())
-        
-        # Procesar la consulta y obtener respuesta con contexto
-        if stream:
-            # Para streaming, manejar de forma especial
-            app.logger.info(f"Procesando consulta en modo streaming: {query[:30]}...")
-            
-            # Obtener el contexto por separado para almacenarlo
             try:
-                # Obtener respuesta y contexto usando la nueva implementación
-                dummy_response, context_data = rag_app.query(query, return_context=True)
+                # Crear una nueva instancia con los datos de la sesión
+                rag_app = RagApp(
+                    database_name=database_name,
+                    ai_client=ai_client,
+                    streaming=streaming,
+                    session_id=session_id
+                )
                 
-                # Verificar si el contexto es válido
-                if context_data and isinstance(context_data, list):
-                    # Almacenar el contexto para esta consulta usando deque (limitado automáticamente)
-                    with sessions_lock:
-                        last_contexts[session_id].append({
-                            'message_id': message_id,
-                            'query': query,
-                            'context': context_data,
-                            'timestamp': datetime.now().isoformat()
-                        })
+                # Guardar la nueva instancia
+                with instances_lock:
+                    ragapp_instances[session_id] = rag_app
                     
-                    app.logger.info(f"Contexto almacenado para mensaje {message_id} de la sesión {session_id}: {len(context_data)} fragmentos")
-                else:
-                    app.logger.warning(f"Contexto vacío o inválido para mensaje {message_id}")
-                    # Almacenar un contexto vacío para evitar errores al solicitar fuentes
-                    with sessions_lock:
-                        last_contexts[session_id].append({
-                            'message_id': message_id,
-                            'query': query,
-                            'context': [],
-                            'timestamp': datetime.now().isoformat()
-                        })
-            except Exception as context_err:
-                app.logger.error(f"Error al obtener contexto: {str(context_err)}")
-                # Almacenar un contexto vacío para evitar errores al solicitar fuentes
-                with sessions_lock:
-                    last_contexts[session_id].append({
-                        'message_id': message_id,
-                        'query': query,
-                        'context': [],
-                        'timestamp': datetime.now().isoformat()
-                    })
-            
+                app.logger.info(f"Nueva instancia RagApp creada para sesión: {session_id}")
+            except Exception as e:
+                app.logger.error(f"Error al recrear instancia RagApp: {str(e)}")
+                return jsonify({
+                    'status': 'error',
+                    'message': f"Error al procesar consulta: {str(e)}"
+                }), 500
+        
+        # Procesar la consulta con la instancia RagApp
+        if stream:
+            # Modo streaming: devolver un generador de respuesta
             def generate_streaming_response():
                 try:
-                    # Llamar al método query solo una vez y verificar si devuelve un generador
-                    result = rag_app.query(query, return_context=False)
+                    # Iniciar timestamp para medir tiempo de respuesta
+                    start_time = time.time()
                     
-                    # Si el resultado es un generador (streaming)
-                    if hasattr(result, '__iter__') and not isinstance(result, str):
-                        for chunk in result:
-                            if chunk:
-                                # Enviar texto en texto plano sin formato JSON
-                                yield chunk
-                    else:
-                        # Si no es un generador, enviar la respuesta completa de una vez
-                        yield result
+                    # Usar el método de consulta de RagApp
+                    generator = rag_app.query(query)
+                    if not hasattr(generator, '__next__') and not hasattr(generator, 'send'):
+                        # No es un generador, devolver como texto simple
+                        yield f"data: {generator}\n\n"
+                        yield "data: [DONE]\n\n"
+                        return
+                    
+                    # Procesar flujo de respuesta
+                    message_id = None
+                    for chunk in generator:
+                        # Extraer message_id si está presente al final del chunk
+                        if "<hidden_message_id>" in chunk:
+                            # Extraer ID y eliminar del chunk
+                            import re
+                            match = re.search(r'<hidden_message_id>(.*?)</hidden_message_id>', chunk)
+                            if match:
+                                message_id = match.group(1)
+                                chunk = chunk.replace(match.group(0), "")
                         
-                    # Al final del streaming, enviar el ID del mensaje
-                    # Usamos un formato especial que el cliente puede detectar
-                    yield f"\n\n<hidden_message_id>{message_id}</hidden_message_id>"
-                        
+                        # Enviar chunk al cliente
+                        if chunk:
+                            yield f"data: {chunk}\n\n"
+                    
+                    # Enviar señal de finalización
+                    yield "data: [DONE]\n\n"
+                    
+                    # Registrar tiempo de respuesta
+                    response_time = time.time() - start_time
+                    app.logger.info(f"Consulta streaming completada en {response_time:.2f}s (session_id={session_id})")
+                    
+                    # Si tenemos un message_id, actualizar metadatos de la sesión
+                    if message_id:
+                        session_manager.update_session_metadata(session_id, {
+                            "last_query_time": start_time,
+                            "last_response_time": response_time,
+                            "last_message_id": message_id
+                        })
+                
                 except Exception as e:
-                    app.logger.error(f"Error en streaming: {str(e)}")
-                    yield f"Error al procesar la consulta: {str(e)}"
-                finally:
-                    # Actualizar timestamp de actividad al finalizar
-                    update_session_activity(session_id)
+                    # En caso de error, enviar mensaje de error y cerrar streaming
+                    error_msg = f"Error durante el procesamiento: {str(e)}"
+                    app.logger.error(error_msg)
+                    yield f"data: {error_msg}\n\n"
+                    yield "data: [DONE]\n\n"
             
-            # Devolver una respuesta de streaming con texto plano
-            return Response(generate_streaming_response(), mimetype='text/plain')
+            # Configurar respuesta streaming
+            return Response(
+                generate_streaming_response(),
+                mimetype='text/event-stream',
+                headers={
+                    'Cache-Control': 'no-cache',
+                    'X-Accel-Buffering': 'no'
+                }
+            )
         else:
-            # Para respuestas no streaming, devolver respuesta completa con contexto
-            result, context_data = rag_app.query(query, return_context=True)
-            
-            # Almacenar el contexto para esta consulta
-            with sessions_lock:
-                last_contexts[session_id].append({
-                    'message_id': message_id,
-                    'query': query,
+            # Modo no streaming: devolver respuesta completa
+            try:
+                start_time = time.time()
+                
+                # Obtener respuesta completa y contexto
+                response, context = rag_app.query(query, return_context=True)
+                
+                # Extraer message_id si está presente
+                message_id = None
+                if "<hidden_message_id>" in response:
+                    import re
+                    match = re.search(r'<hidden_message_id>(.*?)</hidden_message_id>', response)
+                    if match:
+                        message_id = match.group(1)
+                        response = response.replace(match.group(0), "")
+                
+                # Registrar tiempo de respuesta
+                response_time = time.time() - start_time
+                app.logger.info(f"Consulta completada en {response_time:.2f}s (session_id={session_id})")
+                
+                # Actualizar metadatos de la sesión
+                if message_id:
+                    session_manager.update_session_metadata(session_id, {
+                        "last_query_time": start_time,
+                        "last_response_time": response_time,
+                        "last_message_id": message_id
+                    })
+                
+                # Preparar respuesta con contexto
+                context_data = []
+                for item in context:
+                    # Limpiar el contexto para la respuesta (eliminar binarios grandes)
+                    cleaned_item = {k: v for k, v in item.items() if k != 'embedding'}
+                    context_data.append(cleaned_item)
+                
+                return jsonify({
+                    'status': 'success',
+                    'response': response,
                     'context': context_data,
-                    'timestamp': datetime.now().isoformat()
+                    'message_id': message_id,
+                    'response_time': response_time
                 })
             
-            return jsonify({
-                'status': 'success',
-                'message_id': message_id,
-                'response': result,
-                'context': context_data,
-                'database': {
-                    'name': database_name,
-                    'type': rag_app.db_type,
-                    'path': rag_app.db_path
-                }
-            })
+            except Exception as e:
+                app.logger.error(f"Error al procesar consulta: {str(e)}")
+                return jsonify({
+                    'status': 'error',
+                    'message': f"Error al procesar consulta: {str(e)}"
+                }), 500
     
     except Exception as e:
-        app.logger.error(f"Error al procesar consulta: {str(e)}")
+        app.logger.error(f"Error general en proceso de consulta: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': str(e)
@@ -405,178 +403,140 @@ def process_query():
 
 @app.route('/api/context/<session_id>/latest', methods=['GET'])
 def get_latest_context(session_id):
-    """Obtiene el contexto de la última consulta para una sesión específica"""
-    # Actualizar timestamp de actividad
-    update_session_activity(session_id)
+    """Obtiene el contexto más reciente para una sesión"""
+    try:
+        # Verificar que la sesión exista
+        session_data = session_manager.get_session(session_id)
+        if not session_data:
+            return jsonify({
+                'status': 'error',
+                'message': 'Sesión no encontrada'
+            }), 404
+        
+        # Obtener el último message_id de la sesión
+        message_id = session_data.get("last_message_id")
+        if not message_id:
+            return jsonify({
+                'status': 'success',
+                'message': 'No hay consultas recientes en esta sesión',
+                'context': []
+            })
+        
+        # Obtener el contexto para este mensaje
+        context_data = session_manager.get_message_context(session_id, message_id)
+        if not context_data:
+            return jsonify({
+                'status': 'success',
+                'message': 'No se encontró contexto para la última consulta',
+                'context': []
+            })
+        
+        # Limpiar datos binarios del contexto
+        cleaned_context = []
+        for item in context_data:
+            # Eliminar campos binarios grandes
+            cleaned_item = {k: v for k, v in item.items() if k != 'embedding'}
+            cleaned_context.append(cleaned_item)
+        
+        return jsonify({
+            'status': 'success',
+            'message_id': message_id,
+            'context': cleaned_context
+        })
     
-    if session_id not in last_contexts or not last_contexts[session_id]:
+    except Exception as e:
+        app.logger.error(f"Error al obtener contexto: {str(e)}")
         return jsonify({
             'status': 'error',
-            'message': 'No hay contexto disponible para esta sesión'
-        }), 404
-    
-    # Devolver el contexto más reciente
-    latest_context = last_contexts[session_id][-1]
-    
-    return jsonify({
-        'status': 'success',
-        'query': latest_context['query'],
-        'context': latest_context['context']
-    })
+            'message': str(e)
+        }), 500
 
 @app.route('/api/sessions/<session_id>', methods=['DELETE'])
 def delete_session(session_id):
     """Elimina una sesión y libera sus recursos"""
-    with sessions_lock:
-        if session_id in active_sessions:
-            try:
-                # Liberar recursos de forma explícita
-                rag_app, _, _ = active_sessions[session_id]
-                
-                # Cerrar conexión a la base de datos si existe
-                if hasattr(rag_app, 'db') and rag_app.db is not None:
-                    rag_app.db.close()
-                
-                # Eliminar referencias a objetos grandes
-                rag_app.ai_client = None
-                rag_app.embedding_manager = None
-                rag_app.db = None
-                
-                # Eliminar la sesión del diccionario
-                del active_sessions[session_id]
-                
-                # Eliminar contextos asociados
-                if session_id in last_contexts:
-                    del last_contexts[session_id]
-                
-                # Forzar recolección de basura
-                gc.collect()
-                
-                return jsonify({
-                    'status': 'success',
-                    'message': 'Sesión eliminada correctamente'
-                })
-            except Exception as e:
-                app.logger.error(f"Error al limpiar recursos de sesión {session_id}: {str(e)}")
-                return jsonify({
-                    'status': 'error',
-                    'message': f'Error al eliminar la sesión: {str(e)}'
-                }), 500
-    
-    return jsonify({
-        'status': 'error',
-        'message': 'Sesión no encontrada'
-    }), 404
-
-@app.route('/api/diagnostics', methods=['GET'])
-def diagnostics():
-    """Proporciona información de diagnóstico sobre el sistema y uso de recursos"""
     try:
-        # Obtener información de la configuración
-        database_config = config.get_database_config()
-        db_type = database_config.get('type', 'sqlite')
-        db_dir = database_config.get(db_type, {}).get('db_dir', 'modulos/databases/db')
+        # Verificar que la sesión exista
+        if not session_manager.get_session(session_id):
+            return jsonify({
+                'status': 'error',
+                'message': 'Sesión no encontrada'
+            }), 404
         
-        # Asegurar que la ruta es absoluta
-        if not os.path.isabs(db_dir):
-            db_dir = os.path.join(os.path.abspath(os.getcwd()), db_dir)
+        # Cerrar la instancia RagApp si existe
+        with instances_lock:
+            if session_id in ragapp_instances:
+                try:
+                    rag_app = ragapp_instances[session_id]
+                    rag_app.close()
+                except Exception as e:
+                    app.logger.warning(f"Error al cerrar instancia RagApp: {str(e)}")
+                
+                # Eliminar la instancia
+                del ragapp_instances[session_id]
         
-        # Verificar que el directorio existe
-        dir_exists = os.path.exists(db_dir)
+        # Eliminar la sesión del SessionManager
+        session_manager.delete_session(session_id)
         
-        # Listar archivos en el directorio si existe
-        files_in_dir = []
-        if dir_exists:
-            for file in os.listdir(db_dir):
-                file_path = os.path.join(db_dir, file)
-                if os.path.isfile(file_path):
-                    size = os.path.getsize(file_path)
-                    files_in_dir.append({
-                        'name': file,
-                        'size': size,
-                        'size_human': f"{size / 1024:.1f} KB" if size < 1024 * 1024 else f"{size / 1024 / 1024:.1f} MB"
-                    })
+        # Forzar recolección de basura
+        gc.collect()
         
-        # Contar bases de datos por tipo
-        sqlite_count = len([f for f in files_in_dir if f['name'].endswith('.sqlite')])
-        duckdb_count = len([f for f in files_in_dir if f['name'].endswith('.duckdb')])
-        
-        # Número de sesiones activas
-        active_sessions_count = len(active_sessions)
-        
-        # Información sobre el uso de memoria del proceso
-        process = psutil.Process(os.getpid())
-        memory_info = process.memory_info()
-        memory_usage = {
-            'rss': memory_info.rss,  # Resident Set Size
-            'rss_mb': memory_info.rss / (1024 * 1024),
-            'vms': memory_info.vms,  # Virtual Memory Size
-            'vms_mb': memory_info.vms / (1024 * 1024),
-            'percent': process.memory_percent(),
-            'cpu_percent': process.cpu_percent(interval=0.1)
-        }
-        
-        # Estadísticas del sistema
-        system_stats = {
-            'cpu_percent': psutil.cpu_percent(),
-            'memory_percent': psutil.virtual_memory().percent,
-            'available_memory_mb': psutil.virtual_memory().available / (1024 * 1024)
-        }
-        
-        # Información de sesiones más detallada
-        session_details = []
-        with sessions_lock:
-            for session_id, (rag_app, db_name, last_activity) in active_sessions.items():
-                session_details.append({
-                    'id': session_id,
-                    'database': db_name,
-                    'db_type': rag_app.db_type if hasattr(rag_app, 'db_type') else "unknown",
-                    'last_activity': last_activity,
-                    'inactive_seconds': time.time() - last_activity,
-                    'contexts_stored': len(last_contexts.get(session_id, [])),
-                    'ai_client_type': rag_app.ai_client_type if hasattr(rag_app, 'ai_client_type') else "unknown"
-                })
-        
-        # Estado de la recolección de basura
-        gc_stats = {
-            'objects_tracked': len(gc.get_objects()),
-            'garbage_count': len(gc.garbage),
-            'collections': gc.get_count()
-        }
+        app.logger.info(f"Sesión eliminada correctamente: {session_id}")
         
         return jsonify({
             'status': 'success',
-            'environment': {
-                'python_version': sys.version,
-                'working_directory': os.getcwd(),
-                'timestamp': datetime.now().isoformat()
+            'message': 'Sesión eliminada correctamente'
+        })
+    
+    except Exception as e:
+        app.logger.error(f"Error al eliminar sesión: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': str(e)
+        }), 500
+
+@app.route('/api/diagnostics', methods=['GET'])
+def diagnostics():
+    """Obtiene información de diagnóstico del sistema"""
+    try:
+        # Obtener información de recursos del SessionManager
+        resource_usage = session_manager.get_resource_usage()
+        
+        # Obtener lista de sesiones
+        sessions = session_manager.list_sessions()
+        
+        # Crear respuesta con información detallada
+        response = {
+            'status': 'success',
+            'timestamp': time.time(),
+            'memory': {
+                'total': resource_usage.get('memory_total', 0),
+                'available': resource_usage.get('memory_available', 0),
+                'percent': resource_usage.get('memory_percent', 0),
+                'process': resource_usage.get('memory_process', 0),
+                'process_percent': resource_usage.get('memory_process_percent', 0)
             },
-            'database': {
-                'configured_type': db_type,
-                'directory': db_dir,
-                'directory_exists': dir_exists,
-                'sqlite_count': sqlite_count,
-                'duckdb_count': duckdb_count,
-                'total_files': len(files_in_dir),
-                'files': files_in_dir
+            'cpu': {
+                'percent': resource_usage.get('cpu_percent', 0),
+                'cores': resource_usage.get('cpu_count', 0)
             },
             'sessions': {
-                'active_count': active_sessions_count,
-                'session_ids': list(active_sessions.keys()),
-                'max_sessions': MAX_SESSIONS,
-                'session_timeout': SESSION_TIMEOUT,
-                'cleanup_interval': CLEANUP_INTERVAL,
-                'max_contexts_per_session': MAX_CONTEXTS_PER_SESSION,
-                'session_details': session_details
+                'active': len(sessions),
+                'limit': MAX_SESSIONS,
+                'ragapp_instances': len(ragapp_instances)
             },
-            'resources': {
-                'memory': memory_usage,
-                'system': system_stats,
-                'garbage_collection': gc_stats
-            }
-        })
+            'system': {
+                'platform': sys.platform,
+                'python_version': sys.version.split()[0],
+                'pid': os.getpid(),
+                'uptime': resource_usage.get('uptime', 0)
+            },
+            'session_list': sessions
+        }
+        
+        return jsonify(response)
+    
     except Exception as e:
-        app.logger.error(f"Error en diagnóstico: {str(e)}")
+        app.logger.error(f"Error al obtener diagnósticos: {str(e)}")
         return jsonify({
             'status': 'error',
             'message': str(e)
@@ -584,194 +544,146 @@ def diagnostics():
 
 @app.route('/api/message-context/<message_id>', methods=['GET'])
 def get_message_context(message_id):
-    """Obtiene el contexto usado para generar una respuesta específica"""
+    """Obtiene el contexto utilizado para un mensaje específico"""
     try:
-        session_id = request.args.get('session_id')
+        app.logger.info(f"Solicitando contexto para mensaje: {message_id}")
         
+        session_id = request.args.get('session_id')
         if not session_id:
-            app.logger.warning(f"Solicitud de contexto sin session_id para message_id={message_id}")
+            # Intentar buscar el message_id en todas las sesiones activas
+            sessions = session_manager.get_all_sessions()
+            found_session = None
+            
+            app.logger.info(f"No se proporcionó session_id, buscando en {len(sessions)} sesiones activas")
+            
+            for sid, session_data in sessions.items():
+                # Comprobar si este message_id está en la sesión
+                if session_data.get('last_message_id') == message_id:
+                    found_session = sid
+                    app.logger.info(f"Mensaje encontrado en sesión: {sid}")
+                    break
+            
+            if not found_session:
+                app.logger.warning(f"No se encontró sesión para el mensaje: {message_id}")
+                return jsonify({
+                    'status': 'error',
+                    'message': 'Se requiere session_id o no se encontró el mensaje en ninguna sesión activa'
+                }), 400
+            
+            session_id = found_session
+        
+        app.logger.info(f"Obteniendo contexto para mensaje {message_id} en sesión {session_id}")
+        
+        # Obtener contexto del mensaje
+        context_data = session_manager.get_message_context(session_id, message_id)
+        
+        if not context_data:
+            app.logger.warning(f"No se encontró contexto para el mensaje {message_id}")
             return jsonify({
                 'status': 'error',
-                'message': 'Se requiere el parámetro session_id'
-            }), 400
+                'message': 'No se encontró contexto para el mensaje especificado'
+            }), 404
         
-        app.logger.info(f"Solicitando contexto para message_id={message_id}, session_id={session_id}")
+        app.logger.info(f"Contexto encontrado para mensaje {message_id}: {len(context_data)} fragmentos")
         
-        # Actualizar timestamp de actividad si la sesión existe
-        with sessions_lock:
-            if session_id in active_sessions:
-                update_session_activity(session_id)
-            else:
-                app.logger.warning(f"Sesión {session_id} no encontrada, pero continuando con la búsqueda de contexto")
-                # No devolvemos error aquí para permitir recuperar contexto de sesiones ya cerradas
+        # Limpiar datos binarios del contexto
+        cleaned_context = []
+        for item in context_data:
+            # Eliminar campos binarios grandes
+            cleaned_item = {k: v for k, v in item.items() if k != 'embedding'}
+            # Añadir campos necesarios si faltan
+            if 'relevance' not in cleaned_item:
+                cleaned_item['relevance'] = 100
+            if 'header' not in cleaned_item and 'title' in cleaned_item:
+                cleaned_item['header'] = cleaned_item['title']
+            cleaned_context.append(cleaned_item)
         
-        # Primera estrategia: buscar en last_contexts
-        with sessions_lock:
-            if session_id in last_contexts:
-                # Buscar el mensaje específico en la sesión
-                for message_data in last_contexts[session_id]:
-                    if message_data.get('message_id') == message_id:
-                        # Formatear el contexto para una visualización más amigable
-                        formatted_context = []
-                        
-                        for idx, chunk in enumerate(message_data.get('context', [])):
-                            # Solo incluir chunks que sean documentos reales, no instrucciones
-                            if not any(exclude in chunk.get('header', '') for exclude in ['Instrucciones', 'Tono de conversación']):
-                                # Calcular el porcentaje de relevancia basado en la similitud
-                                similarity = chunk.get('similarity', 0)
-                                relevance_percentage = int(similarity * 100) if similarity else 100
-                                
-                                # Obtener metadatos del documento
-                                doc_name = chunk.get('document', '')
-                                doc_display = doc_name
-                                if '/' in doc_name:
-                                    doc_display = doc_name.split('/')[-1]
-                                
-                                formatted_chunk = {
-                                    'id': idx + 1,
-                                    'text': chunk.get('text', '').strip(),
-                                    'header': chunk.get('header', 'Sin título').strip(),
-                                    'relevance': relevance_percentage,
-                                    'page': chunk.get('page', 'N/A'),
-                                    'document': doc_display,
-                                    'document_full': doc_name
-                                }
-                                
-                                formatted_context.append(formatted_chunk)
-                        
-                        # Ordenar por relevancia
-                        formatted_context.sort(key=lambda x: x['relevance'], reverse=True)
-                        
-                        # Si no hay contexto después del filtrado, indicarlo amablemente
-                        if not formatted_context:
-                            app.logger.warning(f"No hay fragmentos válidos después del filtrado para message_id={message_id}")
-                            return jsonify({
-                                'status': 'success',
-                                'message_id': message_id,
-                                'query': message_data.get('query', ''),
-                                'context': [],
-                                'message': 'No hay fuentes disponibles para esta respuesta.',
-                                'timestamp': message_data.get('timestamp')
-                            })
-                        
-                        app.logger.info(f"Contexto recuperado de last_contexts para message_id={message_id}: {len(formatted_context)} fragmentos")
-                        return jsonify({
-                            'status': 'success',
-                            'message_id': message_id,
-                            'query': message_data.get('query', ''),
-                            'context': formatted_context,
-                            'timestamp': message_data.get('timestamp')
-                        })
+        # Obtener datos de la sesión
+        session_data = session_manager.get_session(session_id)
+        session_config = session_manager.get_session_config(session_id)
         
-        # Segunda estrategia: intentar obtener el contexto del SessionManager
-        try:
-            session_manager = SessionManager()
-            context_data = session_manager.get_message_context(session_id, message_id)
-            
-            if context_data:
-                app.logger.info(f"Contexto recuperado del SessionManager para message_id={message_id}: {len(context_data)} fragmentos")
-                
-                # Formatear el contexto para una visualización más amigable
-                formatted_context = []
-                
-                for idx, chunk in enumerate(context_data):
-                    # Solo incluir chunks que sean documentos reales, no instrucciones
-                    if not any(exclude in chunk.get('header', '') for exclude in ['Instrucciones', 'Tono de conversación']):
-                        # Calcular el porcentaje de relevancia basado en la similitud
-                        similarity = chunk.get('similarity', 0)
-                        relevance_percentage = int(similarity * 100) if similarity else 100
-                        
-                        # Obtener metadatos del documento
-                        doc_name = chunk.get('document', '')
-                        doc_display = doc_name
-                        if '/' in doc_name:
-                            doc_display = doc_name.split('/')[-1]
-                        
-                        formatted_chunk = {
-                            'id': idx + 1,
-                            'text': chunk.get('text', '').strip(),
-                            'header': chunk.get('header', 'Sin título').strip(),
-                            'relevance': relevance_percentage,
-                            'page': chunk.get('page', 'N/A'),
-                            'document': doc_display,
-                            'document_full': doc_name
-                        }
-                        
-                        formatted_context.append(formatted_chunk)
-                
-                # Ordenar por relevancia
-                formatted_context.sort(key=lambda x: x['relevance'], reverse=True)
-                
-                # Si no hay contexto después del filtrado, indicarlo amablemente
-                if not formatted_context:
-                    app.logger.warning(f"No hay fragmentos válidos después del filtrado para message_id={message_id}")
-                    return jsonify({
-                        'status': 'success',
-                        'message_id': message_id,
-                        'query': 'No disponible',
-                        'context': [],
-                        'message': 'No hay fuentes disponibles para esta respuesta.'
-                    })
-                
-                return jsonify({
-                    'status': 'success',
-                    'message_id': message_id,
-                    'query': 'No disponible',
-                    'context': formatted_context
-                })
-        except Exception as e:
-            app.logger.error(f"Error al recuperar contexto desde SessionManager: {str(e)}")
-            # Continuamos al fallback final
+        # Obtener información de la consulta si está disponible
+        query_info = session_config.get('last_query', {}) if session_config else {}
         
-        # Si llegamos aquí, no se encontró el contexto
-        app.logger.warning(f"No se encontró contexto para message_id={message_id}, session_id={session_id}")
         return jsonify({
-            'status': 'not_found',
-            'message': 'No se encontraron fuentes para esta respuesta.',
-            'context': []
-        }), 404
+            'status': 'success',
+            'message_id': message_id,
+            'session_id': session_id,
+            'query': query_info.get('text', 'Consulta no disponible'),
+            'timestamp': query_info.get('timestamp', 0),
+            'context_count': len(cleaned_context),
+            'session_info': {
+                'database_name': session_data.get('database_name', 'desconocida'),
+                'created_at': session_data.get('created_at', 0)
+            },
+            'context': cleaned_context
+        })
     
     except Exception as e:
-        app.logger.error(f"Error general al obtener contexto: {str(e)}", exc_info=True)
+        app.logger.error(f"Error al obtener contexto de mensaje {message_id}: {str(e)}", exc_info=True)
         return jsonify({
             'status': 'error',
-            'message': f'Error al procesar la solicitud: {str(e)}',
-            'context': []
+            'message': str(e)
         }), 500
 
 @app.route('/api/cleanup', methods=['POST'])
 def trigger_cleanup():
-    """Endpoint para forzar la limpieza de sesiones inactivas"""
+    """Desencadena una limpieza manual de recursos"""
     try:
-        # Ejecutar limpieza
-        with sessions_lock:
-            old_count = len(active_sessions)
-            cleanup_inactive_sessions()
-            new_count = len(active_sessions)
+        # Forzar limpieza en SessionManager
+        aggressive = request.json.get('aggressive', False) if request.is_json else False
+        result = session_manager.clean_expired_sessions(aggressive=aggressive)
+        
+        # Limpiar instancias RagApp huérfanas
+        with instances_lock:
+            sessions = session_manager.get_all_sessions()
+            orphaned = []
             
+            # Identificar instancias sin sesión válida
+            for session_id in list(ragapp_instances.keys()):
+                if session_id not in sessions:
+                    orphaned.append(session_id)
+            
+            # Cerrar y eliminar instancias huérfanas
+            for session_id in orphaned:
+                try:
+                    rag_app = ragapp_instances[session_id]
+                    rag_app.close()
+                except Exception:
+                    pass
+                
+                del ragapp_instances[session_id]
+        
         # Forzar recolección de basura
         gc.collect()
         
         return jsonify({
             'status': 'success',
-            'message': f'Limpieza completada. Sesiones eliminadas: {old_count - new_count}',
-            'sessions_before': old_count,
-            'sessions_after': new_count
+            'message': f'Limpieza completada: {result}',
+            'orphaned_instances': len(orphaned) if 'orphaned' in locals() else 0,
+            'remaining_instances': len(ragapp_instances)
         })
+    
     except Exception as e:
+        app.logger.error(f"Error durante la limpieza manual: {str(e)}")
         return jsonify({
             'status': 'error',
-            'message': f'Error durante la limpieza: {str(e)}'
+            'message': str(e)
         }), 500
 
 def run_api(host='0.0.0.0', port=5000, debug=False):
-    """Ejecuta el servidor API Flask"""
-    # Configurar opciones avanzadas
-    app.config['JSON_SORT_KEYS'] = False  # Mantener orden de claves en JSON
-    app.config['JSONIFY_PRETTYPRINT_REGULAR'] = False  # No formatear JSON para ahorrar ancho de banda
-    
-    # Iniciar la aplicación
-    app.run(host=host, port=port, debug=debug)
+    """Inicia el servidor API"""
+    app.logger.info(f"Iniciando API RAG en {host}:{port}")
+    app.run(host=host, port=port, debug=debug, threaded=True)
 
+# Si se ejecuta directamente este archivo
 if __name__ == '__main__':
+    # Configurar logging
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
+    # Iniciar API
     run_api(debug=True) 

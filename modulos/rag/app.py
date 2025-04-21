@@ -26,8 +26,8 @@ from modulos.session_manager.session_manager import SessionManager
 logger = logging.getLogger(__name__)
 config = Config()
 
-# Mantener un registro de todas las instancias RagApp activas
-_active_instances = weakref.WeakSet()
+# Ya no necesitamos mantener un registro de instancias activas, ya que lo hace el SessionManager
+# _active_instances = weakref.WeakSet()
 
 class RagApp:
     """
@@ -59,10 +59,20 @@ class RagApp:
         """
         self.database_name = database_name
         self.streaming = streaming
-        self.session_id = session_id or str(uuid.uuid4())
+        self.session_manager = SessionManager()
+        
+        # Obtener o crear sesión en el SessionManager
+        if session_id:
+            self.session_id = session_id
+            # Verificar si la sesión existe
+            if not self.session_manager.get_session(session_id):
+                self.session_id = self.session_manager.create_session(session_id)
+        else:
+            # Crear nueva sesión
+            self.session_id = self.session_manager.create_session()
+        
         self.collection_name = collection_name
         self.closed = False
-        self.last_activity = time.time()
         self.creation_time = time.time()
         self.query_count = 0
         
@@ -78,21 +88,38 @@ class RagApp:
         # Inicializar modelo de embeddings
         self._initialize_embedding_model()
         
-        # Registrar esta instancia
-        _active_instances.add(self)
+        # Registrar metadatos de la sesión
+        session_metadata = {
+            "database_name": database_name,
+            "streaming": streaming,
+            "created_at": self.creation_time,
+            "process_id": self.process_id,
+            "collection_name": collection_name,
+            "ai_client": ai_client or config.get_ai_client_config().get("type", "openai"),
+            "app_type": "rag"
+        }
         
-        # Registrar en el gestor de sesiones si está disponible
-        try:
-            session_manager = SessionManager()
-            session_manager.update_session_metadata(self.session_id, {
-                "database_name": database_name,
-                "streaming": streaming,
-                "created_at": self.creation_time,
-                "process_id": self.process_id,
-                "collection_name": collection_name
-            })
-        except Exception as e:
-            logger.warning(f"No se pudo registrar la sesión en el gestor: {e}")
+        # Añadir argumentos adicionales a los metadatos
+        for key, value in kwargs.items():
+            # Solo incluir valores simples (no objetos complejos)
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                session_metadata[key] = value
+        
+        # Actualizar metadatos de la sesión
+        self.session_manager.update_session_metadata(self.session_id, session_metadata)
+        
+        # Almacenar configuración en la sesión para recuperarla más tarde
+        self.session_manager.store_session_config(self.session_id, {
+            "database": {
+                "name": database_name,
+                "type": getattr(self, "db_type", "unknown"),
+                "collection": collection_name
+            },
+            "ai_client": {
+                "type": ai_client or config.get_ai_client_config().get("type", "openai"),
+                "streaming": streaming
+            }
+        })
         
         logger.info(f"RagApp inicializada para {self.database_name} (session_id={self.session_id})")
     
@@ -133,9 +160,19 @@ class RagApp:
             if self.ai_client is not None:
                 self.ai_client = None
                 logger.debug("Referencia a cliente IA liberada")
+            
+            # Marcar sesión como cerrada en SessionManager 
+            # (no la eliminamos, solo actualizamos su estado)
+            try:
+                self.session_manager.update_session_metadata(self.session_id, {
+                    "closed": True,
+                    "closed_at": time.time()
+                })
+            except Exception as e:
+                logger.warning(f"Error al actualizar estado de sesión cerrada: {e}")
                 
             self.closed = True
-            logger.info("Recursos de RagApp liberados correctamente")
+            logger.info(f"Recursos de RagApp liberados correctamente (session_id={self.session_id})")
             
         except Exception as e:
             logger.error(f"Error al cerrar recursos de RagApp: {e}")
@@ -149,6 +186,15 @@ class RagApp:
             collection_name: Nombre de la colección (opcional)
         """
         try:
+            # Buscar la base de datos en la lista de bases de datos disponibles
+            db_metadata = None
+            available_dbs = self.session_manager.list_available_databases()
+            
+            if database_name in available_dbs:
+                db_metadata = available_dbs[database_name]
+                logger.debug(f"Base de datos encontrada en las disponibles: {database_name}")
+            
+            # Crear instancia de base de datos
             factory = DatabaseFactory()
             self.db = factory.get_database_instance(
                 custom_name=database_name,
@@ -186,8 +232,33 @@ class RagApp:
                             pass
             else:
                 self.session = {}
+            
+            # Asociar la base de datos con la sesión en SessionManager
+            if db_metadata:
+                self.session_manager.associate_database_with_session(
+                    self.session_id, 
+                    database_name, 
+                    db_metadata
+                )
+            else:
+                # Si no hay metadatos, crearlos a partir de la información disponible
+                new_metadata = {
+                    "id": database_name,
+                    "name": database_name,
+                    "db_type": self.db_type,
+                    "db_path": self.db_path,
+                    "session": self.session
+                }
+                # Registrar la base de datos y asociarla con la sesión
+                self.session_manager.register_database(database_name, new_metadata)
+                self.session_manager.associate_database_with_session(
+                    self.session_id, 
+                    database_name, 
+                    new_metadata
+                )
                 
             logger.info(f"Base de datos inicializada: {database_name}, tipo: {self.db_type}")
+            
         except Exception as e:
             logger.error(f"Error al inicializar base de datos: {e}")
             self.db = None
@@ -216,6 +287,13 @@ class RagApp:
             # Crear el cliente
             self.ai_client = factory.get_client(ai_client_name, **kwargs)
             self.ai_client_type = ai_client_name
+            
+            # Guardar la configuración del cliente en los metadatos de la sesión
+            self.session_manager.update_session_metadata(self.session_id, {
+                "ai_client_type": ai_client_name,
+                "streaming": self.streaming
+            })
+            
             logger.info(f"Cliente IA inicializado: {ai_client_name}, streaming={self.streaming}")
         except Exception as e:
             logger.error(f"Error al inicializar cliente IA: {e}")
@@ -231,6 +309,12 @@ class RagApp:
             embedding_model = self.session.get("embedding_model", "modernbert")
             self.embedding_manager = EmbeddingFactory.get_embedding_manager(embedding_model)
             self.embedding_manager.load_model()
+            
+            # Guardar información del modelo en los metadatos de la sesión
+            self.session_manager.update_session_metadata(self.session_id, {
+                "embedding_model": embedding_model
+            })
+            
             logger.info(f"Modelo de embeddings inicializado: {embedding_model}")
         except Exception as e:
             logger.error(f"Error al inicializar modelo de embeddings: {e}")
@@ -266,8 +350,11 @@ class RagApp:
         if self._check_closed():
             return "Esta sesión ha sido cerrada. Por favor inicie una nueva sesión."
         
-        # Actualizar timestamp de última actividad
-        self.last_activity = time.time()
+        # Actualizar timestamp de última actividad en SessionManager
+        self.session_manager.update_session_metadata(self.session_id, {
+            "last_activity": time.time(),
+            "query_count": self.query_count + 1
+        })
         self.query_count += 1
         
         # Generar un ID único para este mensaje
@@ -304,6 +391,9 @@ class RagApp:
                 logger.warning("Cliente IA no disponible, devolviendo solo contexto")
                 response = "No se puede generar respuesta: Cliente IA no disponible."
                 
+                # Almacenar contexto vacío en el gestor de sesiones
+                self.session_manager.store_message_context(self.session_id, message_id, [])
+                
                 if return_context:
                     return response, context_data
                 return response
@@ -314,15 +404,24 @@ class RagApp:
                 def response_generator():
                     try:
                         # Iniciar streaming
+                        response_chunks = []
                         for chunk in self.ai_client.generate_response(query_text, context_data):
+                            response_chunks.append(chunk)
                             yield chunk
                         
-                        # Al finalizar, almacenar el contexto en el gestor de sesiones
-                        try:
-                            session_manager = SessionManager()
-                            session_manager.store_message_context(self.session_id, message_id, context_data)
-                        except Exception as e:
-                            logger.error(f"Error al almacenar contexto: {e}")
+                        # Almacenar el contexto en el gestor de sesiones
+                        self.session_manager.store_message_context(self.session_id, message_id, context_data)
+                        
+                        # Guardar la respuesta completa en la configuración de la sesión
+                        full_response = "".join(response_chunks)
+                        self.session_manager.store_session_config(self.session_id, {
+                            "last_query": {
+                                "text": query_text,
+                                "message_id": message_id,
+                                "timestamp": start_time,
+                                "response_length": len(full_response)
+                            }
+                        })
                         
                         # Enviar el ID del mensaje como último chunk
                         yield f"\n<hidden_message_id>{message_id}</hidden_message_id>"
@@ -344,11 +443,17 @@ class RagApp:
                     response = self.ai_client.generate_response(query_text, context_data)
                 
                 # Almacenar contexto en el gestor de sesiones
-                try:
-                    session_manager = SessionManager()
-                    session_manager.store_message_context(self.session_id, message_id, context_data)
-                except Exception as e:
-                    logger.error(f"Error al almacenar contexto: {e}")
+                self.session_manager.store_message_context(self.session_id, message_id, context_data)
+                
+                # Guardar la consulta en la configuración de la sesión
+                self.session_manager.store_session_config(self.session_id, {
+                    "last_query": {
+                        "text": query_text,
+                        "message_id": message_id,
+                        "timestamp": start_time,
+                        "response_length": len(response)
+                    }
+                })
                 
                 # Registrar tiempo de procesamiento
                 process_time = time.time() - start_time
@@ -373,110 +478,48 @@ class RagApp:
     @staticmethod
     def list_available_databases() -> List[Dict[str, Any]]:
         """
-        Lista todas las bases de datos disponibles directamente leyendo los archivos.
+        Lista todas las bases de datos disponibles utilizando el SessionManager.
         
         Returns:
             Lista de diccionarios con información de las bases de datos
         """
-        # Obtener la configuración de base de datos
-        database_config = config.get_database_config()
-        
-        # Determinar el directorio de bases de datos
-        db_dir = database_config.get("sqlite", {}).get("db_dir", "modulos/databases/db")
-        
-        # Asegurar que la ruta es absoluta
-        if not os.path.isabs(db_dir):
-            db_dir = os.path.join(os.path.abspath(os.getcwd()), db_dir)
-        
-        # Verificar que el directorio existe
-        if not os.path.exists(db_dir):
-            logger.warning(f"El directorio de bases de datos no existe: {db_dir}")
+        try:
+            # Usar SessionManager para obtener las bases de datos
+            session_manager = SessionManager()
+            available_dbs = session_manager.list_available_databases()
+            
+            # Convertir el diccionario a una lista para mantener compatibilidad
+            databases = []
+            for db_name, metadata in available_dbs.items():
+                databases.append({
+                    "id": db_name,
+                    "name": metadata.get("name", db_name),
+                    "type": metadata.get("db_type", "unknown"),
+                    "path": metadata.get("db_path", ""),
+                    "size": metadata.get("size", 0),
+                    "created_at": metadata.get("created_at", 0),
+                    "metadata": metadata
+                })
+            
+            # Ordenar por fecha de creación (más reciente primero)
+            databases.sort(key=lambda x: x["created_at"], reverse=True)
+            
+            return databases
+            
+        except Exception as e:
+            logger.error(f"Error al obtener bases de datos: {e}")
             return []
-        
-        databases = []
-        
-        # Buscar archivos SQLite
-        sqlite_files = glob.glob(os.path.join(db_dir, "*.sqlite"))
-        for file_path in sqlite_files:
-            db_name = os.path.basename(file_path).replace(".sqlite", "")
-            
-            # Intentar leer metadatos
-            meta_path = f"{file_path}.meta.json"
-            metadata = {}
-            
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, 'r') as f:
-                        metadata = json.load(f)
-                except:
-                    pass
-            
-            db_info = {
-                "id": db_name,
-                "name": db_name,
-                "type": "sqlite",
-                "path": file_path,
-                "size": os.path.getsize(file_path),
-                "created_at": metadata.get("created_at", os.path.getctime(file_path)),
-                "metadata": metadata
-            }
-            
-            databases.append(db_info)
-        
-        # Buscar archivos DuckDB
-        duckdb_files = glob.glob(os.path.join(db_dir, "*.duckdb"))
-        for file_path in duckdb_files:
-            db_name = os.path.basename(file_path).replace(".duckdb", "")
-            
-            # Intentar leer metadatos
-            meta_path = f"{file_path}.meta.json"
-            metadata = {}
-            
-            if os.path.exists(meta_path):
-                try:
-                    with open(meta_path, 'r') as f:
-                        metadata = json.load(f)
-                except:
-                    pass
-            
-            db_info = {
-                "id": db_name,
-                "name": db_name,
-                "type": "duckdb",
-                "path": file_path,
-                "size": os.path.getsize(file_path),
-                "created_at": metadata.get("created_at", os.path.getctime(file_path)),
-                "metadata": metadata
-            }
-            
-            databases.append(db_info)
-        
-        # Ordenar por fecha de creación (más reciente primero)
-        databases.sort(key=lambda x: x["created_at"], reverse=True)
-        
-        return databases
     
     @staticmethod
     def cleanup_instances():
         """
-        Limpia y libera los recursos de todas las instancias activas.
-        Útil para llamar durante el cierre del programa.
+        Ya no necesitamos este método, ya que SessionManager maneja la limpieza.
+        Se mantiene para compatibilidad.
         """
-        instances_count = len(_active_instances)
-        
-        if instances_count > 0:
-            logger.info(f"Limpiando {instances_count} instancias RagApp activas")
-            
-            for instance in list(_active_instances):
-                try:
-                    instance.close()
-                except:
-                    pass
-            
-            # Forzar recolección de basura
-            _active_instances.clear()
+        try:
+            session_manager = SessionManager()
+            session_manager.clean_expired_sessions()
             gc.collect()
-            
-            logger.info("Limpieza de instancias RagApp completada")
-        else:
-            logger.debug("No hay instancias RagApp activas para limpiar") 
+            logger.info("Limpieza de recursos completada mediante SessionManager")
+        except Exception as e:
+            logger.error(f"Error durante la limpieza de recursos: {e}") 

@@ -8,44 +8,54 @@ en un servidor web usando Flask y respuestas en streaming.
 import logging
 import time
 import json
+import os
 from typing import Dict, Any, List
 
-from flask import Flask, request, jsonify, Response, stream_with_context
+from flask import Flask, request, jsonify, Response, stream_with_context, send_from_directory
 import threading
 
 from modulos.rag.chatbot import RagChatbot
-from modulos.utils.logging_utils import setup_logging
+from modulos.session_manager.session_manager import SessionManager
+from modulos.rag.app import RagApp
+from config import Config
 
 # Configurar logging
-setup_logging(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 # Crear la aplicación Flask
 app = Flask(__name__)
+config = Config()
 
-# Chatbot global - En producción se recomienda una inicialización más controlada
+# Chatbot global para sesiones compartidas
 chatbot = None
 
-# Diccionario para almacenar sesiones activas (para el ejemplo)
+# Diccionario para almacenar chatbots específicos por sesión
 active_chatbots = {}
 
-def initialize_chatbot(database_index=None):
+# Instancia del SessionManager
+session_manager = SessionManager()
+
+def initialize_chatbot(database_name=None):
     """
     Inicializa el chatbot RAG con la configuración por defecto o específica.
     
     Args:
-        database_index: Índice de la base de datos a utilizar (opcional)
+        database_name: Nombre de la base de datos a utilizar (opcional)
     """
     global chatbot
     
     try:
-        # Inicializar el chatbot con streaming habilitado
+        # Inicializar el chatbot
         chatbot = RagChatbot(
-            database_index=database_index,
+            database_name=database_name,
             streaming=True,
             max_chunks=5
         )
-        logger.info("Chatbot RAG inicializado correctamente")
+        logger.info(f"Chatbot RAG inicializado correctamente con database_name={database_name}")
         return True
     except Exception as e:
         logger.error(f"Error al inicializar el chatbot RAG: {e}")
@@ -59,23 +69,37 @@ def add_cors_headers(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     return response
 
+# Ruta principal para servir la interfaz web estática
+@app.route('/')
+def index():
+    """Sirve la página principal"""
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+    return send_from_directory(static_dir, 'index.html')
+
+@app.route('/<path:filename>')
+def static_files(filename):
+    """Sirve archivos estáticos"""
+    static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static')
+    return send_from_directory(static_dir, filename)
+
 # Ruta para verificar el estado del servidor
 @app.route('/health', methods=['GET'])
 def health_check():
     """Verifica el estado del servidor."""
-    global chatbot
+    resource_usage = session_manager.get_resource_usage()
     
-    if chatbot is None:
-        return jsonify({
-            "status": "error",
-            "message": "Chatbot no inicializado"
-        }), 500
-    
-    # Estadísticas básicas
+    # Estadísticas del servidor
     stats = {
         "status": "ok",
-        "active_sessions": chatbot.get_active_sessions_count(),
-        "timestamp": time.time()
+        "timestamp": time.time(),
+        "sessions": {
+            "active": len(session_manager.get_all_sessions()),
+            "active_chatbots": len(active_chatbots)
+        },
+        "resources": {
+            "memory_percent": resource_usage.get("memory_percent", 0),
+            "cpu_percent": resource_usage.get("cpu_percent", 0)
+        }
     }
     
     return jsonify(stats)
@@ -84,19 +108,31 @@ def health_check():
 @app.route('/databases', methods=['GET'])
 def list_databases():
     """Lista las bases de datos disponibles."""
-    global chatbot
-    
-    if chatbot is None:
-        if not initialize_chatbot():
-            return jsonify({
-                "status": "error",
-                "message": "No se pudo inicializar el chatbot"
-            }), 500
-    
     try:
-        databases = chatbot.rag_app.get_available_databases()
+        # Usar SessionManager para listar bases de datos
+        db_dict = session_manager.list_available_databases()
+        
+        # Formatear resultados
+        databases = []
+        for db_name, metadata in db_dict.items():
+            size_mb = metadata.get("size", 0) / (1024 * 1024) if metadata.get("size") else 0
+            
+            databases.append({
+                "id": db_name,
+                "name": metadata.get("name", db_name),
+                "description": metadata.get("description", ""),
+                "size": metadata.get("size", 0),
+                "size_formatted": f"{size_mb:.2f} MB",
+                "type": metadata.get("db_type", "unknown"),
+                "created_at": metadata.get("created_at", 0)
+            })
+        
+        # Ordenar por fecha de creación (más reciente primero)
+        databases.sort(key=lambda x: x["created_at"], reverse=True)
+        
         return jsonify({
-            "status": "ok",
+            "status": "success",
+            "count": len(databases),
             "databases": databases
         })
     except Exception as e:
@@ -110,48 +146,44 @@ def list_databases():
 @app.route('/sessions', methods=['POST'])
 def create_session():
     """Crea una nueva sesión de chat."""
-    global chatbot
-    
-    if chatbot is None:
-        if not initialize_chatbot():
-            return jsonify({
-                "status": "error",
-                "message": "No se pudo inicializar el chatbot"
-            }), 500
-    
     try:
         # Obtener parámetros de la petición
         data = request.get_json() or {}
-        database_index = data.get('database_index')
+        database_name = data.get('database_name')
+        ai_client = data.get('ai_client')
         
-        # Si se especifica un índice de base de datos diferente,
-        # crear un chatbot específico para esta sesión
-        if database_index is not None:
-            try:
-                session_chatbot = RagChatbot(
-                    database_index=database_index,
-                    streaming=True
-                )
-                session_id = session_chatbot.create_session()
-                active_chatbots[session_id] = session_chatbot
-            except Exception as e:
-                logger.error(f"Error al crear chatbot con base de datos {database_index}: {e}")
-                return jsonify({
-                    "status": "error",
-                    "message": f"Error al inicializar con la base de datos seleccionada: {str(e)}"
-                }), 400
-        else:
-            # Usar el chatbot global
-            session_id = chatbot.create_session()
-        
-        # Devolver el ID de sesión
-        return jsonify({
-            "status": "ok",
-            "session_id": session_id,
-            "message": "Sesión creada correctamente",
-            "custom_database": database_index is not None
-        })
-        
+        # Crear un chatbot específico para esta sesión
+        try:
+            session_chatbot = RagChatbot(
+                database_name=database_name,
+                ai_client=ai_client,
+                streaming=True
+            )
+            
+            # El constructor de RagChatbot ya crea una sesión
+            session_id = session_chatbot.session_id
+            
+            # Almacenar el chatbot específico para esta sesión
+            active_chatbots[session_id] = session_chatbot
+            
+            # Obtener metadatos de la sesión
+            session_data = session_manager.get_session(session_id)
+            
+            return jsonify({
+                "status": "success",
+                "session_id": session_id,
+                "message": "Sesión creada correctamente",
+                "database": database_name,
+                "ai_client": ai_client or config.get_ai_client_config().get("type", "openai"),
+                "created_at": session_data.get("created_at", time.time())
+            })
+        except Exception as e:
+            logger.error(f"Error al crear chatbot con base de datos {database_name}: {e}")
+            return jsonify({
+                "status": "error",
+                "message": f"Error al inicializar con la base de datos seleccionada: {str(e)}"
+            }), 400
+    
     except Exception as e:
         logger.error(f"Error al crear sesión: {e}")
         return jsonify({
@@ -163,15 +195,6 @@ def create_session():
 @app.route('/query', methods=['POST'])
 def process_query():
     """Procesa una consulta y devuelve una respuesta completa."""
-    global chatbot
-    
-    if chatbot is None:
-        if not initialize_chatbot():
-            return jsonify({
-                "status": "error",
-                "message": "No se pudo inicializar el chatbot"
-            }), 500
-    
     try:
         # Obtener parámetros de la petición
         data = request.get_json()
@@ -185,29 +208,68 @@ def process_query():
         query = data['query']
         session_id = data.get('session_id')
         
-        # Seleccionar el chatbot apropiado
-        bot = active_chatbots.get(session_id, chatbot) if session_id else chatbot
+        if not session_id:
+            return jsonify({
+                "status": "error",
+                "message": "Parámetro 'session_id' requerido"
+            }), 400
+        
+        # Verificar que la sesión existe en SessionManager
+        if not session_manager.get_session(session_id):
+            return jsonify({
+                "status": "error",
+                "message": "Sesión no válida o expirada"
+            }), 404
+        
+        # Seleccionar el chatbot apropiado o crear uno nuevo si es necesario
+        if session_id in active_chatbots:
+            bot = active_chatbots[session_id]
+        else:
+            # Obtener datos de la sesión
+            session_data = session_manager.get_session(session_id)
+            database_name = session_data.get("database_name")
+            ai_client = session_data.get("ai_client")
+            
+            # Crear un nuevo chatbot para esta sesión
+            try:
+                bot = RagChatbot(
+                    database_name=database_name,
+                    ai_client=ai_client,
+                    streaming=False,
+                    session_id=session_id
+                )
+                active_chatbots[session_id] = bot
+            except Exception as e:
+                logger.error(f"Error al recrear chatbot para sesión {session_id}: {e}")
+                return jsonify({
+                    "status": "error",
+                    "message": f"Error al procesar la consulta: {str(e)}"
+                }), 500
         
         # Procesar la consulta (sin streaming)
         result = bot.process_query(query, session_id=session_id, stream=False)
         
-        # Extraer respuesta y contexto
-        if isinstance(result['response'], str):
-            context_info = bot.extract_context_from_response(result['response'])
-            
-            return jsonify({
-                "status": "ok",
-                "response": context_info['response_text'],
-                "context": context_info['context_text'],
-                "session_id": result['session_id'],
-                "timestamp": result['timestamp']
-            })
-        else:
+        # Verificar resultado
+        if result.get("status") == "error":
             return jsonify({
                 "status": "error",
-                "message": "Error inesperado en la respuesta"
+                "message": result.get("message", "Error desconocido al procesar la consulta")
             }), 500
         
+        # Extraer respuesta y contexto
+        response_text = result.get("response", "")
+        context_info = bot.extract_context_from_response(response_text)
+        
+        return jsonify({
+            "status": "success",
+            "response": context_info.get("clean_response", response_text),
+            "message_id": context_info.get("message_id"),
+            "context": context_info.get("context", []),
+            "session_id": session_id,
+            "timestamp": time.time(),
+            "response_time": result.get("response_time", 0)
+        })
+    
     except Exception as e:
         logger.error(f"Error al procesar consulta: {e}")
         return jsonify({
@@ -215,19 +277,10 @@ def process_query():
             "message": str(e)
         }), 500
 
-# Ruta para procesar consultas en streaming
+# Ruta para procesar consultas con streaming
 @app.route('/query/stream', methods=['POST'])
 def process_query_stream():
     """Procesa una consulta y devuelve una respuesta en streaming."""
-    global chatbot
-    
-    if chatbot is None:
-        if not initialize_chatbot():
-            return jsonify({
-                "status": "error",
-                "message": "No se pudo inicializar el chatbot"
-            }), 500
-    
     try:
         # Obtener parámetros de la petición
         data = request.get_json()
@@ -241,59 +294,102 @@ def process_query_stream():
         query = data['query']
         session_id = data.get('session_id')
         
-        # Seleccionar el chatbot apropiado
-        bot = active_chatbots.get(session_id, chatbot) if session_id else chatbot
+        if not session_id:
+            return jsonify({
+                "status": "error",
+                "message": "Parámetro 'session_id' requerido"
+            }), 400
         
-        # Procesar la consulta (con streaming)
+        # Verificar que la sesión existe en SessionManager
+        if not session_manager.get_session(session_id):
+            return jsonify({
+                "status": "error",
+                "message": "Sesión no válida o expirada"
+            }), 404
+        
+        # Seleccionar el chatbot apropiado o crear uno nuevo
+        if session_id in active_chatbots:
+            bot = active_chatbots[session_id]
+        else:
+            # Obtener datos de la sesión
+            session_data = session_manager.get_session(session_id)
+            database_name = session_data.get("database_name")
+            ai_client = session_data.get("ai_client")
+            
+            # Crear un nuevo chatbot para esta sesión
+            try:
+                bot = RagChatbot(
+                    database_name=database_name,
+                    ai_client=ai_client,
+                    streaming=True,
+                    session_id=session_id
+                )
+                active_chatbots[session_id] = bot
+            except Exception as e:
+                logger.error(f"Error al recrear chatbot para sesión {session_id}: {e}")
+                return jsonify({
+                    "status": "error",
+                    "message": f"Error al procesar la consulta: {str(e)}"
+                }), 500
+        
+        # Procesar la consulta con streaming habilitado
         result = bot.process_query(query, session_id=session_id, stream=True)
         
-        if not result.get('is_streaming', False):
-            # Si por alguna razón no obtuvimos streaming, devolver respuesta normal
+        # Verificar si hay un error en el resultado
+        if result.get("status") == "error":
             return jsonify({
-                "status": "ok",
-                "response": result['response'],
-                "session_id": result['session_id'],
-                "timestamp": result['timestamp']
-            })
+                "status": "error",
+                "message": result.get("message", "Error desconocido al procesar la consulta")
+            }), 500
         
-        # Función para generar la respuesta en streaming
+        # Obtener el generador de streaming
+        streaming_generator = result.get("response")
+        update_history_callback = result.get("update_history")
+        
+        # Configurar generador para el cliente
         def generate():
             try:
-                # Primero enviamos un objeto JSON con los metadatos
-                metadata = json.dumps({
-                    "status": "ok",
-                    "is_streaming": True,
-                    "session_id": result['session_id'],
-                    "timestamp": result['timestamp']
-                })
-                yield f"data: {metadata}\n\n"
-                
-                # Luego enviamos los fragmentos de la respuesta
-                for chunk in result['response']:
-                    if chunk:
-                        # Formato Server-Sent Events (SSE)
-                        yield f"data: {json.dumps({'chunk': chunk})}\n\n"
-                
-                # Al finalizar, actualizamos el historial
-                result['update_history']()
+                # Enviar cada chunk al cliente en formato SSE (Server-Sent Events)
+                for chunk in streaming_generator:
+                    # Solo enviar chunks no vacíos
+                    if chunk and isinstance(chunk, str):
+                        # Verificar si contiene un message_id oculto y eliminarlo
+                        if "<hidden_message_id>" in chunk:
+                            import re
+                            match = re.search(r'<hidden_message_id>(.*?)</hidden_message_id>', chunk)
+                            if match:
+                                chunk = chunk.replace(match.group(0), "")
+                        
+                        # Solo enviar si hay contenido después de limpiar
+                        if chunk.strip():
+                            yield f"data: {chunk.strip()}\n\n"
                 
                 # Señalizar el final del streaming
-                yield f"data: {json.dumps({'end': True})}\n\n"
+                yield "data: [DONE]\n\n"
                 
+                # Actualizar el historial después de completar el streaming
+                if update_history_callback:
+                    try:
+                        update_history_callback()
+                    except Exception as e:
+                        logger.error(f"Error al actualizar historial después de streaming: {e}")
+            
             except Exception as e:
-                logger.error(f"Error durante streaming: {e}")
-                yield f"data: {json.dumps({'error': str(e)})}\n\n"
+                error_msg = f"Error en streaming: {str(e)}"
+                logger.error(error_msg)
+                yield f"data: {error_msg}\n\n"
+                yield "data: [DONE]\n\n"
         
-        # Crear respuesta en streaming con formato SSE
+        # Configurar respuesta SSE
         return Response(
             stream_with_context(generate()),
             mimetype='text/event-stream',
             headers={
                 'Cache-Control': 'no-cache',
-                'Connection': 'keep-alive'
+                'X-Accel-Buffering': 'no'
             }
         )
-        
+    
     except Exception as e:
         logger.error(f"Error al procesar consulta streaming: {e}")
         return jsonify({
@@ -304,29 +400,44 @@ def process_query_stream():
 # Ruta para obtener el historial de una sesión
 @app.route('/sessions/<session_id>/history', methods=['GET'])
 def get_session_history(session_id):
-    """Obtiene el historial de una sesión."""
-    global chatbot
-    
-    if chatbot is None:
-        if not initialize_chatbot():
+    """Obtiene el historial de interacciones de una sesión."""
+    try:
+        # Verificar que la sesión existe
+        if not session_manager.get_session(session_id):
             return jsonify({
                 "status": "error",
-                "message": "No se pudo inicializar el chatbot"
-            }), 500
-    
-    try:
-        # Seleccionar el chatbot apropiado
-        bot = active_chatbots.get(session_id, chatbot)
+                "message": "Sesión no encontrada"
+            }), 404
+        
+        # Seleccionar el chatbot apropiado o crear uno temporal para acceder al historial
+        if session_id in active_chatbots:
+            bot = active_chatbots[session_id]
+        else:
+            # Obtener datos de la sesión
+            session_data = session_manager.get_session(session_id)
+            
+            # Crear un chatbot temporal con la sesión existente
+            bot = RagChatbot(session_id=session_id)
         
         # Obtener historial
         history = bot.get_session_history(session_id)
         
-        return jsonify({
-            "status": "ok",
-            "session_id": session_id,
-            "history": history
-        })
+        # Formatear historial para la respuesta
+        formatted_history = []
+        for item in history:
+            formatted_history.append({
+                "timestamp": item.get("timestamp", 0),
+                "query": item.get("query", ""),
+                "response": item.get("response", "")
+            })
         
+        return jsonify({
+            "status": "success",
+            "session_id": session_id,
+            "history_count": len(formatted_history),
+            "history": formatted_history
+        })
+    
     except Exception as e:
         logger.error(f"Error al obtener historial: {e}")
         return jsonify({
@@ -334,24 +445,58 @@ def get_session_history(session_id):
             "message": str(e)
         }), 500
 
-# Inicialización del servidor
+# Ruta para eliminar una sesión
+@app.route('/sessions/<session_id>', methods=['DELETE'])
+def delete_session(session_id):
+    """Elimina una sesión."""
+    try:
+        # Verificar que la sesión existe
+        if not session_manager.get_session(session_id):
+            return jsonify({
+                "status": "error",
+                "message": "Sesión no encontrada"
+            }), 404
+        
+        # Cerrar y eliminar el chatbot específico si existe
+        if session_id in active_chatbots:
+            try:
+                active_chatbots[session_id].close()
+            except Exception as e:
+                logger.warning(f"Error al cerrar chatbot de sesión {session_id}: {e}")
+            
+            del active_chatbots[session_id]
+        
+        # Eliminar la sesión del SessionManager
+        session_manager.delete_session(session_id)
+        
+        return jsonify({
+            "status": "success",
+            "message": "Sesión eliminada correctamente"
+        })
+    
+    except Exception as e:
+        logger.error(f"Error al eliminar sesión: {e}")
+        return jsonify({
+            "status": "error",
+            "message": str(e)
+        }), 500
+
 def start_server(host='0.0.0.0', port=5000, debug=False):
     """
-    Inicializa y arranca el servidor.
+    Inicia el servidor web.
     
     Args:
-        host: Host para escuchar
-        port: Puerto para escuchar
-        debug: Modo debug para Flask
+        host: Dirección IP donde escuchar (por defecto: todas)
+        port: Puerto donde escuchar
+        debug: Activar modo de depuración
     """
-    # Inicializar el chatbot
-    if not initialize_chatbot():
-        logger.error("No se pudo inicializar el chatbot al arrancar el servidor")
+    # Inicializar el chatbot global por defecto
+    # Esto ya no es necesario, ya que cada sesión utilizará su propio chatbot
+    # initialize_chatbot()
     
-    # Iniciar el servidor
     logger.info(f"Iniciando servidor en {host}:{port}")
-    app.run(host=host, port=port, debug=debug)
+    app.run(host=host, port=port, debug=debug, threaded=True)
 
-# Ejemplo de uso directo
+# Si se ejecuta como script independiente
 if __name__ == '__main__':
-    start_server(port=5000, debug=True) 
+    start_server(debug=True) 

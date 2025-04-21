@@ -12,7 +12,7 @@ general:
 # Configuración para chunking de documentos
 chunks:
   # Método de chunking a utilizar (character, token, context)
-  method: "character"
+  method: "context"
   
   # Configuración para chunker por caracteres
   character:

@@ -531,7 +531,8 @@ def optimize_database(db_index: int) -> None:
         
         # Obtener instancia de base de datos
         session_manager = SessionManager()
-        db, metadata = session_manager.get_database_by_index(db_index)
+        # Pasamos None como session_id ya que estamos optimizando una base de datos específica por índice
+        db, metadata = session_manager.get_database_by_index(db_index, session_id=None)
         
         # Medir tiempo de optimización
         start_time = time.time()
@@ -632,6 +633,35 @@ def show_database_statistics() -> None:
                     print(f"{C_INFO}• Creada: {C_VALUE}{db_stats['db_created']}")
     
     print(Style.BRIGHT + "=" * 80)
+
+def query_database(db_index: int, query: str, session_id: str = None) -> None:
+    """
+    Ejecuta una consulta en una base de datos específica.
+    
+    Args:
+        db_index: Índice de la base de datos a consultar
+        query: Consulta a realizar
+        session_id: ID de sesión (opcional)
+    """
+    from modulos.rag.main import process_query
+    
+    try:
+        # Si tenemos un ID de sesión, lo usamos directamente
+        if session_id:
+            print(f"{C_INFO}Consultando en la sesión: {C_VALUE}{session_id}")
+        
+        # Procesar la consulta
+        response = process_query(
+            query=query, 
+            db_index=db_index,
+            session_id=session_id,
+            stream=True
+        )
+        
+        # La respuesta ya se ha mostrado al usuario a través del streaming
+        
+    except Exception as e:
+        print(f"{C_ERROR}Error al consultar: {str(e)}")
 
 if __name__ == "__main__":
     sys.exit(main())

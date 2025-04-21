@@ -251,14 +251,20 @@ def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
     
         # Obtener la base de datos y configuración
         if db_index is not None:
-            # Si se especificó un índice, usamos ese índice
-            db, session = session_manager.get_database_by_index(db_index)
+            # Si se especificó un índice, usamos ese índice (pasando el session_id si está disponible)
+            db, session = session_manager.get_database_by_index(db_index, session_id=session_id)
         elif session_id:
-            # Si se especificó un ID de sesión, usamos esa sesión
-            db, session = session_manager.get_session_database(session_id)
+            # Si se especificó un ID de sesión pero no un índice, usamos la base de datos más reciente asociada a la sesión
+            session_dbs = session_manager.get_session_databases(session_id)
+            if session_dbs:
+                # Usar la primera base de datos asociada a la sesión (la más reciente)
+                db, session = session_manager.get_database_by_index(0, session_id=session_id)
+            else:
+                # Si no hay bases de datos asociadas, usar la más reciente en general
+                db, session = session_manager.get_database_by_index(0)
         else:
-            # Si no se especificó nada, usamos la sesión más reciente
-            db, session = session_manager.get_session_database()
+            # Si no se especificó nada, usamos la base de datos más reciente
+            db, session = session_manager.get_database_by_index(0)
         
         # Inicialización del modelo específico que usa esta base de datos
         embedding_model = session.get("embedding_model", "modernbert")
@@ -351,12 +357,15 @@ def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
             return "Hubo un problema al generar la respuesta. Verifica tu configuración y conexión a internet."
         
     except Exception as e:
-        # Actualizar el timestamp de último uso de la base de datos
+        # Actualizar el timestamp de último uso de la base de datos si es posible
         try:
-            session_manager.update_database_metadata(
-                db_name=session.get("id", ""),
-                new_metadata={"last_used": time.time()}
-            )
+            if 'session' in locals() and 'db_name' in session:
+                db_name = session.get("id", "")
+                # Usar register_database para actualizar el timestamp
+                session_manager.register_database(db_name, {
+                    "last_used": time.time(),
+                    **session  # Mantener el resto de metadatos
+                })
         except Exception as update_err:
             # No mostramos este error al usuario final
             logger.debug(f"Error al actualizar metadatos: {update_err}")

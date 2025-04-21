@@ -9,11 +9,13 @@ manejo de sesiones de usuario y optimizaciones para entornos de alta concurrenci
 import logging
 import time
 import json
+import threading
 from typing import Dict, List, Any, Optional, Union, Generator, Tuple
 from datetime import datetime
 import uuid
 
 from modulos.rag.app import RagApp
+from modulos.session_manager.session_manager import SessionManager
 
 logger = logging.getLogger(__name__)
 
@@ -29,43 +31,65 @@ class RagChatbot:
     def __init__(
         self,
         database_name: Optional[str] = None,
-        database_index: Optional[int] = None,
         ai_client: Optional[str] = None,
         streaming: bool = True,
         max_chunks: int = 5,
         max_history_length: int = 10,
-        session_timeout: int = 3600  # 1 hora
+        session_id: Optional[str] = None
     ):
         """
         Inicializa el chatbot RAG.
         
         Args:
             database_name: Nombre específico de la base de datos a utilizar
-            database_index: Índice de la base de datos (0 es la más reciente)
             ai_client: Tipo de cliente de IA a utilizar (openai, gemini, ollama)
             streaming: Si se deben generar respuestas en streaming (habilitado por defecto)
             max_chunks: Número máximo de chunks a recuperar para cada consulta
             max_history_length: Número máximo de mensajes a conservar en el historial
-            session_timeout: Tiempo en segundos después del cual una sesión se considera caducada
+            session_id: ID de sesión existente a utilizar (opcional)
         """
-        # Inicializar la aplicación RAG base
+        # Inicializar Session Manager
+        self.session_manager = SessionManager()
+        
+        # Crear una sesión o usar la proporcionada
+        if session_id:
+            self.session_id = session_id
+            if not self.session_manager.get_session(session_id):
+                # Si la sesión no existe, crear una nueva
+                self.session_id = self.session_manager.create_session(session_id)
+        else:
+            self.session_id = self.session_manager.create_session()
+        
+        # Inicializar la aplicación RAG base con la sesión
         self.rag_app = RagApp(
             database_name=database_name,
-            database_index=database_index,
             ai_client=ai_client,
             streaming=streaming,
-            max_chunks=max_chunks
+            session_id=self.session_id
         )
         
         # Configuración específica del chatbot
         self.max_history_length = max_history_length
-        self.session_timeout = session_timeout
         
-        # Almacenamiento de sesiones de usuarios
-        # {session_id: {created_at: timestamp, last_used: timestamp, history: [...]}}
-        self.user_sessions = {}
+        # Guardar configuración en el gestor de sesiones
+        self.session_manager.store_session_config(self.session_id, {
+            "chatbot": {
+                "max_history_length": max_history_length,
+                "streaming": streaming,
+                "max_chunks": max_chunks
+            }
+        })
         
-        logger.info("RagChatbot inicializado")
+        # Actualizar metadatos de la sesión
+        self.session_manager.update_session_metadata(self.session_id, {
+            "app_type": "chatbot",
+            "database_name": database_name,
+            "ai_client": ai_client,
+            "streaming": streaming,
+            "created_at": time.time()
+        })
+        
+        logger.info(f"RagChatbot inicializado con session_id={self.session_id}")
     
     def create_session(self) -> str:
         """
@@ -74,16 +98,25 @@ class RagChatbot:
         Returns:
             ID de la sesión creada
         """
-        session_id = str(uuid.uuid4())
-        timestamp = time.time()
+        # Crear nueva sesión usando el SessionManager
+        session_id = self.session_manager.create_session(metadata={
+            "app_type": "chatbot",
+            "database_name": self.rag_app.database_name,
+            "ai_client": getattr(self.rag_app, "ai_client_type", None),
+            "streaming": self.rag_app.streaming,
+            "created_at": time.time()
+        })
         
-        self.user_sessions[session_id] = {
-            "created_at": timestamp,
-            "last_used": timestamp,
-            "history": []
-        }
+        # Guardar configuración en la sesión
+        self.session_manager.store_session_config(session_id, {
+            "chatbot": {
+                "max_history_length": self.max_history_length,
+                "streaming": self.rag_app.streaming,
+                "history": []
+            }
+        })
         
-        logger.info(f"Nueva sesión de usuario creada: {session_id}")
+        logger.info(f"Nueva sesión de chatbot creada: {session_id}")
         return session_id
     
     def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
@@ -96,17 +129,23 @@ class RagChatbot:
         Returns:
             Información de la sesión o None si no existe
         """
-        session = self.user_sessions.get(session_id)
+        # Obtener sesión del SessionManager
+        session_data = self.session_manager.get_session(session_id)
         
-        if not session:
+        if not session_data:
+            logger.warning(f"Sesión no encontrada: {session_id}")
             return None
-            
-        # Verificar si la sesión ha caducado
-        if time.time() - session["last_used"] > self.session_timeout:
-            logger.info(f"Sesión caducada: {session_id}")
-            return None
-            
-        return session
+        
+        # Obtener configuración específica de chatbot
+        chatbot_config = self.session_manager.get_session_config(session_id, "chatbot", {})
+        
+        # Combinar información para mantener compatibilidad con código existente
+        combined_info = {
+            **session_data,
+            "history": chatbot_config.get("history", [])
+        }
+        
+        return combined_info
     
     def delete_session(self, session_id: str) -> bool:
         """
@@ -118,12 +157,15 @@ class RagChatbot:
         Returns:
             True si la sesión fue eliminada, False si no existía
         """
-        if session_id in self.user_sessions:
-            del self.user_sessions[session_id]
-            logger.info(f"Sesión eliminada: {session_id}")
-            return True
+        # Eliminar sesión usando el SessionManager
+        result = self.session_manager.delete_session(session_id)
         
-        return False
+        if result:
+            logger.info(f"Sesión eliminada: {session_id}")
+        else:
+            logger.warning(f"Intento de eliminar sesión inexistente: {session_id}")
+        
+        return result
     
     def _update_session_history(
         self, 
@@ -139,14 +181,9 @@ class RagChatbot:
             query: Consulta del usuario
             response: Respuesta del sistema
         """
-        session = self.get_session(session_id)
-        
-        if not session:
-            logger.warning(f"Intento de actualizar historial de sesión inexistente: {session_id}")
-            return
-        
-        # Actualizar timestamp de último uso
-        session["last_used"] = time.time()
+        # Obtener historial actual
+        chatbot_config = self.session_manager.get_session_config(session_id, "chatbot", {})
+        history = chatbot_config.get("history", [])
         
         # Añadir la interacción al historial
         interaction = {
@@ -155,11 +192,26 @@ class RagChatbot:
             "response": response
         }
         
-        session["history"].append(interaction)
+        history.append(interaction)
         
         # Limitar el tamaño del historial
-        if len(session["history"]) > self.max_history_length:
-            session["history"] = session["history"][-self.max_history_length:]
+        if len(history) > self.max_history_length:
+            history = history[-self.max_history_length:]
+        
+        # Actualizar configuración de la sesión con el nuevo historial
+        self.session_manager.store_session_config(session_id, {
+            "chatbot": {
+                **chatbot_config,
+                "history": history,
+                "last_interaction": time.time()
+            }
+        })
+        
+        # Actualizar metadata de la sesión
+        self.session_manager.update_session_metadata(session_id, {
+            "last_activity": time.time(),
+            "last_query": query[:50] + "..." if len(query) > 50 else query,
+        })
     
     def get_session_history(self, session_id: str) -> List[Dict[str, Any]]:
         """
@@ -171,12 +223,9 @@ class RagChatbot:
         Returns:
             Lista de interacciones o lista vacía si la sesión no existe
         """
-        session = self.get_session(session_id)
-        
-        if not session:
-            return []
-            
-        return session["history"]
+        # Obtener historial de la configuración de la sesión
+        chatbot_config = self.session_manager.get_session_config(session_id, "chatbot", {})
+        return chatbot_config.get("history", [])
     
     def _process_streaming_response(
         self, 
@@ -199,11 +248,11 @@ class RagChatbot:
             for chunk in response:
                 accumulated_chunks.append(chunk)
                 yield chunk
-                
-        # Devolvemos una función que permite obtener el texto completo después de consumir el generador
+        
+        # Función para obtener el texto completo cuando se ha consumido el generador
         def get_full_text():
-            return ''.join(accumulated_chunks)
-            
+            return "".join(accumulated_chunks)
+        
         return get_full_text, stream_and_accumulate()
     
     def process_query(
@@ -213,112 +262,100 @@ class RagChatbot:
         stream: Optional[bool] = None
     ) -> Dict[str, Any]:
         """
-        Procesa una consulta de usuario en el contexto de una sesión de chat.
+        Procesa una consulta del usuario y genera una respuesta.
         
         Args:
-            query: Texto de la consulta
-            session_id: ID de sesión (si es None, se crea una nueva)
-            stream: Si se debe devolver la respuesta en streaming
+            query: Consulta del usuario
+            session_id: ID de sesión (opcional, usa la sesión del constructor si no se proporciona)
+            stream: Forzar o desactivar streaming (opcional, usa el valor predeterminado si no se proporciona)
             
         Returns:
-            Diccionario con la información de la respuesta:
-            - response: Texto de respuesta o generador de streaming
-            - session_id: ID de la sesión utilizada
-            - is_streaming: True si la respuesta es streaming
-            - timestamp: Timestamp de la consulta
+            Diccionario con la respuesta y metadatos
         """
-        # Obtener o crear sesión
-        if session_id:
-            session = self.get_session(session_id)
-            if not session:
-                # Si la sesión no existe o ha caducado, crear una nueva
-                session_id = self.create_session()
-        else:
-            # Crear una nueva sesión
-            session_id = self.create_session()
+        # Usar la sesión proporcionada o la del constructor
+        current_session_id = session_id or self.session_id
         
-        # Procesar la consulta usando la aplicación RAG
-        start_time = time.time()
+        # Comprobar que la sesión existe
+        session_data = self.session_manager.get_session(current_session_id)
+        if not session_data:
+            logger.error(f"Sesión no encontrada: {current_session_id}")
+            return {
+                "status": "error",
+                "message": "Sesión no válida o caducada",
+                "session_id": current_session_id
+            }
+        
+        # Configurar streaming
+        use_streaming = stream if stream is not None else self.rag_app.streaming
         
         try:
-            response = self.rag_app.process_query(query, stream=stream)
+            start_time = time.time()
             
-            # Si es una respuesta en streaming, necesitamos manejarla especialmente
-            is_streaming = hasattr(response, '__iter__') and not isinstance(response, str)
+            # Procesar la consulta
+            message_id = str(uuid.uuid4())
             
-            if is_streaming:
-                # Procesar la respuesta en streaming para capturar el texto completo
-                get_full_text, streaming_generator = self._process_streaming_response(response)
+            if use_streaming:
+                # Para respuestas en streaming, necesitamos capturar el texto completo
+                generator = self.rag_app.query(query)
+                get_full_text, stream_gen = self._process_streaming_response(generator)
                 
-                # Crear una función que permita actualizar el historial después de consumir el streaming
+                # Crear un hilo para actualizar el historial cuando se consuma el streaming
                 def update_history_after_streaming():
                     # Obtener el texto completo una vez consumido el generador
-                    full_text = get_full_text()
-                    
-                    # Actualizar el historial con el texto completo
-                    self._update_session_history(session_id, query, full_text)
+                    try:
+                        full_response = get_full_text()
+                        self._update_session_history(current_session_id, query, full_response)
+                    except Exception as e:
+                        logger.error(f"Error al actualizar historial después de streaming: {e}")
                 
-                # Devolver un objeto con la respuesta en streaming y metadatos
+                # Preparar respuesta con el generador de streaming
                 return {
-                    "response": streaming_generator,
-                    "session_id": session_id,
-                    "is_streaming": True,
-                    "timestamp": start_time,
+                    "status": "success",
+                    "response": stream_gen,
+                    "streaming": True,
+                    "session_id": current_session_id,
+                    "message_id": message_id,
+                    "start_time": start_time,
                     "update_history": update_history_after_streaming
                 }
             else:
-                # Respuesta normal (no streaming)
-                # Actualizar el historial de la sesión
-                self._update_session_history(session_id, query, response)
+                # Para respuestas no streaming, obtenemos la respuesta completa
+                response = self.rag_app.query(query)
                 
-                # Devolver objeto con la respuesta y metadatos
+                # Actualizar historial inmediatamente
+                self._update_session_history(current_session_id, query, response)
+                
+                # Calcular tiempo de respuesta
+                response_time = time.time() - start_time
+                
                 return {
+                    "status": "success",
                     "response": response,
-                    "session_id": session_id,
-                    "is_streaming": False,
-                    "timestamp": start_time
+                    "streaming": False,
+                    "session_id": current_session_id,
+                    "message_id": message_id,
+                    "response_time": response_time
                 }
         
         except Exception as e:
-            error_msg = f"Error al procesar consulta en chatbot: {str(e)}"
-            logger.error(error_msg)
-            
-            # Actualizar el historial con el error
-            self._update_session_history(session_id, query, error_msg)
-            
-            # Devolver objeto con el error
+            logger.error(f"Error al procesar consulta: {e}")
             return {
-                "response": error_msg,
-                "session_id": session_id,
-                "is_streaming": False,
-                "error": True,
-                "timestamp": start_time
+                "status": "error",
+                "message": str(e),
+                "session_id": current_session_id
             }
     
     def clean_expired_sessions(self) -> int:
         """
-        Limpia las sesiones caducadas.
+        Limpia sesiones caducadas.
         
         Returns:
             Número de sesiones eliminadas
         """
-        current_time = time.time()
-        sessions_to_delete = []
-        
-        # Identificar sesiones caducadas
-        for session_id, session in self.user_sessions.items():
-            if current_time - session["last_used"] > self.session_timeout:
-                sessions_to_delete.append(session_id)
-        
-        # Eliminar sesiones caducadas
-        for session_id in sessions_to_delete:
-            del self.user_sessions[session_id]
-        
-        count = len(sessions_to_delete)
-        if count > 0:
-            logger.info(f"Se eliminaron {count} sesiones caducadas")
-        
-        return count
+        # Delegar la limpieza al SessionManager
+        result = self.session_manager.clean_expired_sessions()
+        logger.info(f"Limpieza de sesiones completada: {result} sesiones eliminadas")
+        return result
     
     def get_active_sessions_count(self) -> int:
         """
@@ -327,36 +364,49 @@ class RagChatbot:
         Returns:
             Número de sesiones activas
         """
-        self.clean_expired_sessions()  # Limpiar sesiones caducadas primero
-        return len(self.user_sessions)
+        # Obtener todas las sesiones del tipo chatbot
+        all_sessions = self.session_manager.list_sessions()
+        chatbot_sessions = [s for s in all_sessions if s.get("app_type") == "chatbot"]
+        return len(chatbot_sessions)
     
     def extract_context_from_response(self, response: str) -> Dict[str, Any]:
         """
-        Extrae el contexto utilizado de una respuesta completa.
+        Extrae información de contexto de una respuesta, si está presente.
         
         Args:
-            response: Respuesta completa con formato
+            response: Respuesta completa del sistema
             
         Returns:
-            Diccionario con el texto de respuesta y el contexto utilizado
+            Diccionario con el contexto extraído o vacío si no se encuentra
         """
-        result = {
-            "response_text": response,
-            "context_text": None
+        # Verificar si hay un ID de mensaje oculto
+        message_id = None
+        if "<hidden_message_id>" in response:
+            import re
+            match = re.search(r'<hidden_message_id>(.*?)</hidden_message_id>', response)
+            if match:
+                message_id = match.group(1)
+                # Eliminar el ID oculto de la respuesta
+                response = response.replace(match.group(0), "")
+        
+        # Si tenemos un message_id, intentar obtener su contexto
+        context_data = []
+        if message_id:
+            try:
+                context_data = self.session_manager.get_message_context(self.session_id, message_id) or []
+            except Exception as e:
+                logger.error(f"Error al obtener contexto para message_id={message_id}: {e}")
+        
+        return {
+            "message_id": message_id,
+            "context": context_data,
+            "clean_response": response
         }
-        
-        # Extraer respuesta y contexto si existen los separadores
-        if "=======================  RESPUESTA  =======================" in response:
-            parts = response.split("=======================  RESPUESTA  =======================")
-            
-            if len(parts) > 1:
-                # Extraer la parte de respuesta
-                response_text = parts[1].split("=======================  CONTEXTO  =======================")[0].strip()
-                result["response_text"] = response_text
-                
-                # Extraer contexto si existe
-                context_parts = response.split("=======================  CONTEXTO  =======================")
-                if len(context_parts) > 1:
-                    result["context_text"] = context_parts[1].strip()
-        
-        return result 
+    
+    def close(self):
+        """
+        Cierra el chatbot y libera sus recursos.
+        """
+        if hasattr(self, 'rag_app') and self.rag_app:
+            self.rag_app.close()
+        logger.info(f"RagChatbot cerrado (session_id={self.session_id})") 

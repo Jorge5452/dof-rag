@@ -3,6 +3,43 @@ let currentSession = null;
 let isWaitingForResponse = false;
 const API_BASE_URL = window.location.origin;
 
+// Definir estilos CSS para mejorar la visualización de los botones de contexto
+const styleSheet = document.createElement("style");
+styleSheet.textContent = `
+    .context-toggle {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        margin-left: 4px;
+        cursor: pointer;
+        background: transparent;
+        border: none;
+        color: var(--text-muted);
+        padding: 4px;
+        border-radius: 4px;
+    }
+
+    .context-toggle:hover {
+        background-color: var(--hover-bg);
+        color: var(--accent-color);
+    }
+
+    .message-controls {
+        display: flex;
+        align-items: center;
+        margin-top: 6px;
+    }
+
+    .context-content {
+        margin-top: 8px;
+        padding: 10px;
+        border-radius: 6px;
+        background-color: var(--card-bg);
+        border: 1px solid var(--border-color);
+    }
+`;
+document.head.appendChild(styleSheet);
+
 // Inicializar la interfaz
 document.addEventListener('DOMContentLoaded', () => {
     console.log('DOM cargado, inicializando aplicación...');
@@ -45,6 +82,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let settings = {
         theme: localStorage.getItem('theme') || 'dark',
         showSources: localStorage.getItem('showSources') !== 'false',
+        autoShowSources: localStorage.getItem('autoShowSources') === 'true',
         messageDensity: parseInt(localStorage.getItem('messageDensity') || 2),
         reducedMotion: localStorage.getItem('reducedMotion') === 'true',
         highContrast: localStorage.getItem('highContrast') === 'true',
@@ -111,6 +149,27 @@ document.addEventListener('DOMContentLoaded', () => {
             smartypants: false,
             xhtml: false
         });
+    }
+
+    // Almacenamiento en caché para el contexto de los mensajes
+    const messageContextStore = new Map();
+
+    // Función para escapar HTML y prevenir XSS
+    function escapeHTML(str) {
+        return str
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    }
+
+    // Función auxiliar para desplazarse al final del chat
+    function scrollToBottom() {
+        const chatContainer = document.getElementById('chat-container');
+        if (chatContainer) {
+            chatContainer.scrollTop = chatContainer.scrollHeight;
+        }
     }
 
     // Función para truncar texto para dispositivos pequeños
@@ -244,6 +303,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Inicializar configuraciones
     function initSettings() {
+        // Inicializar controles con los valores guardados
+        if (showSources) {
+            showSources.checked = settings.showSources;
+        }
+        
+        if (document.getElementById('auto-show-sources')) {
+            document.getElementById('auto-show-sources').checked = settings.autoShowSources;
+        }
+        
+        if (messageDensity) {
+            messageDensity.value = settings.messageDensity;
+            updateDensityLabel();
+        }
+
         // Cargar configuraciones guardadas
         fontSizeSelect.value = settings.fontSize;
         highContrast.checked = settings.highContrast;
@@ -328,6 +401,7 @@ document.addEventListener('DOMContentLoaded', () => {
         settings = {
             theme: 'dark',
             showSources: true,
+            autoShowSources: false,
             messageDensity: 2,
             reducedMotion: false,
             highContrast: false,
@@ -348,18 +422,28 @@ document.addEventListener('DOMContentLoaded', () => {
         showAvatarsCheck.checked = settings.showAvatars;
     });
 
-    // Save settings
-    saveSettings.addEventListener('click', () => {
-        settings.theme = modalThemeSelect.value;
-        settings.showSources = showSources.checked;
-        settings.messageDensity = parseInt(messageDensity.value);
-        settings.reducedMotion = reducedMotion.checked;
-        settings.highContrast = highContrast.checked;
-        
-        applySettings();
-        saveSettingsToStorage();
-        settingsModal.classList.remove('active');
-    });
+    // Save settings and close modal
+    if (saveSettings) {
+        saveSettings.addEventListener('click', () => {
+            // Update settings based on modal inputs
+            if (modalThemeSelect) settings.theme = modalThemeSelect.value;
+            if (showSources) settings.showSources = showSources.checked;
+            if (document.getElementById('auto-show-sources')) settings.autoShowSources = document.getElementById('auto-show-sources').checked;
+            if (messageDensity) settings.messageDensity = parseInt(messageDensity.value);
+            if (reducedMotion) settings.reducedMotion = reducedMotion.checked;
+            if (highContrast) settings.highContrast = highContrast.checked;
+            if (fontSizeSelect) settings.fontSize = fontSizeSelect.value;
+            if (showTimestampsCheck) settings.showTimestamps = showTimestampsCheck.checked;
+            if (showAvatarsCheck) settings.showAvatars = showAvatarsCheck.checked;
+            
+            // Apply and save settings
+            applySettings();
+            saveSettingsToStorage();
+            
+            // Close modal
+            settingsModal.classList.remove('active');
+        });
+    }
 
     // Apply all settings
     function applySettings() {
@@ -374,7 +458,29 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Apply theme
     function applyTheme() {
-        document.body.className = settings.theme;
+        setTheme(settings.theme);
+    }
+
+    // Set theme by adding the appropriate class to body
+    function setTheme(theme) {
+        // Remove existing theme classes
+        document.body.classList.remove('light-theme', 'aqua-theme');
+        
+        // Add the selected theme class (dark theme is default, no class needed)
+        if (theme === 'light') {
+            document.body.classList.add('light-theme');
+        } else if (theme === 'aqua') {
+            document.body.classList.add('aqua-theme');
+        }
+        
+        // Update theme selectors
+        const themeSelectors = document.querySelectorAll('#theme-select, #modal-theme-select');
+        themeSelectors.forEach(selector => {
+            if (selector) selector.value = theme;
+        });
+        
+        // Save to settings
+        settings.theme = theme;
     }
 
     // Apply sources visibility
@@ -383,6 +489,26 @@ document.addEventListener('DOMContentLoaded', () => {
         sourcesPanels.forEach(panel => {
             panel.style.display = settings.showSources ? 'block' : 'none';
         });
+        
+        // Controlar visibilidad de botones de contexto
+        document.querySelectorAll('.context-toggle').forEach(btn => {
+            btn.style.display = settings.showSources ? 'inline-flex' : 'none';
+        });
+        
+        // Si está activada la opción de mostrar fuentes automáticamente,
+        // abrir automáticamente los paneles de contexto que están cerrados
+        if (settings.autoShowSources && settings.showSources) {
+            document.querySelectorAll('.context-content').forEach(container => {
+                if (container.style.display === 'none' && container.id.startsWith('context-')) {
+                    const messageId = container.id.replace('context-', '');
+                    const button = document.querySelector(`.context-toggle[data-message-id="${messageId}"]`);
+                    if (button) {
+                        // Solo abrir si está cerrado y tiene botón asociado
+                        fetchAndDisplayContext(messageId, button, container);
+                    }
+                }
+            });
+        }
     }
 
     // Apply message density
@@ -423,6 +549,7 @@ document.addEventListener('DOMContentLoaded', () => {
     function saveSettingsToStorage() {
         localStorage.setItem('theme', settings.theme);
         localStorage.setItem('showSources', settings.showSources);
+        localStorage.setItem('autoShowSources', settings.autoShowSources);
         localStorage.setItem('messageDensity', settings.messageDensity);
         localStorage.setItem('reducedMotion', settings.reducedMotion);
         localStorage.setItem('highContrast', settings.highContrast);
@@ -771,6 +898,42 @@ document.addEventListener('DOMContentLoaded', () => {
                     const { done, value } = await reader.read();
                     if (done) {
                         console.log("Stream de respuesta completado después de", chunkCount, "chunks");
+                        // Verificar si hay un mensaje ID en el texto completo antes de terminar
+                        const finalIdMatch = fullText.match(/<hidden_message_id>([^<]+)<\/hidden_message_id>/);
+                        if (finalIdMatch && !lastMessageId) {
+                            const messageId = finalIdMatch[1];
+                            console.log(`ID de mensaje encontrado en texto completo: ${messageId}`);
+                            fullText = fullText.replace(/<hidden_message_id>[^<]+<\/hidden_message_id>/, '');
+                            
+                            // Guardar el contexto localmente si no lo hemos hecho ya
+                            if (contextData.length > 0) {
+                                localContextStorage[messageId] = {
+                                    query: message,
+                                    context: contextData,
+                                    timestamp: new Date().toISOString()
+                                };
+                                console.log(`Contexto guardado localmente para mensaje final ${messageId}: ${contextData.length} fragmentos`);
+                            }
+                            
+                            // Actualizar mensaje con ID
+                            updateBotMessage(botMessageElement, fullText, messageId);
+                            console.log(`Mensaje actualizado con ID final: ${messageId}`);
+                        } else if (!lastMessageId) {
+                            // Si llegamos al final sin encontrar un ID de mensaje, generamos uno
+                            const fallbackId = `msg_${Date.now()}`;
+                            console.log(`No se detectó ID en la respuesta. Usando ID generado: ${fallbackId}`);
+                            
+                            if (contextData.length > 0) {
+                                localContextStorage[fallbackId] = {
+                                    query: message,
+                                    context: contextData,
+                                    timestamp: new Date().toISOString()
+                                };
+                                console.log(`Contexto guardado localmente con ID generado: ${contextData.length} fragmentos`);
+                            }
+                            
+                            updateBotMessage(botMessageElement, fullText, fallbackId);
+                        }
                         break;
                     }
                     
@@ -783,12 +946,56 @@ document.addEventListener('DOMContentLoaded', () => {
 
                     console.log(`Chunk #${chunkCount} recibido (${chunk.length} bytes)`, { chunkPreview: chunk.substring(0, 50) });
                     
-                    // Manejo de ID oculto
-                    let hiddenMatch = chunk.match(/<hidden_message_id>([^<]+)<\/hidden_message_id>/);
+                    // Procesar los chunks en formato SSE (Server-Sent Events)
+                    const lines = chunk.split('\n');
+                    let processedText = '';
+                    
+                    for (const line of lines) {
+                        // Ignorar líneas vacías
+                        if (!line.trim()) continue;
+                        
+                        // Ignorar el marcador [DONE]
+                        if (line.includes('[DONE]')) continue;
+                        
+                        // Extraer el contenido eliminando el prefijo "data: "
+                        if (line.startsWith('data: ')) {
+                            const textContent = line.substring(6); // Eliminar "data: "
+                            processedText += textContent;
+                        } else {
+                            // Si no tiene el formato esperado, usar el texto tal cual
+                            processedText += line;
+                        }
+                    }
+                    
+                    // Manejar ID oculto - buscar en diferentes formatos
+                    let messageId = null;
+                    
+                    // Formato 1: <hidden_message_id>ID</hidden_message_id>
+                    let hiddenMatch = processedText.match(/<hidden_message_id>([^<]+)<\/hidden_message_id>/);
                     if (hiddenMatch) {
-                        const messageId = hiddenMatch[1];
-                        console.log(`ID de mensaje encontrado en chunk #${chunkCount}: ${messageId}`);
-                        fullText += chunk.replace(/<hidden_message_id>[^<]+<\/hidden_message_id>/, '');
+                        messageId = hiddenMatch[1];
+                        console.log(`ID de mensaje encontrado (formato hidden): ${messageId}`);
+                        processedText = processedText.replace(/<hidden_message_id>[^<]+<\/hidden_message_id>/, '');
+                    } 
+                    // Formato 2: <message-id:ID>
+                    else {
+                        let oldMatch = processedText.match(/<message-id:([^>]+)>/);
+                        if (oldMatch) {
+                            messageId = oldMatch[1];
+                            console.log(`ID de mensaje encontrado (formato antiguo): ${messageId}`);
+                            processedText = processedText.replace(/<message-id:[^>]+>/, '');
+                        }
+                    }
+                    
+                    // Acumular texto procesado
+                    fullText += processedText;
+                    
+                    // Actualizar el mensaje en curso
+                    updateBotMessage(botMessageElement, fullText);
+                    
+                    // Si se encontró un messageId, finalizar procesamiento
+                    if (messageId) {
+                        console.log(`Procesando mensaje completo con ID: ${messageId}`);
                         
                         // Guardar el contexto para este mensaje localmente
                         if (contextData.length > 0) {
@@ -797,7 +1004,18 @@ document.addEventListener('DOMContentLoaded', () => {
                                 context: contextData,
                                 timestamp: new Date().toISOString()
                             };
-                            console.log(`Contexto guardado localmente para mensaje ${messageId}: ${contextData.length} fragmentos`);
+                            console.log(`Contexto guardado localmente: ${contextData.length} fragmentos`);
+                            
+                            // Mostrar detalles del primer fragmento para depuración
+                            if (contextData[0]) {
+                                console.log("Muestra del primer fragmento:", {
+                                    header: contextData[0].header,
+                                    text_length: contextData[0].text ? contextData[0].text.length : 0,
+                                    document: contextData[0].document
+                                });
+                            }
+                        } else {
+                            console.warn("No hay datos de contexto para guardar con este mensaje");
                         }
                         
                         // Actualizar mensaje con ID y guardar texto final
@@ -805,47 +1023,8 @@ document.addEventListener('DOMContentLoaded', () => {
                         
                         // Almacenar mensaje ID localmente para depuración
                         lastMessageId = messageId;
-                        console.log(`Mensaje actualizado con ID: ${messageId}, longitud final: ${fullText.length} caracteres`);
                         
                         break; // Terminar el ciclo ya que tenemos el mensaje completo con ID
-                    } else {
-                        // Compatibilidad con formato antiguo
-                        let oldMatch = chunk.match(/<message-id:([^>]+)>/);
-                        if (oldMatch) {
-                            const messageId = oldMatch[1];
-                            console.log(`ID de mensaje encontrado (formato antiguo) en chunk #${chunkCount}: ${messageId}`);
-                            fullText += chunk.replace(/<message-id:[^>]+>/, '');
-                            
-                            // Guardar el contexto para este mensaje localmente
-                            if (contextData.length > 0) {
-                                localContextStorage[messageId] = {
-                                    query: message,
-                                    context: contextData,
-                                    timestamp: new Date().toISOString()
-                                };
-                                console.log(`Contexto guardado localmente para mensaje ${messageId}: ${contextData.length} fragmentos`);
-                            }
-                            
-                            // Actualizar mensaje con ID y guardar texto final
-                            updateBotMessage(botMessageElement, fullText, messageId);
-                            
-                            // Almacenar mensaje ID localmente para depuración
-                            lastMessageId = messageId;
-                            console.log(`Mensaje actualizado con ID (formato antiguo): ${messageId}, longitud final: ${fullText.length} caracteres`);
-                            
-                            break; // Terminar el ciclo ya que tenemos el mensaje completo con ID
-                        } else {
-                            fullText += chunk;
-                        }
-                    }
-
-                    // Si llegamos al final del stream y hay texto sin procesar, actualizamos el mensaje una última vez
-                    if (fullText) {
-                        console.log("Actualizando mensaje final con texto restante:", { textLength: fullText.length });
-                        updateBotMessage(botMessageElement, fullText);
-                    } else if (chunkCount === 0) {
-                        console.warn('No se recibieron chunks en la respuesta');
-                        updateBotMessage(botMessageElement, 'No se pudo obtener una respuesta. Por favor, intente de nuevo.');
                     }
                 } catch (chunkError) {
                     console.error("Error al procesar chunk:", chunkError);
@@ -1110,10 +1289,22 @@ document.addEventListener('DOMContentLoaded', () => {
             <div class="context-items-container">
         `;
         
+        // Ordenar los chunks por relevancia (descendente)
+        const sortedData = [...contextData].sort((a, b) => {
+            const relevanceA = a.relevance || 0;
+            const relevanceB = b.relevance || 0;
+            return relevanceB - relevanceA;
+        });
+        
         // Añadir cada fuente
-        contextData.forEach((chunk, index) => {
+        sortedData.forEach((chunk, index) => {
             const className = index >= 3 && window.innerWidth <= 768 ? 'context-item mobile-hidden' : 'context-item';
             const relevancePercentage = chunk.relevance || 100;
+            
+            // Determinar clase de relevancia para el color
+            let relevanceClass = 'relevance-high';
+            if (relevancePercentage < 85) relevanceClass = 'relevance-medium';
+            if (relevancePercentage < 70) relevanceClass = 'relevance-low';
             
             // Limpiar texto antes del procesamiento Markdown
             const cleanedText = cleanMarkdownText(chunk.text);
@@ -1131,21 +1322,26 @@ document.addEventListener('DOMContentLoaded', () => {
                 renderedText = escapeHTML(cleanedText).replace(/\n/g, '<br>');
             }
             
+            const documentTitle = chunk.document_title || chunk.document || 'Documento sin título';
+            const source = chunk.source || '';
+            
             html += `
                 <div class="${className}" data-relevance="${relevancePercentage}">
                     <div class="context-item-header">
                         <div class="context-item-title">
                             <h4>${escapeHTML(chunk.header || 'Sin título')}</h4>
-                            ${chunk.document ? `<div class="context-document"><span class="material-symbols-outlined">description</span>${escapeHTML(chunk.document)}</div>` : ''}
+                            ${documentTitle ? `<div class="context-document"><span class="material-symbols-outlined">description</span>${escapeHTML(documentTitle)}</div>` : ''}
+                            ${source ? `<div class="context-source">${escapeHTML(source)}</div>` : ''}
                         </div>
                         <div class="context-relevance">
-                            <span class="relevance-label">${relevancePercentage}% relevante</span>
-                            <div class="relevance-bar"><div class="relevance-fill" style="width: ${relevancePercentage}%"></div></div>
+                            <span class="relevance-label ${relevanceClass}">${relevancePercentage}% relevante</span>
+                            <div class="relevance-bar"><div class="relevance-fill ${relevanceClass}" style="width: ${relevancePercentage}%"></div></div>
                         </div>
                     </div>
                     <div class="context-item-content markdown-content">${renderedText}</div>
                     <div class="context-item-meta">
-                        ${chunk.page !== 'N/A' ? `<span class="context-page"><span class="material-symbols-outlined">auto_stories</span>Página ${chunk.page}</span>` : ''}
+                        ${chunk.page && chunk.page !== 'N/A' ? `<span class="context-page"><span class="material-symbols-outlined">auto_stories</span>Página ${chunk.page}</span>` : ''}
+                        ${chunk.url ? `<a href="${chunk.url}" target="_blank" class="context-link"><span class="material-symbols-outlined">link</span>Ver documento original</a>` : ''}
                     </div>
                 </div>
             `;
@@ -1260,9 +1456,15 @@ document.addEventListener('DOMContentLoaded', () => {
                         </div>
                         <div class="message-bubble">
                             <div class="message-content markdown-content" data-original-text="${escapeHTML(message)}">${contentHtml}</div>
+                            <div class="message-controls">
+                                <button class="context-toggle" title="Ver fuentes" style="display: none;">
+                                    <span class="material-symbols-outlined">menu_book</span>
+                                </button>
+                            </div>
                         </div>
                     </div>
                     ${settings.showTimestamps ? `<div class="message-timestamp">${timestamp}</div>` : ''}
+                    <div class="context-content" style="display: none;"></div>
                 `;
                 
                 // Activar highlight.js para resaltado de código si está disponible
@@ -1272,6 +1474,21 @@ document.addEventListener('DOMContentLoaded', () => {
                             hljs.highlightElement(block);
                         });
                     }, 0);
+                }
+                
+                // Agregar event listener para el botón de contexto
+                const contextButton = div.querySelector('.context-toggle');
+                const contextContainer = div.querySelector('.context-content');
+                
+                if (contextButton && contextContainer) {
+                    contextButton.addEventListener('click', function() {
+                        const messageId = div.dataset.messageId;
+                        if (messageId) {
+                            fetchAndDisplayContext(messageId, contextButton, contextContainer);
+                        } else {
+                            console.error('No hay ID de mensaje para mostrar contexto');
+                        }
+                    });
                 }
             }
             
@@ -1301,177 +1518,246 @@ document.addEventListener('DOMContentLoaded', () => {
         scrollToBottom();
     }
 
-    function updateBotMessage(el, txt, msgId = null) {
-        if (!el) {
-            console.error('Error: Elemento del mensaje no proporcionado para actualización');
-            return;
-        }
+    function updateBotMessage(messageElement, messageText, messageId = null) {
+        if (!messageElement) return;
         
-        try {
-            const timestamp = new Date().toLocaleTimeString();
-            let clean = txt.replace(/<hidden_message_id>.*<\/hidden_message_id>/g,'')
-                          .replace(/<message-id:[^>]+>/g,'');
-            
-            // Procesar Markdown si la biblioteca marked está disponible
+        // Actualizar el contenido del mensaje
+        const contentElement = messageElement.querySelector('.message-content');
+        if (contentElement) {
+            // Formatear el texto con Markdown si está disponible
             let contentHtml;
             if (typeof marked !== 'undefined') {
                 try {
-                    contentHtml = marked.parse(clean);
+                    contentHtml = marked.parse(messageText);
                 } catch (markdownError) {
                     console.error('Error al procesar Markdown:', markdownError);
-                    contentHtml = escapeHTML(clean).replace(/\n/g,'<br>');
+                    contentHtml = escapeHTML(messageText).replace(/\n/g,'<br>');
                 }
             } else {
-                contentHtml = escapeHTML(clean).replace(/\n/g,'<br>');
+                contentHtml = escapeHTML(messageText).replace(/\n/g,'<br>');
             }
             
-            let html = `
-                <div class="message-content-container">
-                    <div class="message-avatar">
-                        <span class="material-symbols-outlined">smart_toy</span>
+            contentElement.setAttribute('data-original-text', escapeHTML(messageText));
+            contentElement.innerHTML = contentHtml;
+            
+            // Aplicar resaltado de código si está disponible
+            if (typeof hljs !== 'undefined') {
+                setTimeout(() => {
+                    contentElement.querySelectorAll('pre code').forEach((block) => {
+                        hljs.highlightElement(block);
+                    });
+                }, 0);
+            }
+        }
+        
+        // Buscar o crear el botón de contexto si no existe
+        let contextButton = messageElement.querySelector('.context-toggle');
+        let contextContainer = messageElement.querySelector('.context-content');
+        
+        // Si no existe el botón de contexto, crearlo
+        if (!contextButton) {
+            const messageBubble = messageElement.querySelector('.message-bubble');
+            if (messageBubble) {
+                // Buscar o crear controles de mensaje
+                let messageControls = messageBubble.querySelector('.message-controls');
+                if (!messageControls) {
+                    messageControls = document.createElement('div');
+                    messageControls.className = 'message-controls';
+                    messageBubble.appendChild(messageControls);
+                }
+                
+                // Crear botón de contexto
+                contextButton = document.createElement('button');
+                contextButton.className = 'context-toggle';
+                contextButton.title = 'Ver fuentes';
+                contextButton.style.display = 'none';
+                contextButton.innerHTML = '<span class="material-symbols-outlined">menu_book</span>';
+                messageControls.appendChild(contextButton);
+            }
+        }
+        
+        // Si no existe el contenedor de contexto, crearlo
+        if (!contextContainer) {
+            contextContainer = document.createElement('div');
+            contextContainer.className = 'context-content';
+            contextContainer.style.display = 'none';
+            messageElement.appendChild(contextContainer);
+        }
+        
+        // Agregar event listener al botón de contexto
+        if (contextButton && contextContainer) {
+            // Eliminar listeners existentes para evitar duplicados
+            const newButton = contextButton.cloneNode(true);
+            contextButton.parentNode.replaceChild(newButton, contextButton);
+            contextButton = newButton;
+            
+            // Agregar nuevo listener
+            contextButton.addEventListener('click', function() {
+                if (messageId) {
+                    fetchAndDisplayContext(messageId, contextButton, contextContainer);
+                }
+            });
+        }
+        
+        // Si hay un ID de mensaje, actualizar el dataset y mostrar el botón de contexto
+        if (messageId) {
+            messageElement.dataset.messageId = messageId;
+            
+            // Mostrar el botón de contexto si existe
+            if (contextButton) {
+                contextButton.style.display = 'inline-flex';
+            }
+            
+            // Ocultar el indicador de carga si existe
+            const typingIndicator = messageElement.querySelector('.typing-indicator');
+            if (typingIndicator) {
+                typingIndicator.style.display = 'none';
+            }
+        }
+    }
+
+    // Función para obtener el ID de sesión actual
+    function getChatSessionId() {
+        return currentSession;
+    }
+
+    // Función para obtener el contexto de un mensaje desde la API
+    function fetchMessageContext(messageId) {
+        console.log(`Solicitando contexto para mensaje: ${messageId}`);
+        
+        // Construir URL con el ID de sesión si está disponible
+        let url = `/api/message-context/${messageId}`;
+        const sessionId = getChatSessionId();
+        
+        if (sessionId) {
+            url += `?session_id=${sessionId}`;
+        } else {
+            console.warn('No hay ID de sesión disponible para la solicitud de contexto');
+        }
+        
+        return fetch(url)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`Error HTTP: ${response.status}`);
+                }
+                return response.json();
+            })
+            .then(data => {
+                console.log(`Contexto recibido para mensaje ${messageId}:`, data);
+                if (data.status === 'success') {
+                    return data;
+                } else {
+                    throw new Error(data.message || 'Error al obtener contexto');
+                }
+            });
+    }
+
+    // Función para cargar y mostrar el contexto de un mensaje
+    function toggleMessageContext(messageId, contextContainer) {
+        console.log(`Alternando visualización de contexto para mensaje: ${messageId}`);
+        
+        // Si el contenedor ya tiene contenido, alternamos su visibilidad
+        if (contextContainer.innerHTML.trim() !== '') {
+            const isVisible = contextContainer.style.display !== 'none';
+            contextContainer.style.display = isVisible ? 'none' : 'block';
+            console.log(`Contexto ${isVisible ? 'ocultado' : 'mostrado'}`);
+            return;
+        }
+        
+        // Mostrar indicador de carga
+        contextContainer.innerHTML = '<div class="context-loading">Cargando fuentes...</div>';
+        contextContainer.style.display = 'block';
+        
+        // Verificar si ya tenemos el contexto en caché
+        if (messageContextStore.has(messageId)) {
+            console.log(`Usando contexto en caché para mensaje: ${messageId}`);
+            renderMessageContext(messageContextStore.get(messageId), contextContainer);
+            return;
+        }
+        
+        // Si no está en caché, obtenerlo de la API
+        console.log(`Solicitando contexto a la API para mensaje: ${messageId}`);
+        fetchMessageContext(messageId)
+            .then(contextData => {
+                if (!contextData || !contextData.context || contextData.context.length === 0) {
+                    contextContainer.innerHTML = '<div class="no-context">No hay fuentes disponibles para este mensaje.</div>';
+                    console.warn(`No se encontró contexto para el mensaje: ${messageId}`);
+                    return;
+                }
+                
+                // Almacenar el contexto en caché
+                messageContextStore.set(messageId, contextData);
+                
+                // Renderizar el contexto
+                renderMessageContext(contextData, contextContainer);
+            })
+            .catch(error => {
+                console.error(`Error al obtener contexto para mensaje ${messageId}:`, error);
+                contextContainer.innerHTML = '<div class="context-error">Error al cargar las fuentes. Intente nuevamente.</div>';
+            });
+    }
+
+    // Función para renderizar el contexto del mensaje
+    function renderMessageContext(contextData, container) {
+        console.log('Renderizando contexto:', contextData);
+        
+        if (!contextData || !contextData.context || contextData.context.length === 0) {
+            container.innerHTML = '<div class="no-context">No hay fuentes disponibles.</div>';
+            return;
+        }
+        
+        // Preparar el HTML para el contexto
+        let contextHTML = `
+            <div class="context-header">
+                <h4>Fuentes utilizadas (${contextData.context.length})</h4>
+                <p class="context-query">Consulta: "${contextData.query || 'No disponible'}"</p>
+            </div>
+            <div class="context-items">
+        `;
+        
+        // Ordenar el contexto por relevancia
+        const sortedContext = [...contextData.context].sort((a, b) => 
+            (b.relevance || 0) - (a.relevance || 0)
+        );
+        
+        // Añadir cada fragmento de contexto
+        sortedContext.forEach((item, index) => {
+            const relevancePercentage = Math.round((item.relevance || 0) * 100) / 100;
+            const relevanceClass = 
+                relevancePercentage > 80 ? 'high-relevance' : 
+                relevancePercentage > 50 ? 'medium-relevance' : 'low-relevance';
+            
+            contextHTML += `
+                <div class="context-item ${relevanceClass}">
+                    <div class="context-item-header">
+                        <span class="context-item-title">${item.header || item.title || 'Documento sin título'}</span>
+                        <span class="context-item-relevance" title="Relevancia: ${relevancePercentage}%">
+                            ${relevancePercentage}%
+                        </span>
                     </div>
-                    <div class="message-bubble">
-                        <div class="message-content markdown-content" data-original-text="${escapeHTML(clean)}">${contentHtml}</div>
+                    <div class="context-item-content">
+                        ${item.content || 'No hay contenido disponible'}
+                    </div>
+                    <div class="context-item-meta">
+                        ${item.source ? `<span class="context-item-source" title="${item.source}">Fuente: ${truncateText(item.source, 30)}</span>` : ''}
+                        ${item.page ? `<span class="context-item-page">Página: ${item.page}</span>` : ''}
                     </div>
                 </div>
-                ${settings.showTimestamps ? `<div class="message-timestamp">${timestamp}</div>` : ''}
-                ${msgId ? `<div class="message-controls"><button class="context-toggle" data-message-id="${msgId}"><span class="material-symbols-outlined">source</span> Ver fuentes</button></div>` : ''}
-                ${msgId ? `<div id="context-${msgId}" class="context-content" style="display:none"></div>` : ''}
             `;
-            
-            el.innerHTML = html;
-            
-            // Activar highlight.js para resaltado de código si está disponible
-            if (typeof hljs !== 'undefined') {
-                el.querySelectorAll('pre code').forEach((block) => {
-                    hljs.highlightElement(block);
-                });
-            }
-            
-            if (msgId) {
-                const btn = el.querySelector('.context-toggle');
-                const cont = el.querySelector('.context-content');
-                if (btn && cont) {
-                    btn.addEventListener('click', () => fetchAndDisplayContext(msgId, btn, cont));
-                }
-            }
-            
-            // Aplicar truncamiento en dispositivos pequeños
-            if (window.innerWidth <= 480) {
-                const contentEl = el.querySelector('.message-content');
-                if (contentEl) {
-                    const originalText = contentEl.getAttribute('data-original-text');
-                    if (originalText) {
-                        if (window.innerWidth <= 360) {
-                            contentEl.innerHTML = truncateTextForSmallDevices(originalText, 120).replace(/\n/g, '<br>');
-                        } else {
-                            contentEl.innerHTML = truncateTextForSmallDevices(originalText, 300).replace(/\n/g, '<br>');
-                        }
-                    }
-                }
-            }
-            
-            try {
-                scrollToBottom();
-            } catch (e) {
-                console.error('Error al realizar scroll después de actualizar mensaje:', e);
-            }
-        } catch (err) {
-            console.error('Error al actualizar mensaje del bot:', err);
-        }
+        });
+        
+        contextHTML += `</div>`;
+        
+        // Actualizar el contenedor
+        container.innerHTML = contextHTML;
     }
 
-    function escapeHTML(str) {
-        if (!str) return '';
-        const d = document.createElement('div');
-        d.textContent = str;
-        return d.innerHTML;
+    // Función auxiliar para truncar texto largo
+    function truncateText(text, maxLength) {
+        if (!text) return '';
+        if (text.length <= maxLength) return text;
+        return text.substring(0, maxLength - 3) + '...';
     }
-
-    // Función para desplazarse al final del chat
-    function scrollToBottom() {
-        const chatContainer = document.getElementById('chat-container');
-        if (!chatContainer) return;
-        
-        const lastMessage = chatContainer.lastElementChild;
-        
-        // Optimizar el rendimiento del scroll
-        if (lastMessage) {
-            // Usar scrollIntoView con comportamiento suave para mejor UX
-            lastMessage.scrollIntoView({ 
-                behavior: 'smooth', 
-                block: 'end',
-                inline: 'nearest'
-            });
-            
-            // Para dispositivos móviles, asegurarse de que el scroll llega al final
-            if (window.innerWidth <= 480) {
-                setTimeout(() => {
-                    chatContainer.scrollTop = chatContainer.scrollHeight;
-                }, 100);
-            }
-        }
-    }
-
-    // Selector de temas con vista previa
-    if (themeSelect) {
-        const saved = localStorage.getItem('theme') || 'dark';
-        setTheme(saved);
-        themeSelect.value = saved;
-        
-        themeSelect.addEventListener('focus', () => {
-            themePreview.classList.add('visible');
-        });
-        
-        themeSelect.addEventListener('blur', () => {
-            setTimeout(() => {
-                themePreview.classList.remove('visible');
-            }, 300);
-        });
-        
-        themeSelect.addEventListener('mouseover', () => {
-            themePreview.classList.add('visible');
-        });
-        
-        themeSelect.addEventListener('mouseout', () => {
-            if (!themeSelect.matches(':focus')) {
-                themePreview.classList.remove('visible');
-            }
-        });
-        
-        themeSelect.addEventListener('change', () => {
-            const t = themeSelect.value;
-            setTheme(t);
-            localStorage.setItem('theme', t);
-            
-            // Actualizar preview
-            document.documentElement.style.setProperty('--preview-user-bg', getComputedStyle(document.body).getPropertyValue('--message-user-bg'));
-            document.documentElement.style.setProperty('--preview-bot-bg', getComputedStyle(document.body).getPropertyValue('--message-bot-bg'));
-        });
-    }
-
-    function setTheme(theme) {
-        // Quitar todas las clases de tema
-        document.body.classList.remove('light-theme', 'aqua-theme');
-        
-        // Aplicar el tema seleccionado
-        if (theme === 'light') {
-            document.body.classList.add('light-theme');
-        } else if (theme === 'aqua') {
-            document.body.classList.add('aqua-theme');
-        }
-        // El tema oscuro es el predeterminado (sin clase adicional)
-    }
-
-    // Detectar cambios de tamaño de ventana para ajustes responsivos
-    window.addEventListener('resize', () => {
-        setupMobileView();
-        
-        // Re-ajustar todos los textareas cuando cambie el tamaño de la ventana
-        document.querySelectorAll('textarea').forEach(textarea => {
-            adjustTextareaHeight(textarea);
-        });
-    });
 
     // Inicialización
     function init() {
