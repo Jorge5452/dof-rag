@@ -194,6 +194,36 @@ class VectorialDatabase(ABC):
         # Implementación por defecto que debe ser sobreescrita
         return None
 
+    @abstractmethod
+    def insert_document_metadata(self, document):
+        """
+        Inserta solo los metadatos de un documento en la base de datos, sin los chunks.
+        Útil para el procesamiento en streaming de documentos grandes.
+        
+        Args:
+            document (dict): Diccionario con los datos del documento
+            
+        Returns:
+            int: ID del documento insertado, None si falla
+        """
+        pass
+    
+    @abstractmethod
+    def insert_single_chunk(self, document_id, chunk_data):
+        """
+        Inserta un único chunk asociado a un documento en la base de datos.
+        Diseñado para procesamiento streaming de documentos grandes.
+        
+        Args:
+            document_id (int): ID del documento al que pertenece el chunk
+            chunk_data (dict): Diccionario con los datos del chunk
+                Debe contener: 'text', 'header', 'page', 'embedding', 'embedding_dim'
+            
+        Returns:
+            int: ID del chunk insertado, None si falla
+        """
+        pass
+
     def get_db_path(self) -> str:
         """
         Devuelve la ruta de la base de datos.

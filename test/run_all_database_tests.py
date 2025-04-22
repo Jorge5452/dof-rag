@@ -1,108 +1,48 @@
-import os
+#!/usr/bin/env python3
+"""
+Script de compatibilidad para redirigir a run_tests.py.
+DEPRECATED: Este script será eliminado en versiones futuras.
+Utilice 'python -m test.run_tests --type databases' en su lugar.
+"""
+
 import sys
-import unittest
-import datetime
-import logging
+import warnings
+import argparse
 from pathlib import Path
+import subprocess
 
-# Añadir el directorio raíz al path para permitir importaciones relativas
-sys.path.insert(0, str(Path(__file__).parent.parent))
-
-# Configuración de logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler(str(Path(__file__).parent / "resultados_db_tests" / "run_tests.log")),
-        logging.StreamHandler()
-    ]
+# Mostrar advertencia
+warnings.warn(
+    "Este script está obsoleto y será eliminado en futuras versiones. "
+    "Use 'python -m test.run_tests --type databases' en su lugar.",
+    DeprecationWarning
 )
-logger = logging.getLogger(__name__)
 
-def run_all_database_tests():
-    """
-    Ejecuta todas las pruebas de bases de datos y genera un informe de resultados.
-    """
-    try:
-        # Crear directorio para resultados si no existe
-        results_dir = Path(__file__).parent / "resultados_db_tests"
-        os.makedirs(results_dir, exist_ok=True)
-        
-        logger.info(f"Entorno de pruebas preparado. Resultados en: {results_dir}")
-        
-        # Mostrar información sobre las pruebas
-        print("\n" + "=" * 70)
-        print("EJECUTANDO TODAS LAS PRUEBAS DE BASES DE DATOS")
-        print("=" * 70)
-        print("Incluye pruebas actualizadas para:")
-        print("- Correcta detección de archivos .sqlite y .duckdb")
-        print("- Compatibilidad con múltiples motores de bases de datos")
-        print("- Manejo adecuado de metadatos y extensiones de archivo")
-        print("-" * 70)
-        
-        # Descubrir y ejecutar todas las pruebas en el directorio databases
-        test_loader = unittest.TestLoader()
-        test_suite = test_loader.discover(str(Path(__file__).parent / "databases"), pattern="test_*.py")
-        
-        # Ejecutar las pruebas
-        test_runner = unittest.TextTestRunner(verbosity=2)
-        test_results = test_runner.run(test_suite)
-        
-        # Generar informe de resultados
-        generate_test_summary(test_results, results_dir)
-        
-        # Devolver el código de estado (0 si todo está bien, 1 si hay fallos)
-        return 0 if test_results.wasSuccessful() else 1
-        
-    except Exception as e:
-        logger.error(f"Error al ejecutar las pruebas: {str(e)}")
-        return 1
-
-def generate_test_summary(test_results, results_dir):
-    """
-    Genera un informe de resumen de las pruebas.
+def main():
+    # Analizar argumentos actuales
+    parser = argparse.ArgumentParser(description="Ejecuta pruebas de bases de datos (REDIRECCIÓN)")
+    parser.add_argument('--type', help="Tipo de base de datos a probar")
+    parser.add_argument('--results-dir', help="Directorio donde guardar los resultados")
+    args, unknown = parser.parse_known_args()
     
-    Args:
-        test_results: Resultados de las pruebas
-        results_dir: Directorio donde se almacenarán los resultados
-    """
-    try:
-        # Crear archivo de resumen
-        summary_file = results_dir / "test_summary.txt"
-        
-        with open(summary_file, "w", encoding="utf-8") as f:
-            f.write("RESUMEN DE PRUEBAS DE BASES DE DATOS\n")
-            f.write("==================================================\n\n")
-            
-            # Fecha y hora
-            now = datetime.datetime.now()
-            f.write(f"Fecha y hora: {now.strftime('%Y-%m-%d %H:%M:%S')}\n")
-            
-            # Estadísticas generales
-            success_count = test_results.testsRun - len(test_results.failures) - len(test_results.errors)
-            f.write(f"Total de pruebas ejecutadas: {test_results.testsRun}\n")
-            f.write(f"Pruebas exitosas: {success_count}\n")
-            f.write(f"Pruebas fallidas: {len(test_results.failures)}\n")
-            f.write(f"Errores: {len(test_results.errors)}\n\n")
-            
-            # Detalle de fallos
-            if test_results.failures:
-                f.write("FALLOS:\n")
-                f.write("--------------------------------------------------\n")
-                for test, error in test_results.failures:
-                    f.write(f"- {test}\n  {error[:500]}...\n\n")
-            
-            # Detalle de errores
-            if test_results.errors:
-                f.write("ERRORES:\n")
-                f.write("--------------------------------------------------\n")
-                for test, error in test_results.errors:
-                    f.write(f"- {test}\n  {error[:500]}...\n\n")
-                    
-        logger.info(f"Resumen de pruebas generado en {summary_file}")
-        
-    except Exception as e:
-        logger.error(f"Error al generar resumen de pruebas: {str(e)}")
+    # Construir comando equivalente para run_tests.py
+    cmd = [sys.executable, "-m", "test.run_tests", "--type", "databases"]
+    
+    if args.type:
+        cmd.extend(["--db-type", args.type])
+    
+    if args.results_dir:
+        cmd.extend(["--results-dir", args.results_dir])
+    
+    # Añadir argumentos desconocidos (si hay)
+    if unknown:
+        cmd.extend(unknown)
+    
+    # Ejecutar comando equivalente
+    print("\nRedirigiendo a run_tests.py...")
+    print("Comando: " + " ".join(cmd))
+    print("=" * 60 + "\n")
+    return subprocess.call(cmd)
 
 if __name__ == "__main__":
-    sys.exit(run_all_database_tests())
+    sys.exit(main()) 

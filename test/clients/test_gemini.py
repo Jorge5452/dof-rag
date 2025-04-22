@@ -2,13 +2,21 @@
 Script de prueba simple para verificar la conexión con la API de Gemini.
 
 Uso:
-    python test_gemini.py
+    python -m test.clients.test_gemini
 """
 
 import os
+import sys
+import traceback
+from pathlib import Path
+
+# Añadir el directorio raíz al path para permitir importaciones relativas
+root_dir = Path(__file__).parent.parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.append(str(root_dir))
+
 from dotenv import load_dotenv
 from google import genai
-# Eliminar la importación de types que no se usa correctamente
 import google.generativeai as genai
 
 def test_gemini_api():
@@ -113,7 +121,6 @@ RESPUESTA (en español):
         
     except Exception as e:
         print(f"ERROR GENERAL: {str(e)}")
-        import traceback
         print(f"Detalles: {traceback.format_exc()}")
 
 if __name__ == "__main__":

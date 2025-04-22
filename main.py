@@ -10,13 +10,13 @@ Orquesta todos los componentes del sistema RAG para trabajar juntos.
 import logging
 import time
 from pathlib import Path
-from typing import List, Optional, Dict, Any, Union
-
+from typing import Optional, Any
 # Configurar logging
 logger = logging.getLogger(__name__)
 
 # Importación de lo necesario para colorama
 from colorama import init, Fore, Style, Back
+import gc  # Añadimos importación del garbage collector
 
 # Inicializar colorama para que funcione en todas las plataformas
 init(autoreset=True)
@@ -54,11 +54,9 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
         file_path: Ruta al directorio o archivo a procesar
         session_name: Nombre personalizado para la sesión (opcional)
     """
-    import os
     from pathlib import Path
     import time
     import logging
-    from typing import List, Dict, Any
     
     # Importaciones de módulos del sistema
     from config import config
@@ -181,6 +179,8 @@ def process_single_document(file_path: str,
                            db: Any) -> Optional[int]:
     """
     Procesa un único documento Markdown y lo inserta en la base de datos.
+    Utiliza un enfoque de streaming para procesar documentos grandes sin
+    cargar todos los chunks en memoria simultáneamente.
     
     Args:
         file_path: Ruta al archivo Markdown
@@ -192,36 +192,129 @@ def process_single_document(file_path: str,
         ID del documento insertado o None si falla
     """
     try:
-        # Procesar el documento
+        # Obtener configuración de optimización de memoria
+        from config import config
+        chunks_config = config.get_chunks_config()
+        memory_config = chunks_config.get("memory_optimization", {})
+        
+        memory_optimization_enabled = memory_config.get("enabled", True)
+        batch_size = memory_config.get("batch_size", 50)
+        force_gc = memory_config.get("force_gc", True)
+        memory_monitor = memory_config.get("memory_monitor", False)
+        
+        # Procesar el documento para obtener metadatos y contenido
         metadata, content = markdown_processor.process_document(file_path)
         
-        # Generar chunks
-        raw_chunks = chunker.process_content(content)
+        # Obtener el título del documento desde los metadatos
+        doc_title = metadata.get('title', 'Documento')
         
-        # Preparar chunks con embeddings
-        prepared_chunks = []
-        for chunk in raw_chunks:
-            # Obtener embedding combinando encabezado y texto
-            embedding = chunker.model.get_document_embedding(chunk['header'], chunk['text'])
+        # Si la optimización de memoria está desactivada, usar el método original
+        if not memory_optimization_enabled:
+            # Método original: procesar todos los chunks y guardar de una vez
+            raw_chunks = chunker.process_content(content, doc_title=doc_title)
             
-            # Crear chunk final con embedding
-            prepared_chunk = {
-                'text': chunk['text'],
-                'header': chunk['header'],
-                'page': chunk['page'],
-                'embedding': embedding,
-                'embedding_dim': chunker.model.get_dimensions()
-            }
+            # Preparar chunks con embeddings
+            prepared_chunks = []
+            for chunk in raw_chunks:
+                # Obtener embedding combinando encabezado y texto
+                embedding = chunker.model.get_document_embedding(chunk['header'], chunk['text'])
+                
+                # Crear chunk final con embedding
+                prepared_chunk = {
+                    'text': chunk['text'],
+                    'header': chunk['header'],
+                    'page': chunk.get('page', ''),
+                    'embedding': embedding,
+                    'embedding_dim': chunker.model.get_dimensions()
+                }
+                
+                prepared_chunks.append(prepared_chunk)
             
-            prepared_chunks.append(prepared_chunk)
+            # Insertar en la base de datos
+            document_id = db.insert_document(metadata, prepared_chunks)
+            
+            return document_id
         
-        # Insertar en la base de datos
-        document_id = db.insert_document(metadata, prepared_chunks)
+        # Método optimizado: streaming de chunks
+        # Insertar primero los metadatos del documento y obtener su ID
+        document_id = db.insert_document_metadata(metadata)
         
-        return document_id
+        if not document_id:
+            logger.error(f"{C_ERROR}Error al insertar metadatos del documento {file_path}")
+            return None
+        
+        # Iniciar una transacción para mejorar rendimiento
+        db.begin_transaction()
+        
+        # Variables para estadísticas y control
+        processed_chunks = 0
+        start_time = time.time()
+        
+        # Si el monitoreo de memoria está activo, iniciar seguimiento
+        if memory_monitor:
+            import psutil
+            process = psutil.Process()
+            initial_memory = process.memory_info().rss / 1024 / 1024  # MB
+            logger.info(f"Memoria inicial: {initial_memory:.2f} MB")
+        
+        try:
+            # Generar, procesar e insertar chunks uno por uno usando streaming
+            for chunk in chunker.process_content_stream(content, doc_title=doc_title):
+                # Obtener embedding combinando encabezado y texto
+                embedding = chunker.model.get_document_embedding(chunk['header'], chunk['text'])
+                
+                # Crear chunk final con embedding
+                prepared_chunk = {
+                    'text': chunk['text'],
+                    'header': chunk['header'],
+                    'page': chunk.get('page', ''),
+                    'embedding': embedding,
+                    'embedding_dim': chunker.model.get_dimensions()
+                }
+                
+                # Insertar el chunk individual
+                db.insert_single_chunk(document_id, prepared_chunk)
+                
+                # Liberar memoria explícitamente
+                del embedding
+                del prepared_chunk
+                
+                processed_chunks += 1
+                
+                # Mostrar progreso y forzar garbage collection periódicamente
+                if processed_chunks % batch_size == 0:
+                    elapsed = time.time() - start_time
+                    rate = processed_chunks / elapsed if elapsed > 0 else 0
+                    logger.info(f"Procesados {processed_chunks} chunks ({rate:.2f} chunks/seg)")
+                    
+                    # Monitoreo de memoria si está activo
+                    if memory_monitor:
+                        current_memory = process.memory_info().rss / 1024 / 1024  # MB
+                        logger.info(f"Uso de memoria: {current_memory:.2f} MB (Δ: {current_memory - initial_memory:.2f} MB)")
+                    
+                    # Forzar garbage collection si está configurado
+                    if force_gc:
+                        gc.collect()
+            
+            # Commit de la transacción cuando todos los chunks han sido procesados
+            db.commit_transaction()
+            
+            # Mostrar estadísticas finales
+            total_time = time.time() - start_time
+            logger.info(f"Documento procesado: {processed_chunks} chunks en {total_time:.2f} segundos " +
+                       f"({processed_chunks/total_time:.2f} chunks/seg)")
+            
+            return document_id
+            
+        except Exception as e:
+            # Rollback en caso de error
+            db.rollback_transaction()
+            raise e
     
     except Exception as e:
         logger.error(f"{C_ERROR}Error al procesar documento {file_path}: {e}")
+        # Asegurar liberación de memoria en caso de error
+        gc.collect()
         return None
 
 def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None, 

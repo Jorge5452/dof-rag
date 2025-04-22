@@ -33,7 +33,7 @@ from modulos.utils.formatting import (
 from modulos.utils.logging_utils import setup_logging, silence_verbose_loggers
 
 # Configurar logging
-setup_logging(level=logging.INFO, log_file="rag_system.log")
+setup_logging(level=logging.INFO, log_file="/logs/rag_system.log")
 
 # Silenciar módulos verbosos
 silence_verbose_loggers()
@@ -68,6 +68,9 @@ def main() -> int:
     parser.add_argument("--files", type=str, help="Directorio o archivo Markdown a procesar")
     parser.add_argument("--session-name", type=str, help="Nombre personalizado para la sesión")
     
+    # Argumentos de procesamiento y análisis
+    parser.add_argument("--export-chunks", action="store_true", help="Exporta chunks a archivos TXT en las mismas ubicaciones que los Markdown")
+    
     # Argumentos para el modo de consulta
     processing_config = config.get_processing_config()
     default_chunks = processing_config.get("max_chunks_to_retrieve", 5)
@@ -92,7 +95,11 @@ def main() -> int:
     try:
         # Ejecutar el modo correspondiente
         if args.ingest:
-            return handle_ingest_mode(args)
+            result = handle_ingest_mode(args)
+            # Exportar chunks si se solicitó
+            if args.export_chunks:
+                handle_export_chunks_mode(args)
+            return result
         elif args.query is not None:
             return handle_query_mode(args)
         elif args.list_sessions:
@@ -109,6 +116,8 @@ def main() -> int:
         elif args.db_stats:
             show_database_statistics()
             return 0
+        elif args.export_chunks:
+            return handle_export_chunks_mode(args)
         
         return 0
     except Exception as e:
@@ -662,6 +671,79 @@ def query_database(db_index: int, query: str, session_id: str = None) -> None:
         
     except Exception as e:
         print(f"{C_ERROR}Error al consultar: {str(e)}")
+
+def handle_export_chunks_mode(args: argparse.Namespace) -> int:
+    """
+    Maneja el modo de exportación de chunks a archivos TXT.
+    
+    Args:
+        args: Argumentos de línea de comandos
+        
+    Returns:
+        int: Código de salida (0 para éxito, 1 para error)
+    """
+    if not args.files:
+        logger.error(f"{C_ERROR}El argumento --files es requerido para el modo --export-chunks")
+        return 1
+        
+    # Verificar que el directorio o archivo existe
+    if not os.path.exists(args.files):
+        logger.error(f"{C_ERROR}El directorio o archivo {args.files} no existe")
+        return 1
+    
+    try:
+        # Importar el módulo de exportación
+        from modulos.view_chunks.chunk_exporter import export_chunks_for_files
+        
+        # Obtener la base de datos más reciente o la especificada por índice
+        from modulos.session_manager.session_manager import SessionManager
+        session_manager = SessionManager()
+        
+        if args.db_index is not None:
+            db, session = session_manager.get_database_by_index(args.db_index, session_id=args.session)
+        else:
+            # Usar la base de datos más reciente
+            db, session = session_manager.get_database_by_index(0, session_id=args.session)
+        
+        if not db:
+            logger.error(f"{C_ERROR}No se pudo obtener una conexión a la base de datos")
+            return 1
+        
+        print(f"\n{C_TITLE} EXPORTANDO CHUNKS {C_RESET}")
+        print_separator()
+        
+        # Mostrar información sobre la base de datos que se está utilizando
+        print(f"{C_INFO}Base de datos: {C_VALUE}{session.get('id', 'unknown')}")
+        print(f"{C_INFO}Modelo: {C_VALUE}{session.get('embedding_model', 'unknown')}")
+        print(f"{C_INFO}Método de chunking: {C_VALUE}{session.get('chunking_method', 'unknown')}")
+        print_separator()
+        
+        # Exportar chunks
+        start_time = time.time()
+        results = export_chunks_for_files(args.files, db)
+        elapsed_time = time.time() - start_time
+        
+        # Mostrar resultados
+        successful = sum(1 for result in results.values() if result)
+        failed = sum(1 for result in results.values() if not result)
+        
+        print_separator()
+        print(f"{C_SUCCESS}Exportación completada en {elapsed_time:.2f} segundos")
+        print(f"{C_SUCCESS}Archivos procesados correctamente: {successful}")
+        if failed > 0:
+            print(f"{C_ERROR}Archivos con errores: {failed}")
+        print_separator()
+        
+        # Liberar recursos
+        db.close()
+        import gc
+        gc.collect()
+        
+        return 0
+        
+    except Exception as e:
+        logger.error(f"{C_ERROR}Error al exportar chunks: {e}")
+        return 1
 
 if __name__ == "__main__":
     sys.exit(main())

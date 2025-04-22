@@ -5,9 +5,24 @@
 pruebas/
 __pycache__/
 modulos/databases/db/
-sessions/
-test/analisis_resultados/
-test/resultados_db_tests/
-test/resultados_pruebas/
 
+# Sessions data
+sessions/
+
+# Test results and outputs
+test/results
+test/*/results
+test/resultados_*
+test/**/output
+test/analysis
+test/*_tests
+test/**/*_tests
+test/analisis_*
+test/resultados_db_tests
+test/resultados_pruebas
+test/results
+
+# Logs
 rag_system.log
+logs/
+*.log

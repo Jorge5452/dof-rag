@@ -1,14 +1,19 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
 Script de pruebas para verificar la correcta configuración de clientes IA.
+
+Uso:
+    python -m test.clients.test_client_configs
 """
 
 import os
 import sys
 from pathlib import Path
 
-# Añadir directorio raíz al path para poder importar los módulos
-sys.path.insert(0, str(Path(__file__).parent))
+# Añadir el directorio raíz al path para permitir importaciones relativas
+root_dir = Path(__file__).parent.parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.append(str(root_dir))
 
 from config import Config
 from modulos.clientes.FactoryClient import ClientFactory
@@ -28,7 +33,12 @@ def test_client_factory():
         
         print(f"Parámetros configurados para {client_type}:")
         for key, value in filtered_config.items():
-            print(f"  - {key}: {value}")
+            # Ocultar claves de API por seguridad
+            if key in ["api_key", "api_key_env"] and value:
+                masked_value = str(value)[:4] + "..." + str(value)[-4:] if len(str(value)) > 8 else "***"
+                print(f"  - {key}: {masked_value}")
+            else:
+                print(f"  - {key}: {value}")
         
         # Crear cliente con configuración por defecto
         try:

@@ -11,8 +11,24 @@ general:
 
 # Configuración para chunking de documentos
 chunks:
-  # Método de chunking a utilizar (character, token, context)
-  method: "context"
+  # Método de chunking a utilizar (character, token, context, page)
+  method: "context" 
+  
+  # Formato de encabezado por defecto (standard, simple)
+  # standard: Formato detallado con encabezados Markdown
+  # simple: Formato simple tipo "Documento - Página X - Encabezado"
+  header_format: "standard"
+  
+  # Configuración para memoria y procesamiento
+  memory_optimization:
+    # Habilitar optimización de memoria (procesamiento de chunks uno por uno)
+    enabled: true
+    # Tamaño de lote para proceso de chunks antes de forzar gc
+    batch_size: 50
+    # Forzar garbage collection periódicamente
+    force_gc: true
+    # Monitorear uso de memoria
+    memory_monitor: true
   
   # Configuración para chunker por caracteres
   character:
@@ -26,6 +42,8 @@ chunks:
     min_header_length: 1
     # Longitud máxima para un encabezado (textos más largos se saltan para mejorar rendimiento)
     max_header_length: 6
+    # Formato de encabezado específico para este método (opcional)
+    header_format: "standard"
   
   # Configuración para chunker por tokens
   token:
@@ -36,6 +54,8 @@ chunks:
     max_tokens: 2048
     # Solapamiento entre chunks en tokens
     token_overlap: 100
+    # Formato de encabezado específico para este método (opcional)
+    header_format: "standard"
   
   # Configuración para chunker por contexto
   context:
@@ -45,6 +65,19 @@ chunks:
     max_header_level: 6
     # Tamaño máximo de texto por chunk
     max_chunk_size: 1500
+    # Formato de encabezado específico para este método (opcional)
+    header_format: "standard"
+    
+  # Configuración para chunker por páginas
+  page:
+    # Utilizar encabezados para mejorar el contexto
+    use_headers: true
+    # Nivel máximo de encabezado a considerar
+    max_header_level: 6
+    # Patrón de expresión regular para identificar marcadores de página
+    page_pattern: '\{(\d+)\}\s*-{5,}'
+    # Formato de encabezado específico para este método (opcional)
+    header_format: "simple"
 
 # Configuración para generación de embeddings
 embeddings:
@@ -84,7 +117,7 @@ embeddings:
 # Configuración de la base de datos
 database:
   # Tipo de base de datos (sqlite, duckdb, ...)
-  type: "sqlite"
+  type: "duckdb"
   
   # Configuración para SQLite
   sqlite:

@@ -1,8 +1,8 @@
-import os
 import logging
 from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 import time
+import re
 
 from config import config
 
@@ -24,6 +24,8 @@ class MarkdownProcessor:
         Inicializa el procesador de archivos Markdown.
         """
         self.processing_config = config.get_processing_config()
+        # Patrón para detectar encabezados en Markdown
+        self.HEADING_PATTERN = re.compile(r'^(#{1,6})\s+(.*)$')
     
     def read_markdown_file(self, document_path: str) -> str:
         """
@@ -109,8 +111,6 @@ class MarkdownProcessor:
         Returns:
             Título extraído o None si no se encuentra.
         """
-        import re
-        
         # Buscar encabezado H1 (# Título)
         h1_match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
         if h1_match:
@@ -122,6 +122,67 @@ class MarkdownProcessor:
             return frontmatter_match.group(1).strip()
         
         return None
+    
+    def get_heading_level(self, line: str) -> Tuple[Optional[int], Optional[str]]:
+        """
+        Obtiene el nivel y texto de un encabezado, o (None, None) si la línea no es un encabezado.
+        
+        Args:
+            line: Línea de texto a analizar.
+            
+        Returns:
+            Tupla (nivel, texto) o (None, None) si no es un encabezado.
+        """
+        match = self.HEADING_PATTERN.match(line)
+        if match:
+            hashes = match.group(1)
+            heading_text = match.group(2).strip()
+            level = len(hashes)
+            return level, heading_text
+        return None, None
+        
+    def update_open_headings(self, open_headings: List[Tuple[int, str]], line: str) -> List[Tuple[int, str]]:
+        """
+        Actualiza la lista de encabezados abiertos según la línea actual.
+        
+        La estrategia es:
+        - Si se encuentra un H1, se reinicia la lista.
+        - Si la línea es un encabezado de nivel >1:
+            * Si la lista está vacía, se añade.
+            * Si el último encabezado abierto tiene un nivel menor o igual, 
+              se añade sin eliminar el anterior (para preservar hermanos).
+            * Si el nuevo encabezado es de nivel superior (número menor) 
+              al último, se preservan los de nivel inferior al nuevo y se añade.
+              
+        Args:
+            open_headings: Lista actual de encabezados abiertos [(nivel, texto), ...].
+            line: Línea de texto a analizar.
+            
+        Returns:
+            Lista actualizada de encabezados abiertos.
+        """
+        lvl, txt = self.get_heading_level(line)
+        if lvl is None:
+            # Línea sin encabezado, no se modifica el estado
+            return open_headings
+
+        if lvl == 1:
+            # Un H1 cierra todo el contexto anterior
+            return [(1, txt)]
+        else:
+            if not open_headings:
+                return [(lvl, txt)]
+            else:
+                # Si el último encabezado tiene un nivel menor o igual, se añade el actual
+                if open_headings[-1][0] <= lvl:
+                    open_headings.append((lvl, txt))
+                else:
+                    # Si el nuevo encabezado es de nivel superior (más importante)
+                    # solo se preservan los encabezados de nivel inferior (mayor) al nuevo
+                    new_chain = [item for item in open_headings if item[0] < lvl]
+                    new_chain.append((lvl, txt))
+                    open_headings = new_chain
+            return open_headings
     
     def process_document(self, document_path: str) -> Tuple[Dict[str, Any], str]:
         """

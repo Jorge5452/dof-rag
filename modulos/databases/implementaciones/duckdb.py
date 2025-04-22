@@ -442,6 +442,103 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             logger.error(f"Error al insertar documento: {e}")
             raise
     
+    def insert_document_metadata(self, document: Dict[str, Any]) -> int:
+        """
+        Inserta solo los metadatos de un documento en la base de datos.
+        Implementación para procesamiento en streaming de documentos grandes.
+        
+        Args:
+            document: Diccionario con los datos del documento
+            
+        Returns:
+            int: ID del documento insertado, None si falla
+        """
+        if not self._conn:
+            logger.error("No hay conexión a la base de datos")
+            return None
+        
+        if not self._schema_created:
+            self.create_schema()
+        
+        try:
+            # Iniciar una transacción explícita
+            self.begin_transaction()
+            
+            # Insertar el documento
+            self._conn.execute("""
+                INSERT INTO documents (title, url, file_path, created_at)
+                VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+                RETURNING id
+            """, (
+                document.get('title', ''),
+                document.get('url', ''),
+                document.get('file_path', ''),
+            ))
+            
+            # Obtener el ID del documento insertado usando RETURNING
+            document_id = self._conn.fetchone()[0]
+            
+            # Hacer commit usando el método de la clase padre en lugar del comando SQL directo
+            self.commit_transaction()
+            
+            logger.debug(f"Documento (solo metadatos) insertado con ID: {document_id}")
+            return document_id
+            
+        except Exception as e:
+            logger.error(f"Error al insertar metadatos del documento: {e}")
+            # Hacer rollback en caso de error usando el método de la clase padre
+            self.rollback_transaction()
+            return None
+    
+    def insert_single_chunk(self, document_id: int, chunk: Dict[str, Any]) -> int:
+        """
+        Inserta un único chunk asociado a un documento en la base de datos.
+        Diseñado para procesamiento streaming de documentos grandes.
+        
+        Args:
+            document_id (int): ID del documento al que pertenece el chunk
+            chunk (dict): Diccionario con los datos del chunk
+                Debe contener: 'text', 'header', 'page', 'embedding', 'embedding_dim'
+            
+        Returns:
+            int: ID del chunk insertado, None si falla
+        """
+        if not self._conn:
+            logger.error("No hay conexión a la base de datos")
+            return None
+        
+        try:
+            # Procesar el embedding
+            embedding = chunk.get('embedding')
+            
+            # Serializar el embedding si existe
+            serialized_embedding = None
+            if embedding is not None:
+                serialized_embedding = self.serialize_vector(embedding)
+            
+            # Insertar el chunk individual
+            self._conn.execute("""
+                INSERT INTO chunks (document_id, text, header, page, embedding, embedding_dim, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                RETURNING id
+            """, (
+                document_id,
+                chunk.get('text', ''),
+                chunk.get('header', None),
+                chunk.get('page', None),
+                serialized_embedding,
+                self._embedding_dim if serialized_embedding else None
+            ))
+            
+            # Obtener el ID del chunk insertado
+            chunk_id = self._conn.fetchone()[0]
+            
+            return chunk_id
+            
+        except Exception as e:
+            logger.error(f"Error al insertar chunk individual: {e}")
+            return None
+    
     def optimize_database(self) -> bool:
         """
         Optimiza la base de datos realizando operaciones de mantenimiento.
@@ -1118,3 +1215,68 @@ class DuckDBVectorialDatabase(VectorialDatabase):
                     final_results.append(neighbor)
         
         return final_results
+    
+    def begin_transaction(self) -> bool:
+        """
+        Inicia una transacción en DuckDB.
+        
+        Returns:
+            bool: True si se inició correctamente, False en caso contrario
+        """
+        try:
+            if not self._conn:
+                logger.error("No hay conexión a la base de datos para iniciar transacción")
+                return False
+                
+            # Iniciar transacción en DuckDB
+            self._conn.execute("BEGIN TRANSACTION")
+            logger.debug("Transacción iniciada en DuckDB")
+            return True
+        except Exception as e:
+            logger.error(f"Error al iniciar transacción en DuckDB: {e}")
+            return False
+    
+    def commit_transaction(self) -> bool:
+        """
+        Confirma una transacción activa en DuckDB.
+        
+        Returns:
+            bool: True si se confirmó correctamente, False en caso contrario
+        """
+        try:
+            if not self._conn:
+                logger.error("No hay conexión a la base de datos para confirmar transacción")
+                return False
+                
+            # Confirmar transacción en DuckDB
+            self._conn.execute("COMMIT")
+            logger.debug("Transacción confirmada en DuckDB")
+            return True
+        except Exception as e:
+            logger.error(f"Error al confirmar transacción en DuckDB: {e}")
+            # Intentar hacer rollback en caso de error
+            try:
+                self._conn.execute("ROLLBACK")
+            except:
+                pass
+            return False
+    
+    def rollback_transaction(self) -> bool:
+        """
+        Revierte una transacción activa en DuckDB.
+        
+        Returns:
+            bool: True si se revirtió correctamente, False en caso contrario
+        """
+        try:
+            if not self._conn:
+                logger.error("No hay conexión a la base de datos para revertir transacción")
+                return False
+                
+            # Revertir transacción en DuckDB
+            self._conn.execute("ROLLBACK")
+            logger.debug("Transacción revertida en DuckDB")
+            return True
+        except Exception as e:
+            logger.error(f"Error al revertir transacción en DuckDB: {e}")
+            return False

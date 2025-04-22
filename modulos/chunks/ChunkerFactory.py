@@ -6,6 +6,7 @@ from modulos.chunks.ChunkAbstract import ChunkAbstract
 from modulos.chunks.implementaciones.character_chunker import CharacterChunker
 from modulos.chunks.implementaciones.token_chunker import TokenChunker
 from modulos.chunks.implementaciones.context_chunker import ContextChunker
+from modulos.chunks.implementaciones.page_chunker import PageChunker
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -30,7 +31,7 @@ class ChunkerFactory:
         Si ya existe una instancia para ese tipo, retorna la misma instancia (patrón Singleton).
         
         Parámetros:
-            chunker_type (str, opcional): Tipo de chunker ('character', 'token', 'context').
+            chunker_type (str, opcional): Tipo de chunker ('character', 'token', 'context', 'page').
                                          Si es None, se toma del archivo de configuración.
             embedding_model: Modelo de embeddings inicializado. Si se proporciona, se asigna al chunker.
         
@@ -62,6 +63,8 @@ class ChunkerFactory:
             chunker = TokenChunker(embedding_model)
         elif chunker_type.lower() == 'context':
             chunker = ContextChunker(embedding_model)
+        elif chunker_type.lower() == 'page':
+            chunker = PageChunker(embedding_model)
         else:
             raise ValueError(f"Tipo de chunker no soportado: {chunker_type}")
         

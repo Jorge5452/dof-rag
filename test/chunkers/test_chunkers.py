@@ -13,7 +13,9 @@ import sys
 import yaml
 
 # Añadir el directorio raíz al path para permitir importaciones relativas
-sys.path.insert(0, str(Path(__file__).parent.parent))
+root_dir = Path(__file__).parent.parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.append(str(root_dir))
 
 from config import config
 from modulos.chunks.ChunkerFactory import ChunkerFactory
@@ -198,164 +200,176 @@ def save_results_to_file(results_dir: Path, chunker_type: str, document_path: st
     doc_path = Path(document_path)
     doc_name = doc_path.stem
     
-    # Crear un nombre de archivo único que incluya el tipo de chunker y el nombre del documento
+    # Crear nombre del archivo de resultados
     result_file = results_dir / f"{chunker_type}_{doc_name}_results.txt"
     
     # Obtener configuración del chunker
     chunker_config = get_chunker_config(chunker_type)
     
-    # Calcular estadísticas
-    chunk_lengths = [len(chunk["text"]) for chunk in chunks]
-    avg_length = sum(chunk_lengths) / len(chunk_lengths) if chunk_lengths else 0
-    min_length = min(chunk_lengths) if chunk_lengths else 0
-    max_length = max(chunk_lengths) if chunk_lengths else 0
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Abrir el archivo en modo write (no append) para cada documento/chunker
+    # Guardar resultados en un archivo de texto
     with open(result_file, 'w', encoding='utf-8') as f:
-        # Escribir encabezado para este documento
-        f.write(f"{'=' * 80}\n")
-        f.write(f"MÉTODO DE CHUNKING: {chunker_type.upper()}\n")
-        f.write(f"{'=' * 80}\n\n")
-        f.write(f"FECHA Y HORA: {timestamp}\n")
-        f.write(f"DOCUMENTO: {document_path}\n")
-        f.write(f"NOMBRE DEL ARCHIVO: {doc_name}\n\n")
+        # Cabecera con información general
+        f.write(f"RESULTADOS DE CHUNKING: {chunker_type.upper()}\n")
+        f.write(f"Documento: {document_path}\n")
+        f.write(f"Fecha: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"Total de chunks: {len(chunks)}\n\n")
         
-        # Escribir configuración detallada del chunker
-        f.write("CONFIGURACIÓN DETALLADA DEL CHUNKER:\n")
-        f.write("-" * 40 + "\n")
-        
-        # Según el tipo de chunker, mostrar información específica relevante
-        if chunker_type == 'character':
-            character_config = chunker_config.get('character', {})
-            f.write(f"- Método: Chunking por caracteres\n")
-            f.write(f"- Tamaño del chunk: {character_config.get('chunk_size', 1000)} caracteres\n")
-            f.write(f"- Solapamiento: {character_config.get('chunk_overlap', 200)} caracteres\n")
-            f.write(f"- Extracción de encabezados: {'Activada' if character_config.get('header_extraction_enabled', True) else 'Desactivada'}\n")
-            f.write(f"- Nivel mínimo de encabezado: {character_config.get('min_header_length', 1)}\n")
-            f.write(f"- Nivel máximo de encabezado: {character_config.get('max_header_length', 3)}\n")
-        
-        elif chunker_type == 'token':
-            token_config = chunker_config.get('token', {})
-            f.write(f"- Método: Chunking por tokens\n")
-            f.write(f"- Tokenizador: {token_config.get('tokenizer', 'intfloat/multilingual-e5-small')}\n")
-            f.write(f"- Máximo de tokens por chunk: {token_config.get('max_tokens', 512)}\n")
-            f.write(f"- Solapamiento: {token_config.get('token_overlap', 100)} tokens\n")
-        
-        elif chunker_type == 'context':
-            context_config = chunker_config.get('context', {})
-            f.write(f"- Método: Chunking por contexto\n")
-            f.write(f"- Uso de encabezados: {'Activado' if context_config.get('use_headers', True) else 'Desactivado'}\n")
-            f.write(f"- Nivel máximo de encabezado: {context_config.get('max_header_level', 3)}\n")
-            f.write(f"- Tamaño máximo de chunk: {context_config.get('max_chunk_size', 1500)} caracteres\n")
-        
-        # Escribir configuración general adicional
-        f.write(f"- Método global configurado: {chunker_config.get('general', {}).get('config_global', 'context')}\n")
-        
-        # Añadir información sobre el embedding
-        if chunks and 'embedding_dim' in chunks[0]:
-            f.write(f"- Dimensión de embedding: {chunks[0]['embedding_dim']}\n")
-        
+        # Información de configuración
+        f.write("CONFIGURACIÓN DEL CHUNKER:\n")
+        for key, value in chunker_config.get(chunker_type, {}).items():
+            f.write(f"  - {key}: {value}\n")
         f.write("\n")
         
-        # Escribir métricas
-        f.write("MÉTRICAS:\n")
-        f.write("-" * 40 + "\n")
+        # Calcular estadísticas
+        chunk_lengths = [len(chunk["text"]) for chunk in chunks]
+        avg_length = sum(chunk_lengths) / len(chunk_lengths) if chunk_lengths else 0
+        min_length = min(chunk_lengths) if chunk_lengths else 0
+        max_length = max(chunk_lengths) if chunk_lengths else 0
+        
+        # Escribir estadísticas generales
+        f.write("ESTADÍSTICAS:\n")
         f.write(f"- Total de chunks: {len(chunks)}\n")
         f.write(f"- Longitud promedio: {avg_length:.2f} caracteres\n")
         f.write(f"- Longitud mínima: {min_length} caracteres\n")
         f.write(f"- Longitud máxima: {max_length} caracteres\n")
-        if chunks:
-            f.write(f"- Dimensión de embedding: {chunks[0]['embedding_dim']}\n")
-        f.write("\n")
+        f.write(f"- Dimensión de embedding: {chunks[0]['embedding_dim'] if chunks else 'N/A'}\n\n")
         
         # Escribir detalles de cada chunk
         f.write("DETALLES DE CHUNKS:\n")
-        f.write("=" * 80 + "\n\n")
-        
         for i, chunk in enumerate(chunks):
-            f.write(f"CHUNK {i+1}:\n")
-            f.write("-" * 40 + "\n")
+            f.write(f"\n{'=' * 40}\n")
+            f.write(f"CHUNK #{i+1}\n")
             f.write(f"- Header: {chunk['header']}\n")
             f.write(f"- Page: {chunk['page']}\n")
-            f.write(f"- Longitud: {len(chunk['text'])} caracteres\n")
-            f.write(f"- Embedding dim: {chunk['embedding_dim']}\n")
+            f.write(f"- Embedding dimension: {chunk['embedding_dim']}\n")
+            f.write(f"- Text ({len(chunk['text'])} caracteres):\n\n")
             
-            # Escribir el texto completo del chunk (sin truncar)
-            f.write(f"\nTEXTO COMPLETO:\n")
-            f.write("-" * 40 + "\n")
-            # Texto indentado para mejor legibilidad
-            wrapped_text = textwrap.fill(
-                chunk["text"], 
-                width=80, 
-                initial_indent="  ", 
-                subsequent_indent="  "
-            )
-            f.write(f"{wrapped_text}\n\n")
-            
-            # Separador entre chunks
-            f.write("=" * 80 + "\n\n")
-        
+            # Formatear el texto con indentación para mejorar la legibilidad
+            wrapped_text = textwrap.fill(chunk["text"], width=80, 
+                                        initial_indent="  ", subsequent_indent="  ")
+            f.write(f"{wrapped_text}\n")
+    
     logger.info(f"Resultados guardados en {result_file}")
+    return result_file
+
+def run_multiple_chunkers(document_path: str, chunker_types: List[str], model_name: Optional[str] = None, 
+                         results_dir: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Ejecuta múltiples chunkers en un documento y compara los resultados.
+    
+    Args:
+        document_path: Ruta al documento a procesar
+        chunker_types: Lista de tipos de chunker a usar
+        model_name: Nombre del modelo de embedding (opcional)
+        results_dir: Directorio para guardar resultados (opcional)
+        
+    Returns:
+        Diccionario con resultados comparativos
+    """
+    # Validar que el archivo existe
+    if not os.path.exists(document_path):
+        logger.error(f"El archivo {document_path} no existe")
+        return {}
+    
+    # Cargar el modelo de embedding
+    embedding_model = load_embedding_model(model_name)
+    
+    # Directorio de resultados
+    if results_dir:
+        results_path = Path(results_dir)
+    else:
+        # Crear directorio de resultados basado en la fecha y hora actual
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        results_path = Path(f"test_results_{timestamp}")
+    
+    # Resultados comparativos
+    results = {
+        "document": document_path,
+        "model": embedding_model.get_submodule("_modules.0._model_id") 
+                if hasattr(embedding_model, "get_submodule") else str(embedding_model),
+        "timestamp": datetime.now().isoformat(),
+        "chunkers": {}
+    }
+    
+    # Procesar con cada chunker
+    for chunker_type in chunker_types:
+        logger.info(f"Procesando documento con chunker: {chunker_type}")
+        
+        try:
+            # Procesar el documento
+            start_time = time.time()
+            chunks = process_document(document_path, chunker_type, embedding_model)
+            processing_time = time.time() - start_time
+            
+            # Mostrar estadísticas
+            print_chunk_stats(chunks, chunker_type)
+            
+            # Guardar resultados a archivo
+            result_file = save_results_to_file(results_path, chunker_type, document_path, chunks)
+            
+            # Guardar estadísticas comparativas
+            chunk_lengths = [len(chunk["text"]) for chunk in chunks]
+            
+            results["chunkers"][chunker_type] = {
+                "processing_time": processing_time,
+                "num_chunks": len(chunks),
+                "avg_chunk_length": sum(chunk_lengths) / len(chunk_lengths) if chunk_lengths else 0,
+                "min_chunk_length": min(chunk_lengths) if chunk_lengths else 0,
+                "max_chunk_length": max(chunk_lengths) if chunk_lengths else 0,
+                "result_file": str(result_file)
+            }
+            
+        except Exception as e:
+            logger.error(f"Error al procesar con chunker {chunker_type}: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            
+            results["chunkers"][chunker_type] = {
+                "error": str(e)
+            }
+    
+    # Guardar resultados comparativos en formato JSON
+    summary_file = results_path / f"summary_{Path(document_path).stem}.json"
+    with open(summary_file, 'w', encoding='utf-8') as f:
+        json.dump(results, f, indent=2, ensure_ascii=False)
+    
+    logger.info(f"Resumen comparativo guardado en {summary_file}")
+    return results
 
 def main():
-    """Función principal que ejecuta el test de chunkers."""
-    parser = argparse.ArgumentParser(description="Test de chunkers para archivos Markdown")
+    """Función principal que ejecuta las pruebas de chunkers."""
+    parser = argparse.ArgumentParser(description="Prueba de chunkers con diferentes configuraciones")
     parser.add_argument("--dir", type=str, default="pruebas", 
-                        help="Directorio donde buscar archivos Markdown (predeterminado: 'pruebas')")
+                      help="Directorio donde buscar archivos Markdown")
     parser.add_argument("--file", type=str, 
-                        help="Ruta específica a un archivo Markdown para procesar")
+                      help="Ruta específica a un archivo Markdown para procesar")
     parser.add_argument("--chunkers", type=str, default="character,token,context",
-                        help="Lista separada por comas de los chunkers a utilizar")
+                      help="Lista separada por comas de los chunkers a utilizar")
     parser.add_argument("--model", type=str, 
-                        help="Nombre del modelo de embedding a utilizar (opcional)")
-    parser.add_argument("--results-dir", type=str, default="test/resultados_pruebas",
-                        help="Directorio donde guardar los resultados de las pruebas")
+                      help="Nombre del modelo de embedding a utilizar (opcional)")
+    parser.add_argument("--results-dir", type=str, default="test/results/chunker_tests",
+                      help="Directorio donde guardar los resultados de las pruebas")
     
     args = parser.parse_args()
     
-    # Convertir rutas relativas a absolutas si es necesario
-    base_dir = Path(__file__).parent.parent
-    results_dir = Path(args.results_dir)
-    if not results_dir.is_absolute():
-        results_dir = base_dir / results_dir
-    
-    # Cargar el modelo de embedding
-    embedding_model = load_embedding_model(args.model)
-    
-    # Determinar los chunkers a utilizar
+    # Crear lista de chunkers a probar
     chunker_types = [c.strip() for c in args.chunkers.split(",")]
     
-    # Determinar los archivos a procesar
+    # Si se especificó un archivo, procesar ese archivo
     if args.file:
-        # Procesar un archivo específico
-        if not os.path.exists(args.file):
-            logger.error(f"El archivo {args.file} no existe")
-            return
-        md_files = [Path(args.file)]
+        logger.info(f"Procesando archivo específico: {args.file}")
+        run_multiple_chunkers(args.file, chunker_types, args.model, args.results_dir)
     else:
-        # Buscar archivos en el directorio
+        # Si se especificó un directorio, buscar todos los archivos Markdown
+        logger.info(f"Buscando archivos Markdown en: {args.dir}")
         md_files = find_markdown_files(args.dir)
-    
-    if not md_files:
-        logger.error("No se encontraron archivos Markdown para procesar")
-        return
-    
-    # Procesar cada archivo con cada chunker
-    for md_file in md_files:
-        print(f"\nProcesando archivo: {md_file}")
         
-        for chunker_type in chunker_types:
-            print(f"\nUtilizando chunker: {chunker_type}")
-            try:
-                chunks = process_document(str(md_file), chunker_type, embedding_model)
-                print_chunk_stats(chunks, chunker_type)
-                
-                # Guardar resultados en archivo
-                save_results_to_file(results_dir, chunker_type, str(md_file), chunks)
-                
-            except Exception as e:
-                logger.error(f"Error al procesar {md_file} con chunker {chunker_type}: {e}")
+        # Procesar cada archivo encontrado
+        for file_path in md_files:
+            logger.info(f"Procesando archivo: {file_path}")
+            run_multiple_chunkers(str(file_path), chunker_types, args.model, args.results_dir)
+    
+    logger.info("Pruebas de chunking completadas")
 
 if __name__ == "__main__":
-    main()
+    main() 

@@ -1,9 +1,8 @@
 import re
 import logging
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 
 from modulos.chunks.ChunkAbstract import ChunkAbstract
-from config import config
 
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -78,7 +77,7 @@ class ContextChunker(ChunkAbstract):
     
     def chunk(self, content: str, headers: List[Dict[str, Any]], **kwargs) -> List[Dict[str, Any]]:
         """
-        Divide el contenido en chunks basados en la estructura semántica y los encabezados.
+        Divide el contenido en chunks utilizando el sistema de 'encabezados abiertos'.
         
         Parámetros:
             content: Contenido del archivo Markdown.
@@ -91,31 +90,122 @@ class ContextChunker(ChunkAbstract):
         # Obtener parámetros de kwargs o usar valores por defecto
         use_headers = kwargs.get("use_headers", self.use_headers)
         max_chunk_size = kwargs.get("max_chunk_size", self.max_chunk_size)
+        doc_title = kwargs.get("doc_title", "Documento")
         
         chunks = []
         
-        # Si no hay encabezados o no se utilizan, dividir por tamaño
-        if not headers or not use_headers:
+        # Si hay encabezados y se utilizan
+        if headers and use_headers:
+            # Dividir el contenido en bloques basados en encabezados
+            # Ordenar los encabezados por posición
+            ordered_headers = sorted(headers, key=lambda h: h["start_index"])
+            
+            # Añadir un último marcador de posición para facilitar la definición de los chunks
+            if content:
+                ordered_headers.append({
+                    "header_text": "",
+                    "level": 0,
+                    "start_index": len(content),
+                    "end_index": len(content)
+                })
+            
+            # Si no hay encabezados ordenados, retornar un único chunk
+            if not ordered_headers:
+                chunks.append({
+                    "text": content,
+                    "header": "",
+                    "page": "1"
+                })
+                return chunks
+            
+            # Lista de encabezados abiertos (nivel, texto)
+            open_headings = []
+            
+            # Primer análisis para detectar encabezados iniciales
+            # Para el primer chunk, examinamos las primeras líneas hasta encontrar encabezados
+            if ordered_headers:
+                # Extraemos el texto inicial hasta el primer encabezado
+                initial_text = content[:ordered_headers[0]["start_index"]]
+                
+                # Examinamos las líneas para identificar encabezados iniciales
+                for line in initial_text.splitlines():
+                    open_headings = self.update_open_headings(open_headings, line)
+            
+            # Generar chunks basados en encabezados
+            for i in range(len(ordered_headers) - 1):
+                header = ordered_headers[i]
+                next_header = ordered_headers[i + 1]
+                
+                # Actualizar la lista de encabezados abiertos
+                header_line = content[header["start_index"]:header["end_index"]]
+                open_headings = self.update_open_headings(open_headings, header_line)
+                
+                # Determinar el texto del chunk desde el fin del encabezado actual hasta el inicio del siguiente
+                chunk_start = header["end_index"]
+                chunk_end = next_header["start_index"]
+                chunk_text = content[chunk_start:chunk_end].strip()
+                
+                # Si el chunk no está vacío
+                if chunk_text:
+                    # Construir el encabezado utilizando el sistema de open_headings
+                    chunk_number = i + 1
+                    page_num = str(i + 1)  # Basado en el número de encabezado
+                    
+                    header_content = self.build_header_from_open_headings(
+                        doc_title, 
+                        page_num, 
+                        open_headings, 
+                        chunk_number
+                    )
+                    
+                    # Si el chunk es demasiado grande, subdividirlo
+                    if len(chunk_text) > max_chunk_size:
+                        sub_chunks = self._subdivide_large_chunk(chunk_text, max_chunk_size)
+                        for j, sub_chunk in enumerate(sub_chunks):
+                            chunks.append({
+                                "text": sub_chunk,
+                                "header": header_content,
+                                "page": f"{page_num}.{j+1}"
+                            })
+                    else:
+                        chunks.append({
+                            "text": chunk_text,
+                            "header": header_content,
+                            "page": page_num
+                        })
+        else:
+            # Si no hay encabezados o no se utilizan, dividir por tamaño
             # Dividir el contenido en párrafos
             paragraphs = re.split(r'\n\s*\n', content)
             
             current_chunk = ""
             current_page = 1
             
+            # Lista de encabezados abiertos
+            open_headings = []
+            
             for paragraph in paragraphs:
                 paragraph = paragraph.strip()
                 if not paragraph:
                     continue
                 
+                # Actualizar los encabezados abiertos con cada párrafo
+                for line in paragraph.splitlines():
+                    open_headings = self.update_open_headings(open_headings, line)
+                
                 # Si añadir el párrafo excede el tamaño máximo, crear un nuevo chunk
                 if len(current_chunk) + len(paragraph) > max_chunk_size and current_chunk:
-                    # Encontrar encabezado para la posición actual
-                    start_pos = content.find(current_chunk)
-                    header = self.find_header_for_position(start_pos, headers)
+                    # Construir el encabezado para el chunk
+                    header_content = self.build_header_from_open_headings(
+                        doc_title, 
+                        str(current_page), 
+                        open_headings, 
+                        current_page
+                    )
                     
                     chunks.append({
                         "text": current_chunk,
-                        "header": header,
+                        "header": header_content,
                         "page": str(current_page)
                     })
                     
@@ -129,79 +219,28 @@ class ContextChunker(ChunkAbstract):
             
             # Añadir el último chunk si queda contenido
             if current_chunk:
-                start_pos = content.find(current_chunk)
-                header = self.find_header_for_position(start_pos, headers)
+                # Construir el encabezado para el último chunk
+                header_content = self.build_header_from_open_headings(
+                    doc_title, 
+                    str(current_page), 
+                    open_headings, 
+                    current_page
+                )
                 
                 chunks.append({
                     "text": current_chunk,
-                    "header": header,
+                    "header": header_content,
                     "page": str(current_page)
                 })
-            
-            return chunks
-        
-        # Dividir por encabezados si se utilizan y existen
-        # Ordenar los encabezados por posición
-        ordered_headers = sorted(headers, key=lambda h: h["start_index"])
-        
-        # Añadir un último marcador de posición para facilitar la definición de los chunks
-        if content:
-            ordered_headers.append({
-                "header_text": "",
-                "level": 0,
-                "start_index": len(content),
-                "end_index": len(content)
-            })
-        
-        # Si no hay encabezados ordenados, retornar un único chunk
-        if not ordered_headers:
-            chunks.append({
-                "text": content,
-                "header": "",
-                "page": "1"
-            })
-            return chunks
-        
-        # Generar chunks basados en encabezados
-        for i in range(len(ordered_headers) - 1):
-            header = ordered_headers[i]
-            next_header = ordered_headers[i + 1]
-            
-            # Determinar el texto del chunk desde el fin del encabezado actual hasta el inicio del siguiente
-            chunk_start = header["end_index"]
-            chunk_end = next_header["start_index"]
-            chunk_text = content[chunk_start:chunk_end].strip()
-            
-            # Si el chunk no está vacío
-            if chunk_text:
-                # Construir el encabezado jerárquico
-                hierarchical_header = self.build_hierarchical_header(header, ordered_headers[:i])
-                
-                # Asignar número de página (basado en número de encabezado)
-                page_num = i + 1
-                
-                # Si el chunk es demasiado grande, subdividirlo
-                if len(chunk_text) > max_chunk_size:
-                    sub_chunks = self._subdivide_large_chunk(chunk_text, max_chunk_size)
-                    for j, sub_chunk in enumerate(sub_chunks):
-                        chunks.append({
-                            "text": sub_chunk,
-                            "header": hierarchical_header,
-                            "page": f"{page_num}.{j+1}"
-                        })
-                else:
-                    chunks.append({
-                        "text": chunk_text,
-                        "header": hierarchical_header,
-                        "page": str(page_num)
-                    })
         
         logger.info(f"Generados {len(chunks)} chunks por contexto")
         return chunks
     
+    # Método legacy para compatibilidad
     def build_hierarchical_header(self, current_header: Dict[str, Any], previous_headers: List[Dict[str, Any]]) -> str:
         """
-        Construye un encabezado jerárquico basado en el encabezado actual y los anteriores.
+        [LEGACY] Construye un encabezado jerárquico basado en el encabezado actual y los anteriores.
+        Mantenido por compatibilidad con código existente.
         
         Parámetros:
             current_header: Encabezado actual.

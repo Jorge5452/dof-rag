@@ -1,7 +1,12 @@
 #!/usr/bin/env python3
 """
-Script para analizar y comparar los resultados de los diferentes chunkers.
-Genera un reporte comparativo con estadísticas y visualizaciones.
+Script para analizar y visualizar los resultados de las pruebas de chunkers.
+
+Uso:
+    python -m test.analizar_resultados --dir <directorio_resultados> --out <directorio_analisis>
+
+Este script procesa los archivos de resultados generados por las pruebas de chunkers,
+genera gráficos comparativos y estadísticas, y los guarda en el directorio especificado.
 """
 
 import os
@@ -13,7 +18,9 @@ import matplotlib.pyplot as plt
 import sys
 
 # Añadir el directorio raíz al path para permitir importaciones relativas
-sys.path.insert(0, str(Path(__file__).parent.parent))
+root_dir = Path(__file__).parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.append(str(root_dir))
 
 def extraer_metricas_archivo(archivo):
     """

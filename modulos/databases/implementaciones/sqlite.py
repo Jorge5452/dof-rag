@@ -420,12 +420,13 @@ class SQLiteVectorialDatabase(VectorialDatabase):
     
     def deserialize_vector(self, blob: bytes, dim: int = None) -> List[float]:
         """
-        Deserializa un blob binario a un vector de floats.
+        Deserializa un vector desde su formato bytes a una lista de flotantes.
         
         Args:
-            blob (bytes): Representación binaria del vector.
-            dim (int, optional): Dimensión del vector. Si es None, se usa self._embedding_dim.
-            
+            blob: Blob con el vector serializado
+            dim: Dimensiones del vector a deserializar. Si es None, se usa la
+                 dimensión configurada en la instancia.
+                 
         Returns:
             List[float]: Vector deserializado.
         """
@@ -734,3 +735,119 @@ class SQLiteVectorialDatabase(VectorialDatabase):
             return self._vector_search_manual(
                 query_embedding, filters, n_results, include_neighbors
             )
+
+    def insert_document_metadata(self, document: Dict[str, Any]) -> int:
+        """
+        Inserta solo los metadatos de un documento sin los chunks.
+        Diseñado para procesamiento en streaming donde los chunks se insertarán después.
+        
+        Args:
+            document: Diccionario con los datos del documento (title, url, file_path, etc.)
+            
+        Returns:
+            int: ID del documento insertado, None si falla
+        """
+        try:
+            # Insertar el documento
+            self._cursor.execute("""
+                INSERT INTO documents (title, url, file_path)
+                VALUES (?, ?, ?)
+            """, (
+                document.get('title', 'Sin título'),
+                document.get('url', f"local://{document.get('file_path', 'unknown')}"),
+                document.get('file_path', '')
+            ))
+            
+            # Obtener el ID del documento insertado
+            document_id = self._cursor.lastrowid
+            
+            if document_id is None:
+                # Si no se obtuvo un ID, buscar el último ID insertado
+                self._cursor.execute("SELECT last_insert_rowid()")
+                document_id = self._cursor.fetchone()[0]
+            
+            # Hacer commit de esta operación para asegurar que el documento existe
+            self._conn.commit()
+            
+            logger.debug(f"Documento (solo metadatos) insertado con ID: {document_id}")
+            return document_id
+            
+        except Exception as e:
+            logger.error(f"Error al insertar metadatos del documento: {e}")
+            self._conn.rollback()
+            return None
+    
+    def insert_single_chunk(self, document_id: int, chunk: Dict[str, Any]) -> int:
+        """
+        Inserta un único chunk asociado a un documento en la base de datos.
+        Diseñado para procesamiento streaming de documentos grandes.
+        
+        Args:
+            document_id (int): ID del documento al que pertenece el chunk
+            chunk (dict): Diccionario con los datos del chunk
+                Debe contener: 'text', 'header', 'page', 'embedding', 'embedding_dim'
+            
+        Returns:
+            int: ID del chunk insertado, None si falla
+        """
+        try:
+            # Verificar el estado de la extensión vectorial
+            vector_extension_enabled = self._extension_loaded and self._use_vector_extension
+            
+            # Convertir el embedding a bytes para almacenamiento eficiente
+            embedding = chunk.get('embedding')
+            embedding_bytes = None
+            
+            if embedding is not None:
+                if isinstance(embedding, list):
+                    embedding_bytes = self.serialize_vector(embedding)
+                elif isinstance(embedding, np.ndarray):
+                    embedding_bytes = self.serialize_vector(embedding.tolist())
+            
+            # Insertar el chunk en la tabla principal
+            self._cursor.execute("""
+                INSERT INTO chunks (document_id, text, header, page, embedding, embedding_dim)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                int(document_id),  # Asegurar que es un entero
+                chunk.get('text', ''),
+                chunk.get('header', None),
+                chunk.get('page', None),
+                embedding_bytes,
+                chunk.get('embedding_dim', self._embedding_dim)  # Usar la dimensión propuesta o la fija
+            ))
+            
+            # Obtener el ID del chunk insertado
+            chunk_id = self._cursor.lastrowid
+            
+            # Solo intentar actualizar el índice vectorial si todo está configurado
+            if vector_extension_enabled and chunk_id and embedding_bytes:
+                try:
+                    # Verificar si la tabla existe
+                    self._cursor.execute(f"""
+                        SELECT name FROM sqlite_master 
+                        WHERE type='table' AND name='{self._vector_table_name}';
+                    """)
+                    vector_table_exists = self._cursor.fetchone() is not None
+                    
+                    if vector_table_exists:
+                        # Usar la sintaxis exacta del ejemplo proporcionado
+                        self._cursor.execute(
+                            f"INSERT INTO {self._vector_table_name}(rowid, embedding) VALUES (?, ?)",
+                            (chunk_id, embedding_bytes)
+                        )
+                    else:
+                        # Si no existe, intentar crearla
+                        if self.create_vector_index():
+                            self._cursor.execute(
+                                f"INSERT INTO {self._vector_table_name}(rowid, embedding) VALUES (?, ?)",
+                                (chunk_id, embedding_bytes)
+                            )
+                except sqlite3.Error as e:
+                    logger.warning(f"Error al actualizar índice vectorial para chunk {chunk_id} (no crítico): {e}")
+            
+            return chunk_id
+            
+        except Exception as e:
+            logger.error(f"Error al insertar chunk individual: {e}")
+            return None
