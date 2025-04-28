@@ -2,9 +2,8 @@ import os
 from google import genai
 from google.genai import types
 import time
-from PIL import Image
 import threading
-from typing import Dict, Any, Optional, Union, List
+from typing import Dict, Any, Optional, Tuple
 
 from .AbstractClient import AbstractAIClient
 
@@ -29,6 +28,7 @@ class GeminiClient(AbstractAIClient):
         question (str): Prompt text to send with images
         api_key (str): Authentication key for Gemini API
         _client (genai.Client): Gemini client instance
+        use_streaming (bool): Whether to use streaming API for content generation
     """
     def __init__(self, 
                  model: str = "gemini-2.0-flash", 
@@ -37,7 +37,8 @@ class GeminiClient(AbstractAIClient):
                  top_p: float = 0.6,
                  top_k: int = 20,
                  response_mime_type: str = "text/plain",
-                 api_key: Optional[str] = None):
+                 api_key: Optional[str] = None,
+                 use_streaming: bool = False):
         """
         Initializes the Gemini client configuration.
 
@@ -50,6 +51,7 @@ class GeminiClient(AbstractAIClient):
             response_mime_type: MIME type for the response format.
             api_key: API key to access Gemini. If not provided,
                      it's taken from the 'GEMINI_API_KEY' environment variable.
+            use_streaming: Whether to use streaming API for content generation.
                      
         Raises:
             ValueError: If api_key is later found to be invalid during set_api_key.
@@ -61,6 +63,7 @@ class GeminiClient(AbstractAIClient):
         self.top_k = top_k
         self.response_mime_type = response_mime_type
         self.question = "¿Qué se observa en esta imagen?, respóndelo en español, por favor."
+        self.use_streaming = use_streaming
                 
         if api_key:
             self.set_api_key(api_key)
@@ -89,6 +92,38 @@ class GeminiClient(AbstractAIClient):
             raise ValueError("GEMINI_API_KEY environment variable not found. Please configure it.")
         self.api_key = api_key
         self._client = genai.Client(api_key=self.api_key)
+
+    def process_image_to_bytes(self, image_path: str) -> Tuple[bytes, str]:
+        """
+        Load an image and convert it to the format needed by Gemini API.
+        
+        Args:
+            image_path: Path of the image file to process.
+            
+        Returns:
+            Tuple[bytes, str]: Tuple containing (image_bytes, mime_type) for use with Part.from_bytes().
+            
+        Raises:
+            ValueError: If the image file cannot be processed.
+        """
+        # Verify the image exists and is readable
+        if not os.path.exists(image_path):
+            raise ValueError(f"Image file not found: {image_path}")
+        
+        try:
+            # Get the mime type based on file extension
+            _, ext = os.path.splitext(image_path)
+            mime_type = f"image/{ext[1:].lower()}"
+            if ext.lower() in ('.jpg', '.jpeg'):
+                mime_type = "image/jpeg"
+            
+            # Read the image file as bytes
+            with open(image_path, 'rb') as f:
+                image_bytes = f.read()
+                
+            return image_bytes, mime_type
+        except Exception as e:
+            raise ValueError(f"Error processing image: {str(e)}")
 
     def process_imagen(self, image_path: str, force_overwrite: bool = False) -> Dict[str, Any]:
         """
@@ -129,25 +164,38 @@ class GeminiClient(AbstractAIClient):
 
         start = time.time()
 
-        # Open the image
         try:
-            image = Image.open(image_path)
-        except Exception as e:
-            result["error"] = f"Error opening image: {str(e)}"
-            self.log_error(image_path)
-            return result
-
-        try:
+            # Process the image to get bytes and mime type
+            image_bytes, mime_type = self.process_image_to_bytes(image_path)
+            
+            # Prepare content parts
+            contents = [
+                # First part is the text prompt
+                types.Part.from_text(text=self.question),
+                # Second part is the image
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            ]
+            
+            description = ""
+            
             with api_lock:
-                response = self._client.models.generate_content(
-                    model=self.model,
-                    contents=[
-                        self.question,
-                        image
-                    ],
-                    config=self.get_generate_config()
-                )
-                description = response.text if hasattr(response, 'text') else str(response)
+                if self.use_streaming:
+                    # Use streaming API
+                    for chunk in self._client.models.generate_content_stream(
+                        model=self.model,
+                        contents=contents,
+                        config=self.get_generate_config()
+                    ):
+                        description += chunk.text
+                else:
+                    # Use non-streaming API
+                    response = self._client.models.generate_content(
+                        model=self.model,
+                        contents=contents,
+                        config=self.get_generate_config()
+                    )
+                    description = response.text if hasattr(response, 'text') else str(response)
+                    
             process_time = time.time() - start
             result["description"] = description
             result["process_time"] = process_time
@@ -278,7 +326,8 @@ class GeminiClient(AbstractAIClient):
                      temperature: Optional[float] = None, 
                      top_p: Optional[float] = None, 
                      top_k: Optional[int] = None, 
-                     response_mime_type: Optional[str] = None) -> 'GeminiClient':
+                     response_mime_type: Optional[str] = None,
+                     use_streaming: Optional[bool] = None) -> 'GeminiClient':
         """
         Allows updating the client configuration parameters.
 
@@ -289,6 +338,7 @@ class GeminiClient(AbstractAIClient):
             top_p: New top_p value for nucleus sampling.
             top_k: New top_k value for vocabulary restriction.
             response_mime_type: New MIME type for the response format.
+            use_streaming: Whether to use streaming API for content generation.
 
         Returns:
             The current instance to allow method chaining.
@@ -305,5 +355,7 @@ class GeminiClient(AbstractAIClient):
             self.top_k = top_k
         if response_mime_type is not None:
             self.response_mime_type = response_mime_type
+        if use_streaming is not None:
+            self.use_streaming = use_streaming
             
         return self
