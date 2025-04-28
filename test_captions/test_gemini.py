@@ -1,8 +1,8 @@
 # /// script
 # dependencies = [
 #   "python-dotenv>=0.9.9",
-#   "google>=0.3.0",
-#   "google-genai>=1.3.0",
+#    "google>=3.0.0",
+#    "google-genai>=1.12.1",
 #   "pillow"
 # ]
 # ///
@@ -25,6 +25,9 @@ load_dotenv()
 
 # Create a global lock to synchronize API access
 api_lock = threading.Lock()
+
+# Define supported image formats
+SUPPORTED_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tiff')
 
 
 class GeminiConfig:
@@ -76,7 +79,7 @@ class GeminiConfig:
 
         # Use the full model name, replacing problematic characters for filenames
         model_name = self.model.replace(".", "-").replace(":", "_")
-        return f"./tests/results/{model_name}_tokens_{self.max_tokens}.txt"
+        return f"./test_captions/results/{model_name}_tokens_{self.max_tokens}.txt"
 
 
 # Variable for results file
@@ -117,6 +120,31 @@ def initialize_gemini_client():
     return GEMINI_CONFIG.get_client()
 
 
+def process_image(image_path):
+    """
+    Load an image and convert it to the format needed by Gemini API.
+    Returns the image bytes and mime type for use with Part.from_bytes().
+    """
+    # Verify the image exists and is readable
+    if not os.path.exists(image_path):
+        raise ValueError(f"Image file not found: {image_path}")
+    
+    try:
+        # Get the mime type based on file extension
+        _, ext = os.path.splitext(image_path)
+        mime_type = f"image/{ext[1:].lower()}"
+        if ext.lower() in ('.jpg', '.jpeg'):
+            mime_type = "image/jpeg"
+        
+        # Read the image file as bytes
+        with open(image_path, 'rb') as f:
+            image_bytes = f.read()
+            
+        return image_bytes, mime_type
+    except Exception as e:
+        raise ValueError(f"Error processing image: {str(e)}")
+
+
 def process_image_with_gemini(client, image_path, question, stream=False):
     """
     Processes a single image using Gemini.
@@ -129,29 +157,34 @@ def process_image_with_gemini(client, image_path, question, stream=False):
     start = time.time()
 
     try:
-        image = Image.open(image_path)
+        # Process the image to get bytes and mime type
+        image_bytes, mime_type = process_image(image_path)
     except Exception as e:
-        result["error"] = f"Error opening image: {str(e)}"
+        result["error"] = f"Error processing image: {str(e)}"
         return result
 
     try:
         with api_lock:
             # Generate image description
             caption_start = time.time()
+            
+            description_prompt = """Describe detalladamente la imagen en español, priorizando la información clave:  
+                - **Texto:** Si contiene texto (como en diagramas, infografías o documentos oficiales), transcribe el contenido principal.  
+                - **Mapas:** Menciona lugares, nombres geográficos y símbolos relevantes.  
+                - **Esquemas o diagramas:** Explica las relaciones o procesos principales.  
+                - **Logos:** Describe el diseño, colores y, si es reconocible, a qué entidad pertenece.  
+                - **Datos visuales:** Si hay gráficos o estadísticas, resume los valores más importantes.  
+                Sé claro y preciso, priorizando la información más relevante."""
+
+            contents = [
+                types.Part.from_text(text=description_prompt),
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            ]
 
             if not stream:
                 caption_response = client.models.generate_content(
                     model=GEMINI_CONFIG.model,
-                    contents=[
-                        """Describe detalladamente la imagen en español, priorizando la información clave:  
-                            - **Texto:** Si contiene texto (como en diagramas, infografías o documentos oficiales), transcribe el contenido principal.  
-                            - **Mapas:** Menciona lugares, nombres geográficos y símbolos relevantes.  
-                            - **Esquemas o diagramas:** Explica las relaciones o procesos principales.  
-                            - **Logos:** Describe el diseño, colores y, si es reconocible, a qué entidad pertenece.  
-                            - **Datos visuales:** Si hay gráficos o estadísticas, resume los valores más importantes.  
-                            Sé claro y preciso, priorizando la información más relevante.""",
-                        image,
-                    ],
+                    contents=contents,
                     config=GEMINI_CONFIG.get_generate_config(),
                 )
                 caption = (
@@ -164,16 +197,7 @@ def process_image_with_gemini(client, image_path, question, stream=False):
                 caption = ""
                 for chunk in client.models.generate_content_stream(
                     model=GEMINI_CONFIG.model,
-                    contents=[
-                        """Describe detalladamente la imagen en español, priorizando la información clave:  
-            -               - **Texto:** Si contiene texto (como en diagramas, infografías o documentos oficiales), transcribe el contenido principal.  
-                            - **Mapas:** Menciona lugares, nombres geográficos y símbolos relevantes.  
-                            - **Esquemas o diagramas:** Explica las relaciones o procesos principales.  
-                            - **Logos:** Describe el diseño, colores y, si es reconocible, a qué entidad pertenece.  
-                            - **Datos visuales:** Si hay gráficos o estadísticas, resume los valores más importantes.  
-                            Sé claro y preciso, priorizando la información más relevante.""",
-                        image,
-                    ],
+                    contents=contents,
                     config=GEMINI_CONFIG.get_generate_config(),
                 ):
                     caption += chunk.text if hasattr(chunk, "text") else ""
@@ -183,15 +207,18 @@ def process_image_with_gemini(client, image_path, question, stream=False):
 
             # Answer question about the image
             query_start = time.time()
+            
+            question_prompt = question + " Sé muy breve y conciso. Responde COMPLETAMENTE en español. Máximo 100 palabras."
+            
+            question_contents = [
+                types.Part.from_text(text=question_prompt),
+                types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
+            ]
 
             if not stream:
                 answer_response = client.models.generate_content(
                     model=GEMINI_CONFIG.model,
-                    contents=[
-                        question
-                        + " Sé muy breve y conciso. Responde COMPLETAMENTE en español. Máximo 100 palabras.",
-                        image,
-                    ],
+                    contents=question_contents,
                     config=GEMINI_CONFIG.get_generate_config(),
                 )
                 answer = (
@@ -204,11 +231,7 @@ def process_image_with_gemini(client, image_path, question, stream=False):
                 answer = ""
                 for chunk in client.models.generate_content_stream(
                     model=GEMINI_CONFIG.model,
-                    contents=[
-                        question
-                        + " Sé muy breve y conciso. Responde COMPLETAMENTE en español. Máximo 100 palabras.",
-                        image,
-                    ],
+                    contents=question_contents,
                     config=GEMINI_CONFIG.get_generate_config(),
                 ):
                     answer += chunk.text if hasattr(chunk, "text") else ""
@@ -241,10 +264,12 @@ def process_text_with_gemini(client, prompt, stream=False):
 
     try:
         with api_lock:
+            contents = [types.Part.from_text(text=prompt)]
+            
             if not stream:
                 response = client.models.generate_content(
                     model=GEMINI_CONFIG.model,
-                    contents=prompt,
+                    contents=contents,
                     config=GEMINI_CONFIG.get_generate_config(),
                 )
                 text_response = (
@@ -255,7 +280,7 @@ def process_text_with_gemini(client, prompt, stream=False):
                 text_response = ""
                 for chunk in client.models.generate_content_stream(
                     model=GEMINI_CONFIG.model,
-                    contents=prompt,
+                    contents=contents,
                     config=GEMINI_CONFIG.get_generate_config(),
                 ):
                     text_response += chunk.text if hasattr(chunk, "text") else ""
@@ -378,6 +403,26 @@ def save_final_summary(results, log_file=None):
         f.write(separator)
 
 
+def find_images(directory):
+    """Find all supported image files in the given directory."""
+    if not os.path.exists(directory):
+        raise ValueError(f"Directory not found: {directory}")
+    
+    if not os.path.isdir(directory):
+        raise ValueError(f"Path is not a directory: {directory}")
+    
+    # Find all files with supported extensions
+    image_files = []
+    for ext in SUPPORTED_EXTENSIONS:
+        image_files.extend(glob.glob(os.path.join(directory, f'*{ext}')))
+        image_files.extend(glob.glob(os.path.join(directory, f'*{ext.upper()}')))
+    
+    # Sort images by name for consistent ordering
+    image_files.sort()
+    
+    return image_files
+
+
 def process_images_with_threads(
     image_files, question, max_workers=None, use_streaming=False
 ):
@@ -446,6 +491,36 @@ def process_images_with_threads(
     return results
 
 
+def process_directory(directory, question, use_streaming=False, save_results=True):
+    """Process all images in a directory and generate descriptions."""
+    try:
+        # Find all images in the directory
+        image_files = find_images(directory)
+        
+        if not image_files:
+            print(f"No supported image files found in {directory}")
+            print(f"Supported formats: {', '.join(SUPPORTED_EXTENSIONS)}")
+            return
+        
+        print(f"Found {len(image_files)} images in {directory}")
+        print(f"Using question: '{question}'")
+        print("=" * 80)
+        
+        # Process images with our existing parallel processing function
+        results = process_images_with_threads(
+            image_files, question, use_streaming=use_streaming
+        )
+        
+        if "error" in results:
+            print(f"Error: {results['error']}")
+        else:
+            print(f"Processing completed in {results.get('total_time', 0):.2f} s")
+            print(f"Summary saved in: {GEMINI_CONFIG.get_output_filename()}")
+        
+    except Exception as e:
+        print(f"Error: {str(e)}")
+
+
 if __name__ == "__main__":
     # Command line arguments configuration
     parser = argparse.ArgumentParser(description="Process images with Gemini API")
@@ -473,6 +548,11 @@ if __name__ == "__main__":
         default="¿Qué se observa en esta imagen?",
         help="Question to ask about each image",
     )
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Don't save individual descriptions to text files",
+    )
 
     args = parser.parse_args()
 
@@ -482,18 +562,8 @@ if __name__ == "__main__":
     MAX_TOKENS = GEMINI_CONFIG.max_tokens
     output_file = GEMINI_CONFIG.get_output_filename()
 
-    # Directory with test images
-    image_directory = args.dir
-    image_files = glob.glob(os.path.join(image_directory, "*.*"))
-    valid_extensions = (".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tiff")
-    image_files = [img for img in image_files if img.lower().endswith(valid_extensions)]
-
-    if not image_files:
-        print("No images found in directory:", image_directory)
-        exit(1)
-
-    # Question in Spanish (Gemini is multilingual, so we don't need translation)
-    question = args.question
+    # Ensure output directory exists
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
 
     # Clear the results file at the beginning
     with open(output_file, "w", encoding="utf-8") as f:
@@ -507,12 +577,13 @@ if __name__ == "__main__":
     )
     print(f"Streaming mode: {'Enabled' if args.streaming else 'Disabled'}")
     print(f"Results file: {output_file}")
-    results = process_images_with_threads(
-        image_files, question, use_streaming=args.streaming
+    
+    # Process the directory with our new function
+    process_directory(
+        args.dir, 
+        args.question, 
+        use_streaming=args.streaming, 
+        save_results=not args.no_save
     )
-    if "error" in results:
-        print(f"Error: {results['error']}")
-    else:
-        print(f"Processing completed in {results.get('total_time', 0):.2f} s")
-        print(f"Summary saved in: {output_file}")
+    
     print("=" * 80 + "\n")
