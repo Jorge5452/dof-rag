@@ -32,6 +32,11 @@ class ChunkExporter:
         """
         self.db = db_instance
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        # Directorio base para exportaciones si no se especifica uno
+        self.output_base_dir = "exported_chunks"
+        # Opciones de formato
+        self.include_separators = True
+        self.include_chunk_number = True
     
     def export_document_chunks(self, document_path: str, output_path: Optional[str] = None) -> bool:
         """
@@ -272,6 +277,84 @@ class ChunkExporter:
         except Exception as e:
             self.logger.error(f"Error al exportar todos los chunks: {e}")
             return {}
+
+    def export_chunk(self, chunk, filename_prefix, metadata=None):
+        """
+        Exporta un único chunk a un archivo de texto.
+        
+        Args:
+            chunk: El chunk a exportar
+            filename_prefix: Prefijo para el nombre del archivo
+            metadata: Metadatos adicionales opcionales
+            
+        Returns:
+            Ruta al archivo generado
+        """
+        try:
+            # Asegurar que el directorio existe
+            os.makedirs(self.output_base_dir, exist_ok=True)
+            
+            # Crear nombre de archivo
+            filename = os.path.join(self.output_base_dir, f"{filename_prefix}_{chunk.id if hasattr(chunk, 'id') else 'unnamed'}.txt")
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                # Escribir metadatos si existen
+                if metadata:
+                    f.write("================ METADATOS ================\n")
+                    for key, value in metadata.items():
+                        f.write(f"{key}: {value}\n")
+                    f.write("\n")
+                
+                # Escribir separador superior si está habilitado
+                if self.include_separators:
+                    f.write("="*40 + "\n")
+                
+                # Escribir número de chunk si está habilitado
+                if self.include_chunk_number:
+                    f.write(f"Chunk #{getattr(chunk, 'id', 1)}\n\n")
+                
+                # Escribir encabezado si existe
+                if hasattr(chunk, 'header') and chunk.header:
+                    f.write(f"Encabezado: {chunk.header}\n\n")
+                
+                # Escribir texto del chunk
+                f.write(chunk.text)
+                
+                # Escribir separador inferior si está habilitado
+                if self.include_separators:
+                    f.write("\n" + "="*40)
+            
+            self.logger.info(f"Chunk exportado a: {filename}")
+            return filename
+            
+        except Exception as e:
+            self.logger.error(f"Error al exportar chunk: {e}")
+            return None
+    
+    def export_chunks(self, chunks, base_filename, metadata=None):
+        """
+        Exporta múltiples chunks a archivos de texto.
+        
+        Args:
+            chunks: Lista de chunks a exportar
+            base_filename: Nombre base para los archivos
+            metadata: Metadatos adicionales opcionales
+            
+        Returns:
+            Lista de rutas a los archivos generados
+        """
+        filenames = []
+        
+        for i, chunk in enumerate(chunks):
+            filename = self.export_chunk(
+                chunk, 
+                f"{base_filename}_{i+1}",
+                metadata
+            )
+            if filename:
+                filenames.append(filename)
+        
+        return filenames
 
 
 def export_chunks_for_files(file_paths: str, db_instance) -> Dict[str, bool]:
