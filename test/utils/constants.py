@@ -9,15 +9,15 @@ PROJECT_ROOT = TEST_DIR.parent
 RESULTS_DIR = TEST_DIR / "results"
 
 # Subdirectorios de resultados estandarizados
-DATABASE_RESULTS_DIR = RESULTS_DIR / "database_tests"
-CHUNKER_RESULTS_DIR = RESULTS_DIR / "chunker_tests"
-CLIENT_RESULTS_DIR = RESULTS_DIR / "client_tests"
-EMBEDDING_RESULTS_DIR = RESULTS_DIR / "embedding_tests"
-INTEGRATION_RESULTS_DIR = RESULTS_DIR / "integration_tests"
-DOC_PROCESSOR_RESULTS_DIR = RESULTS_DIR / "doc_processor_tests"
-RAG_RESULTS_DIR = RESULTS_DIR / "rag_tests"
-SESSION_MANAGER_RESULTS_DIR = RESULTS_DIR / "session_manager_tests"
-VIEW_CHUNKS_RESULTS_DIR = RESULTS_DIR / "view_chunks_tests"
+DATABASE_RESULTS_DIR = RESULTS_DIR / "databases"
+CHUNKER_RESULTS_DIR = RESULTS_DIR / "chunkers"
+CLIENT_RESULTS_DIR = RESULTS_DIR / "clients"
+EMBEDDING_RESULTS_DIR = RESULTS_DIR / "embeddings"
+INTEGRATION_RESULTS_DIR = RESULTS_DIR / "integration"
+DOC_PROCESSOR_RESULTS_DIR = RESULTS_DIR / "doc_processor"
+RAG_RESULTS_DIR = RESULTS_DIR / "rag"
+SESSION_MANAGER_RESULTS_DIR = RESULTS_DIR / "session_manager"
+VIEW_CHUNKS_RESULTS_DIR = RESULTS_DIR / "view_chunks"
 ANALYSIS_DIR = RESULTS_DIR / "analysis"
 
 # Patrones de descubrimiento de pruebas

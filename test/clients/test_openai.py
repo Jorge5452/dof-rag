@@ -13,7 +13,7 @@ from unittest.mock import patch, MagicMock, Mock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from modulos.clientes.implementaciones.openai import OpenAIClient
-from modulos.chunks.interfaces import Chunk
+from test.utils.test_chunks import TestChunk
 
 class TestOpenAIClient(unittest.TestCase):
     """Pruebas para el cliente de OpenAI"""
@@ -49,11 +49,14 @@ class TestOpenAIClient(unittest.TestCase):
         
         # Preparar chunks de prueba
         self.chunks = [
-            Chunk(text="Información sobre RAG: Retrieval Augmented Generation", 
+            TestChunk(text="Información sobre RAG: Retrieval Augmented Generation", 
                  header="Introducción a RAG"),
-            Chunk(text="RAG combina búsqueda de información con generación de texto.", 
+            TestChunk(text="RAG combina búsqueda de información con generación de texto.", 
                  header="Funcionamiento")
         ]
+        
+        # Convertir chunks a diccionarios para los tests
+        self.chunks_dict = [chunk.to_dict() for chunk in self.chunks]
     
     def test_initialization(self):
         """Probar la inicialización del cliente"""
@@ -69,7 +72,7 @@ class TestOpenAIClient(unittest.TestCase):
     def test_generate_response(self):
         """Probar la generación de respuestas"""
         # Generar una respuesta
-        response = self.client.generate_response("¿Qué es RAG?", self.chunks)
+        response = self.client.generate_response("¿Qué es RAG?", self.chunks_dict)
         
         # Verificar el resultado
         self.assertEqual(response, "Esta es una respuesta de prueba de OpenAI.")
@@ -111,7 +114,7 @@ class TestOpenAIClient(unittest.TestCase):
         self.client.retry_backoff = 1
         
         # Generar respuesta (debería reintentar)
-        response = self.client.generate_response("¿Qué es RAG?", self.chunks)
+        response = self.client.generate_response("¿Qué es RAG?", self.chunks_dict)
         
         # Verificar el resultado
         self.assertEqual(response, "Respuesta después de reintento")
@@ -150,7 +153,7 @@ class TestOpenAIClient(unittest.TestCase):
         self.assertTrue(self.client.stream)
         
         # Generar respuesta en modo streaming
-        response = self.client.generate_response("¿Qué es RAG?", self.chunks)
+        response = self.client.generate_response("¿Qué es RAG?", self.chunks_dict)
         
         # Verificar el resultado combinado
         self.assertEqual(response, "Parte 1 de la respuesta.")

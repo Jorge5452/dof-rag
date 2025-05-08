@@ -12,20 +12,29 @@ import textwrap
 import sys
 import yaml
 
-# Añadir el directorio raíz al path para permitir importaciones relativas
-root_dir = Path(__file__).parent.parent.parent
-if str(root_dir) not in sys.path:
-    sys.path.append(str(root_dir))
-
-from config import config
-from modulos.chunks.ChunkerFactory import ChunkerFactory
-
 # Configurar logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Añadir el directorio raíz al path para permitir importaciones relativas
+sys.path.insert(0, str(Path(__file__).parents[2]))
+
+# Importar módulos de utilidades y constantes
+from test.utils.constants import CHUNKER_RESULTS_DIR
+from test.utils.environment import ensure_dir_exists, get_test_result_path
+
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    logger.warning("sentence_transformers no está instalado. Los embeddings no estarán disponibles.")
+    SentenceTransformer = None
+
+# Importar módulos después de configurar path
+from config import config as app_config
+from modulos.chunks.factory import ChunkerFactory
 
 def find_markdown_files(base_dir: str) -> List[Path]:
     """
@@ -63,11 +72,11 @@ def load_embedding_model(model_name: Optional[str] = None) -> SentenceTransforme
         Modelo de embedding inicializado
     """
     # Obtener la configuración de embeddings
-    embedding_config = config.get_embedding_config()
+    embedding_config = app_config.get_embedding_config()
     selected_model = model_name or embedding_config.get("model", "cde-small")
     
     # Obtener la configuración específica del modelo
-    model_config = config.get_specific_model_config(selected_model)
+    model_config = app_config.get_specific_model_config(selected_model)
     model_name = model_config.get("model_name")
     
     if not model_name:
@@ -90,7 +99,7 @@ def get_chunker_config(chunker_type: str) -> Dict[str, Any]:
     Returns:
         Diccionario con la configuración específica del chunker
     """
-    chunks_config = config.get_chunks_config()
+    chunks_config = app_config.get_chunks_config()
     specific_config = chunks_config.get(chunker_type, {})
     
     # Añadir la configuración general relevante
@@ -347,10 +356,14 @@ def main():
                       help="Lista separada por comas de los chunkers a utilizar")
     parser.add_argument("--model", type=str, 
                       help="Nombre del modelo de embedding a utilizar (opcional)")
-    parser.add_argument("--results-dir", type=str, default="test/results/chunker_tests",
+    parser.add_argument("--results-dir", type=str, default=None,
                       help="Directorio donde guardar los resultados de las pruebas")
     
     args = parser.parse_args()
+    
+    # Usar la ruta estandarizada para los resultados si no se especifica otra
+    results_dir = args.results_dir if args.results_dir else CHUNKER_RESULTS_DIR
+    results_dir = ensure_dir_exists(results_dir)
     
     # Crear lista de chunkers a probar
     chunker_types = [c.strip() for c in args.chunkers.split(",")]
@@ -358,7 +371,7 @@ def main():
     # Si se especificó un archivo, procesar ese archivo
     if args.file:
         logger.info(f"Procesando archivo específico: {args.file}")
-        run_multiple_chunkers(args.file, chunker_types, args.model, args.results_dir)
+        run_multiple_chunkers(args.file, chunker_types, args.model, results_dir)
     else:
         # Si se especificó un directorio, buscar todos los archivos Markdown
         logger.info(f"Buscando archivos Markdown en: {args.dir}")
@@ -367,7 +380,7 @@ def main():
         # Procesar cada archivo encontrado
         for file_path in md_files:
             logger.info(f"Procesando archivo: {file_path}")
-            run_multiple_chunkers(str(file_path), chunker_types, args.model, args.results_dir)
+            run_multiple_chunkers(str(file_path), chunker_types, args.model, results_dir)
     
     logger.info("Pruebas de chunking completadas")
 

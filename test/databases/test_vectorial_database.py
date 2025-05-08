@@ -7,15 +7,21 @@ import tempfile
 import shutil
 import logging
 import traceback
+import json
 
-# Añadir el directorio raíz al path para permitir importaciones relativas
+# Configuración de logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Añadir directorio raíz al path
 sys.path.insert(0, str(Path(__file__).parents[2]))
+
+# Importar las constantes y utilidades
+from test.utils.constants import DATABASE_RESULTS_DIR
+from test.utils.environment import ensure_dir_exists, get_test_result_path
 
 from modulos.databases.VectorialDatabase import VectorialDatabase
 from test.databases.utils import generate_random_embedding
-
-# Configurar logging para tests
-logger = logging.getLogger(__name__)
 
 class BaseVectorialDatabaseTest:
     """
@@ -28,9 +34,8 @@ class BaseVectorialDatabaseTest:
     @classmethod
     def setUpClass(cls):
         """Configuración antes de todas las pruebas"""
-        # Generar directorio para resultados
-        cls.results_dir = Path(__file__).parents[1] / "resultados_db_tests"
-        os.makedirs(cls.results_dir, exist_ok=True)
+        # Generar directorio para resultados usando la ruta estándar
+        cls.results_dir = ensure_dir_exists(DATABASE_RESULTS_DIR)
         
         # Dimensión de embedding para pruebas (usar un valor pequeño por eficiencia)
         cls.test_embedding_dim = 10
@@ -104,6 +109,7 @@ class BaseVectorialDatabaseTest:
             success (bool): Si la prueba fue exitosa
         """
         try:
+            # Usar la ruta estandarizada para los archivos de resultados
             log_file = self.results_dir / f"{self.db_instance.__class__.__name__}_test_results.log"
             
             status = "ÉXITO" if success else "FALLO"

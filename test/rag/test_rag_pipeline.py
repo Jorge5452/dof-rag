@@ -13,8 +13,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../.
 
 # Imports del módulo RAG
 from modulos.rag.pipeline import RAGPipeline
-from modulos.chunks.interfaces import Chunk
 from modulos.doc_processor.markdown_processor import Document
+from test.utils.test_chunks import TestChunk
 
 class TestRAGPipeline(unittest.TestCase):
     """Pruebas para el pipeline de RAG"""
@@ -35,7 +35,7 @@ class TestRAGPipeline(unittest.TestCase):
         
         mock_chunker_factory.get_chunker.return_value = self.mock_chunker
         mock_embedding_factory.get_embedding_manager.return_value = self.mock_embedding_manager
-        mock_db_factory.get_database.return_value = self.mock_db
+        mock_db_factory.get_database_instance.return_value = self.mock_db
         mock_client_factory.get_client.return_value = self.mock_client
         
         # Configurar dimensiones del embedding
@@ -57,7 +57,7 @@ class TestRAGPipeline(unittest.TestCase):
         
         # Configurar chunks de muestra
         self.test_chunks = [
-            Chunk(text="Este es un documento para pruebas de RAG.", 
+            TestChunk(text="Este es un documento para pruebas de RAG.", 
                  header="Documento de Prueba")
         ]
         

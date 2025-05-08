@@ -8,47 +8,66 @@ import traceback
 from pathlib import Path
 import json
 
-# Añadir el directorio raíz al path para permitir importaciones relativas
-sys.path.insert(0, str(Path(__file__).parents[2]))
-
-from modulos.databases.FactoryDatabase import DatabaseFactory
-from test.databases.mocks import MockSQLiteVectorialDatabase
-try:
-    from modulos.databases.implementaciones.duckdb import DuckDBVectorialDatabase
-    DUCKDB_AVAILABLE = True
-except ImportError:
-    DUCKDB_AVAILABLE = False
-
+# Configuración de logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Mock para config para solucionar el error 'Config' object has no attribute 'get'
+# Añadir directorio raíz al path
+sys.path.insert(0, str(Path(__file__).parents[2]))
+
+# Importar constantes y utilidades
+from test.utils.constants import DATABASE_RESULTS_DIR
+from test.utils.environment import ensure_dir_exists, get_test_result_path
+
+# Intentar importar DuckDB (puede no estar instalado)
+try:
+    import duckdb
+    DUCKDB_AVAILABLE = True
+except ImportError:
+    logger.warning("DuckDB no está instalado. Las pruebas relacionadas se omitirán.")
+    DUCKDB_AVAILABLE = False
+
+# Mock de la clase de configuración para pruebas
 class MockConfig:
+    """Mock de la clase de configuración para pruebas"""
+    
     def __init__(self, config_data=None):
-        self.config_data = config_data or {"database": {"type": "sqlite"}}
+        self.data = config_data or {"database": {"type": "sqlite"}}
     
     def get(self, section, default=None):
-        if section in self.config_data:
-            return self.config_data[section]
-        return default
+        """Obtiene un valor de la configuración"""
+        return self.data.get(section, default)
+        
+    def get_database_config(self):
+        """Obtiene la configuración de la base de datos."""
+        return self.data.get("database", {"type": "sqlite"})
 
-# Reemplazar la importación de config con nuestro mock
+# Mock de modulo de configuración
 sys.modules['config'] = type('MockConfigModule', (), {'config': MockConfig()})
+
+# Importar lo que necesitamos después de configurar el mock
+from modulos.databases.FactoryDatabase import DatabaseFactory
+from modulos.databases.implementaciones.sqlite import SQLiteVectorialDatabase
+from test.databases.mocks import MockSQLiteVectorialDatabase
+
+# Si DuckDB está disponible, importar su clase
+if DUCKDB_AVAILABLE:
+    from modulos.databases.implementaciones.duckdb import DuckDBVectorialDatabase
 
 class DatabaseFactoryTest(unittest.TestCase):
     """
-    Pruebas para el Factory de bases de datos vectoriales.
+    Pruebas para la factoría de bases de datos vectoriales.
     """
     
     @classmethod
     def setUpClass(cls):
-        """Preparación para todos los tests"""
+        """Configuración antes de todas las pruebas"""
         # Crear directorio temporal para bases de datos de prueba
         cls.test_dir = tempfile.mkdtemp()
         logger.info(f"Directorio temporal para pruebas de Factory: {cls.test_dir}")
         
-        # Crear directorio para resultados
-        cls.results_dir = Path(__file__).parents[1] / "resultados_db_tests"
-        os.makedirs(cls.results_dir, exist_ok=True)
+        # Crear directorio para resultados utilizando la ruta estandarizada
+        cls.results_dir = ensure_dir_exists(DATABASE_RESULTS_DIR)
         
         # Verificar disponibilidad de DuckDB (ya importado al inicio)
         cls.duckdb_available = DUCKDB_AVAILABLE
@@ -200,6 +219,7 @@ class DatabaseFactoryTest(unittest.TestCase):
             success: Indica si la prueba fue exitosa
         """
         try:
+            # Usar la ruta estandarizada para los archivos de resultados
             log_file = self.results_dir / "database_factory_test_results.log"
             
             status = "ÉXITO" if success else "FALLO"

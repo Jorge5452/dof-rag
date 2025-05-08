@@ -174,15 +174,36 @@ class SQLiteDatabaseTest(BaseVectorialDatabaseTest, unittest.TestCase):
             test_db_name = "test_sqlite_extension"
             test_db_path = os.path.join(self.test_dir, test_db_name)
             
-            # Obtener instancia a través del factory
-            db_factory = DatabaseFactory()
-            db_instance = db_factory._get_db_path("sqlite", test_db_name)
+            # Mock the _load_config method of DatabaseFactory
+            original_load_config = DatabaseFactory._load_config
             
-            # Verificar que la ruta termina con .sqlite
-            self.assertTrue(db_instance.endswith('.sqlite'), 
-                           f"El Factory debería crear rutas con extensión .sqlite, pero creó {db_instance}")
+            @classmethod
+            def mock_load_config(cls):
+                return {
+                    "type": "sqlite",
+                    "sqlite": {
+                        "db_dir": self.test_dir,
+                        "db_name": "",
+                        "similarity_threshold": 0.3
+                    }
+                }
             
-            self.log_test_result("Extensión de archivo SQLite (.sqlite) verificada correctamente", True)
+            # Apply the mock method
+            DatabaseFactory._load_config = mock_load_config
+            
+            try:
+                # Obtener instancia a través del factory
+                db_factory = DatabaseFactory()
+                db_instance = db_factory._get_db_path("sqlite", test_db_name)
+                
+                # Verificar que la ruta termina con .sqlite
+                self.assertTrue(db_instance.endswith('.sqlite'), 
+                               f"El Factory debería crear rutas con extensión .sqlite, pero creó {db_instance}")
+                
+                self.log_test_result("Extensión de archivo SQLite (.sqlite) verificada correctamente", True)
+            finally:
+                # Restore the original method
+                DatabaseFactory._load_config = original_load_config
         except Exception as e:
             self.log_test_result(f"Error al verificar extensión de archivo: {e}", False)
             raise

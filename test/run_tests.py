@@ -33,6 +33,12 @@ from test.utils.reporting import run_tests_with_reporting
 from test.utils.discovery import (
     discover_tests, get_test_suite_by_type, list_available_tests
 )
+from test.utils.constants import (
+    RESULTS_DIR, ANALYSIS_DIR, DATABASE_RESULTS_DIR, CHUNKER_RESULTS_DIR,
+    CLIENT_RESULTS_DIR, EMBEDDING_RESULTS_DIR, INTEGRATION_RESULTS_DIR,
+    DOC_PROCESSOR_RESULTS_DIR, RAG_RESULTS_DIR, SESSION_MANAGER_RESULTS_DIR,
+    VIEW_CHUNKS_RESULTS_DIR
+)
 
 def run_database_tests(args):
     """
@@ -335,9 +341,9 @@ def main():
                       default="all", help="Componente de embeddings a probar")
     
     # Argumentos para resultados
-    parser.add_argument("--results-dir", type=str, default="test/results",
+    parser.add_argument("--results-dir", type=str, default=str(RESULTS_DIR),
                       help="Directorio base donde guardar los resultados de las pruebas")
-    parser.add_argument("--analysis-dir", type=str, default="test/results/analysis",
+    parser.add_argument("--analysis-dir", type=str, default=str(ANALYSIS_DIR),
                       help="Directorio donde guardar los análisis")
     
     # Argumento para pruebas específicas

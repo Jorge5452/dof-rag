@@ -15,7 +15,7 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from modulos.session_manager.session_manager import SessionManager
-from modulos.chunks.interfaces import Chunk
+from test.utils.test_chunks import TestChunk
 
 class TestSessionManager(unittest.TestCase):
     """Pruebas para el gestor de sesiones"""
@@ -48,11 +48,14 @@ class TestSessionManager(unittest.TestCase):
         
         # Crear chunks de ejemplo para el contexto
         self.sample_chunks = [
-            Chunk(text="RAG combina la recuperación de información con generación.", 
+            TestChunk(text="RAG combina la recuperación de información con generación.", 
                  header="Definición de RAG"),
-            Chunk(text="Los chunkers dividen documentos en fragmentos semánticos.", 
+            TestChunk(text="Los chunkers dividen documentos en fragmentos semánticos.", 
                  header="Chunking")
         ]
+        
+        # Convertir chunks a diccionarios para los tests si es necesario
+        self.sample_chunks_dict = [chunk.to_dict() for chunk in self.sample_chunks]
     
     def tearDown(self):
         """Limpieza después de las pruebas"""
@@ -89,7 +92,7 @@ class TestSessionManager(unittest.TestCase):
             session_id, 
             self.sample_queries[0], 
             self.sample_responses[0], 
-            self.sample_chunks
+            self.sample_chunks_dict
         )
         
         # Verificar que la interacción se añadió

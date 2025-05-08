@@ -14,7 +14,7 @@ from unittest.mock import patch, MagicMock
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
 
 from modulos.view_chunks.chunk_exporter import ChunkExporter
-from modulos.chunks.interfaces import Chunk
+from test.utils.test_chunks import TestChunk
 
 class TestChunkExporter(unittest.TestCase):
     """Pruebas para el exportador de chunks"""
@@ -25,15 +25,22 @@ class TestChunkExporter(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.output_dir = Path(self.temp_dir.name)
         
-        # Inicializar el exportador
-        self.exporter = ChunkExporter(output_dir=str(self.output_dir))
+        # Crear un mock de la base de datos
+        mock_db = MagicMock()
+        mock_db._cursor = MagicMock()
+        
+        # Inicializar el exportador con el mock de la base de datos
+        self.exporter = ChunkExporter(db_instance=mock_db)
+        
+        # Configurar salida personalizada para los tests
+        self.exporter.output_base_dir = str(self.output_dir)
         
         # Crear chunks de prueba
         self.chunks = [
-            Chunk(text="Este es el primer chunk de prueba.", header="Sección 1"),
-            Chunk(text="Este es el segundo chunk de prueba.", header="Sección 1"),
-            Chunk(text="Este es el tercer chunk de prueba.", header="Sección 2"),
-            Chunk(text="Este es el cuarto chunk de prueba sin encabezado."),
+            TestChunk(text="Este es el primer chunk de prueba.", header="Sección 1"),
+            TestChunk(text="Este es el segundo chunk de prueba.", header="Sección 1"),
+            TestChunk(text="Este es el tercer chunk de prueba.", header="Sección 2"),
+            TestChunk(text="Este es el cuarto chunk de prueba sin encabezado."),
         ]
     
     def tearDown(self):
@@ -118,8 +125,13 @@ class TestChunkExporter(unittest.TestCase):
         subdir = self.output_dir / "custom_subdir"
         subdir.mkdir(exist_ok=True)
         
+        # Crear un nuevo mock de base de datos
+        mock_db = MagicMock()
+        mock_db._cursor = MagicMock()
+        
         # Configurar exportador para usar ese directorio
-        exporter = ChunkExporter(output_dir=str(subdir))
+        exporter = ChunkExporter(db_instance=mock_db)
+        exporter.output_base_dir = str(subdir)
         
         # Exportar un chunk
         filename = exporter.export_chunk(self.chunks[0], "test_subdir")

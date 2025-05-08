@@ -43,8 +43,45 @@ class DuckDBDatabaseTest(BaseVectorialDatabaseTest, unittest.TestCase):
             # Inicializar con la dimensión de embedding de prueba
             self.db_instance = DuckDBVectorialDatabase(embedding_dim=self.test_embedding_dim)
             self.db_path = os.path.join(self.test_dir, f"test_duckdb_{self.test_name}.db")
-            self.db_instance.connect(self.db_path)
-            self.db_instance.create_schema()
+            
+            # Mock de configuración para evitar problemas durante las pruebas
+            import sys
+            from unittest.mock import MagicMock
+
+            # Crear una configuración mock para las pruebas
+            mock_config = MagicMock()
+            mock_config.get_database_config.return_value = {
+                "type": "duckdb",
+                "duckdb": {
+                    "db_dir": self.test_dir,
+                    "memory_limit": "500MB",
+                    "threads": 1,
+                    "similarity_threshold": 0.3,
+                    "extensions": []
+                }
+            }
+            
+            # Parchear temporalmente el módulo config para las pruebas
+            original_config = None
+            if 'config' in sys.modules:
+                original_config = sys.modules['config']
+                
+            sys.modules['config'] = MagicMock()
+            sys.modules['config'].config = mock_config
+            
+            # Ahora conectarse a la base de datos
+            success = self.db_instance.connect(self.db_path)
+            if not success:
+                raise ValueError(f"No se pudo conectar a la base de datos: {self.db_path}")
+                
+            # Crear esquema explícitamente
+            if not self.db_instance.create_schema():
+                raise ValueError("No se pudo crear el esquema de la base de datos")
+                
+            # Restaurar la configuración original
+            if original_config:
+                sys.modules['config'] = original_config
+                
             logger.info(f"Base de datos DuckDB inicializada en {self.db_path}")
         except Exception as e:
             logger.error(f"Error al inicializar DuckDB: {e}")
@@ -218,15 +255,39 @@ class DuckDBDatabaseTest(BaseVectorialDatabaseTest, unittest.TestCase):
             test_db_name = "test_duckdb_extension"
             test_db_path = os.path.join(self.test_dir, test_db_name)
             
-            # Obtener instancia a través del factory
-            db_factory = DatabaseFactory()
-            db_instance = db_factory._get_db_path("duckdb", test_db_name)
+            # Mock the _load_config method of DatabaseFactory
+            original_load_config = DatabaseFactory._load_config
             
-            # Verificar que la ruta termina con .duckdb
-            self.assertTrue(db_instance.endswith('.duckdb'), 
-                           f"El Factory debería crear rutas con extensión .duckdb, pero creó {db_instance}")
+            @classmethod
+            def mock_load_config(cls):
+                return {
+                    "type": "duckdb",
+                    "duckdb": {
+                        "db_dir": self.test_dir,
+                        "db_name": "",
+                        "memory_limit": "500MB",
+                        "threads": 1,
+                        "similarity_threshold": 0.3,
+                        "extensions": []
+                    }
+                }
             
-            self.log_test_result("Extensión de archivo DuckDB (.duckdb) verificada correctamente", True)
+            # Apply the mock method
+            DatabaseFactory._load_config = mock_load_config
+            
+            try:
+                # Obtener instancia a través del factory
+                db_factory = DatabaseFactory()
+                db_instance = db_factory._get_db_path("duckdb", test_db_name)
+                
+                # Verificar que la ruta termina con .duckdb
+                self.assertTrue(db_instance.endswith('.duckdb'), 
+                              f"El Factory debería crear rutas con extensión .duckdb, pero creó {db_instance}")
+                
+                self.log_test_result("Extensión de archivo DuckDB (.duckdb) verificada correctamente", True)
+            finally:
+                # Restore the original method
+                DatabaseFactory._load_config = original_load_config
         except Exception as e:
             self.log_test_result(f"Error al verificar extensión de archivo: {e}", False)
             raise
