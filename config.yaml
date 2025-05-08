@@ -12,12 +12,12 @@ general:
 # Configuración para chunking de documentos
 chunks:
   # Método de chunking a utilizar (character, token, context, page)
-  method: "context" 
+  method: "page" 
   
   # Formato de encabezado por defecto (standard, simple)
   # standard: Formato detallado con encabezados Markdown
   # simple: Formato simple tipo "Documento - Página X - Encabezado"
-  header_format: "standard"
+  header_format: "simple"
   
   # Configuración para memoria y procesamiento
   memory_optimization:
@@ -43,7 +43,7 @@ chunks:
     # Longitud máxima para un encabezado (textos más largos se saltan para mejorar rendimiento)
     max_header_length: 6
     # Formato de encabezado específico para este método (opcional)
-    header_format: "standard"
+    header_format: "simple"
   
   # Configuración para chunker por tokens
   token:
@@ -84,7 +84,7 @@ embeddings:
   # Modelo de embedding a utilizar (modernbert, cde-small, e5-small)
   model: "modernbert"
   # Incluir parámetro para trust_remote_code
-  trust_remote_code: False
+  trust_remote_code: True
   
   # Configuración para ModernBERT
   modernbert:
@@ -117,7 +117,7 @@ embeddings:
 # Configuración de la base de datos
 database:
   # Tipo de base de datos (sqlite, duckdb, ...)
-  type: "duckdb"
+  type: "sqlite"
   
   # Configuración para SQLite
   sqlite:
@@ -211,7 +211,30 @@ processing:
   # Número máximo de chunks a recuperar para cada consulta
   max_chunks_to_retrieve: 5
 
-  # Habilitar procesamiento paralelo para embeddings
-  parallel_processing: true
-  # Número máximo de workers para procesamiento paralelo
-  max_workers: 4
+# Configuración para el Gestor de Recursos Centralizado
+resource_management:
+  # Intervalo en segundos para el monitoreo de recursos
+  monitoring_interval: 30
+  # Umbral de porcentaje de uso de memoria para acciones de limpieza agresivas
+  aggressive_threshold_memory: 85
+  # Umbral de porcentaje de uso de memoria para advertencias o limpieza normal
+  warning_threshold_memory: 75
+  # Umbral de porcentaje de uso de CPU para advertencias
+  warning_threshold_cpu: 80
+  # Habilitar/deshabilitar el hilo de monitoreo del ResourceManager
+  monitoring_enabled: true
+  # Nivel de verbosidad para los logs de ResourceManager
+  # minimal: Solo errores y advertencias importantes
+  # normal: Información básica y advertencias (por defecto)
+  # detailed: Información detallada, útil para diagnóstico
+  log_verbosity: "minimal"
+  
+  # Configuración para ConcurrencyManager (se usará en Fase 4)
+  concurrency:
+    # Número de workers por defecto para tareas intensivas en CPU.
+    # Puede ser un valor fijo, "auto" (basado en cores), o ajustado dinámicamente.
+    default_cpu_workers: "auto" # Ejemplo: 'auto' podría significar os.cpu_count()
+    # Número de workers por defecto para tareas I/O bound.
+    default_io_workers: "auto" # Ejemplo: min(32, (os.cpu_count() or 1) + 4)
+    # Máximo de workers global si se desea limitar.
+    max_total_workers: null # null o un entero para un límite superior

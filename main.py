@@ -9,14 +9,22 @@ Orquesta todos los componentes del sistema RAG para trabajar juntos.
 """
 import logging
 import time
+import os # Añadido para concurrencia
+import sys # Añadido para stderr en wrapper
 from pathlib import Path
 from typing import Optional, Any
+import concurrent.futures # Añadido para concurrencia
+import modulos.session_manager.session_manager # Importación añadida para resolver el warning
+
 # Configurar logging
 logger = logging.getLogger(__name__)
 
 # Importación de lo necesario para colorama
 from colorama import init, Fore, Style, Back
 import gc  # Añadimos importación del garbage collector
+
+# Añadir importación de DatabaseFactory
+from modulos.databases.FactoryDatabase import DatabaseFactory
 
 # Inicializar colorama para que funcione en todas las plataformas
 init(autoreset=True)
@@ -48,135 +56,198 @@ logging.getLogger('huggingface_hub').setLevel(logging.ERROR)
 
 def process_documents(file_path: str, session_name: Optional[str] = None) -> None:
     """
-    Procesa documentos Markdown para la ingestión en el sistema RAG.
+    Procesa documentos desde una ruta y los ingiere en la base de datos.
     
     Args:
-        file_path: Ruta al directorio o archivo a procesar
-        session_name: Nombre personalizado para la sesión (opcional)
+        file_path: Ruta al archivo o directorio a procesar
+        session_name: Nombre opcional para la sesión (usado para configurar la BD)
     """
-    from pathlib import Path
-    import time
-    import logging
-    
-    # Importaciones de módulos del sistema
-    from config import config
-    from modulos.chunks import ChunkerFactory
-    from modulos.embeddings.embeddings_factory import EmbeddingFactory
-    from modulos.databases.FactoryDatabase import DatabaseFactory
-    from modulos.session_manager.session_manager import SessionManager
-    from modulos.doc_processor.markdown_processor import MarkdownProcessor
-    
-    logger = logging.getLogger(__name__)
-    
-    # Medir tiempo de inicio
     start_time = time.time()
     
-    # Obtener configuraciones
-    chunks_config = config.get_chunks_config()
-    embeddings_config = config.get_embedding_config()
-    database_config = config.get_database_config()
+    # Obtener el modelo de embeddings primero para conocer las dimensiones
+    try:
+        from modulos.embeddings.embeddings_factory import EmbeddingFactory
+        embedding_manager = EmbeddingFactory().get_embedding_manager()
+        embedding_dim = embedding_manager.get_dimensions()
+        logger.info(f"Dimensiones de embeddings: {C_VALUE}{embedding_dim}{C_RESET}")
+    except Exception as e:
+        logger.error(f"{C_ERROR}Error al inicializar el modelo de embeddings: {e}")
+        return
     
-    chunking_method = chunks_config.get("method", "character")
-    embedding_model = embeddings_config.get("model", "modernbert")
-    db_type = database_config.get("type", "sqlite")
+    # Crear o actualizar la base de datos
+    db = None
+    try:
+        db_config = None
+        if session_name:
+            session_manager = modulos.session_manager.session_manager.SessionManager()
+            try:
+                db_config = session_manager.get_session_database_config(session_name)
+                logger.info(f"Usando configuración de base de datos de la sesión '{session_name}'")
+            except Exception as e:
+                logger.error(f"{C_ERROR}Error al obtener configuración de BD para la sesión '{session_name}': {e}")
+                return
+        db = DatabaseFactory().get_database_instance(embedding_dim=embedding_dim)
+    except Exception as e:
+        logger.error(f"{C_ERROR}Error al crear o conectar con la base de datos: {e}")
+        return
     
-    logger.info(f"{C_HIGHLIGHT}Iniciando ingestión con chunking: {C_VALUE}{chunking_method}{C_HIGHLIGHT}, embeddings: {C_VALUE}{embedding_model}{C_HIGHLIGHT}, db: {C_VALUE}{db_type}")
+    # Obtener chunker y procesador Markdown
+    chunker = None
+    try:
+        from modulos.chunks.ChunkerFactory import ChunkerFactory
+        chunker = ChunkerFactory().get_chunker(embedding_model=embedding_manager)
+    except Exception as e:
+        logger.error(f"{C_ERROR}Error al inicializar el chunker: {e}")
+        return
     
-    # Inicializar componentes
-    embedding_manager = EmbeddingFactory.get_embedding_manager(embedding_model)
-    # Obtener dimensiones del embedding
-    embedding_dim = embedding_manager.embedding_dim
+    try:
+        from modulos.doc_processor.markdown_processor import MarkdownProcessor
+        markdown_processor = MarkdownProcessor()
+    except Exception as e:
+        logger.error(f"{C_ERROR}Error al inicializar el procesador de Markdown: {e}")
+        return
     
-    # Inicializar chunker y asignarle el modelo de embeddings
-    chunker = ChunkerFactory.get_chunker(chunking_method, embedding_manager)
+    # Buscar archivos Markdown para procesamiento
+    md_files = []
+    file_path_obj = Path(file_path).resolve()
     
-    # Crear un nombre de base de datos único basado en timestamp
-    db_name = f"ragdb_{int(time.time())}"
-    if session_name:
-        # Sanitizar el nombre personalizado para usarlo como nombre de archivo
-        safe_name = "".join(c if c.isalnum() or c in "._- " else "_" for c in session_name)
-        db_name = f"{safe_name}_{int(time.time())}"
-    
-    # Inicializar la base de datos utilizando una interfaz más completa
-    db = DatabaseFactory.get_database_instance(
-        db_type=db_type,
-        embedding_dim=embedding_dim,
-        embedding_model=embedding_model,
-        chunking_method=chunking_method,
-        custom_name=db_name
-    )
-    
-    # Recuperar la ruta de la base de datos del objeto db
-    db_path = db.get_db_path()
-    
-    # Registrar la base de datos y sus metadatos en el SessionManager
-    session_manager = SessionManager()
-    
-    # Preparar metadatos completos de la base de datos
-    db_metadata = {
-        "db_type": db_type,
-        "embedding_model": embedding_model,
-        "embedding_dim": embedding_dim,
-        "chunking_method": chunking_method,
-        "created_at": time.time(),
-        "last_used": time.time(),
-        "custom_name": session_name,
-        "db_path": db_path
-    }
-    
-    # Registrar la base de datos con todos sus metadatos
-    session_manager.register_database(db_name, db_metadata)
-    
-    logger.info(f"Base de datos creada: {db_name}")
-    
-    # Inicializar el procesador de Markdown
-    markdown_processor = MarkdownProcessor()
-    
-    # Obtener la lista de archivos a procesar
-    file_path_obj = Path(file_path)
     if file_path_obj.is_dir():
-        # Si es un directorio, buscar todos los archivos markdown
+        # Si es un directorio, buscar todos los archivos .md recursivamente
+        logger.info(f"Buscando archivos Markdown en {file_path_obj}...")
         md_files = list(file_path_obj.glob("**/*.md"))
-        logger.info(f"Se encontraron {len(md_files)} archivos Markdown para procesar")
+    elif file_path_obj.suffix.lower() == '.md':
+        # Si es un archivo .md específico
+        md_files = [file_path_obj]
     else:
-        # Si es un archivo, procesarlo directamente
-        md_files = [file_path_obj] if file_path_obj.suffix.lower() == '.md' else []
         if not md_files:
             logger.error(f"El archivo especificado no es un archivo Markdown válido: {file_path}")
             return
     
+    # Obtener ResourceManager y ConcurrencyManager - Una sola instancia para todo el proceso
+    from modulos.resource_management.resource_manager import ResourceManager
+    resource_manager = ResourceManager()
+    concurrency_manager = resource_manager.concurrency_manager
+
     # Procesar cada documento
     successful_docs = 0
     failed_docs = 0
-    
-    for doc_path in md_files:
-        logger.info(f"Procesando documento: {doc_path}")
-        doc_id = process_single_document(str(doc_path), markdown_processor, chunker, db)
+    total_files = len(md_files)
+    logger.info(f"Preparando para procesar {total_files} documentos...")
+
+    # Lista para almacenar los archivos procesados exitosamente (para actualizar metadatos de sesión)
+    processed_files = []
+
+    if concurrency_manager and total_files > 1: # Usar concurrencia solo si hay manager y más de 1 archivo
+        logger.info("Utilizando ConcurrencyManager para procesamiento paralelo.")
         
-        if doc_id:
-            successful_docs += 1
-            logger.info(f"Documento procesado correctamente, ID: {doc_id}")
+        executor = concurrency_manager.get_thread_pool_executor()
+        map_function = concurrency_manager.map_tasks_in_thread_pool
+
+        if executor and map_function:
+            # Crear iterador de argumentos para process_single_document
+            # Convertimos doc_path a string aquí y pasamos resource_manager
+            args_iterator = ((str(doc_path), markdown_processor, chunker, db, resource_manager) for doc_path in md_files)
+            
+            try:
+                # El map devuelve los resultados en el orden de los iterables
+                results = map_function(process_single_document_wrapper, args_iterator)
+                
+                processed_count = 0
+                for doc_path, doc_id in zip(md_files, results):
+                    processed_count += 1
+                    if doc_id is not None:
+                        successful_docs += 1
+                        # Agregar a la lista de archivos procesados
+                        processed_files.append(str(doc_path))
+                        logger.info(f"({processed_count}/{total_files}) Documento procesado OK: {doc_path} -> ID: {doc_id}")
+                    else:
+                        failed_docs += 1
+                        logger.error(f"({processed_count}/{total_files}) Error procesando: {doc_path}")
+            except Exception as e:
+                logger.error(f"{C_ERROR}Error durante el procesamiento paralelo: {e}", exc_info=True)
+                failed_docs = total_files - successful_docs # Marcar los restantes como fallidos
         else:
-            failed_docs += 1
-            logger.error(f"Error al procesar documento: {doc_path}")
+            logger.warning("ConcurrencyManager no pudo obtener un ejecutor. Procesando secuencialmente.")
+            # Fallback a procesamiento secuencial
+            for i, doc_path in enumerate(md_files):
+                logger.info(f"Procesando secuencialmente ({i+1}/{total_files}): {doc_path}")
+                doc_id = process_single_document(str(doc_path), markdown_processor, chunker, db, resource_manager)
+                if doc_id:
+                    successful_docs += 1
+                    processed_files.append(str(doc_path))
+                else:
+                    failed_docs += 1
+    else:
+        # Procesamiento secuencial si no hay ConcurrencyManager o es un solo archivo
+        logger.info("Procesando secuencialmente.")
+        for i, doc_path in enumerate(md_files):
+            logger.info(f"({i+1}/{total_files}) Procesando: {doc_path}")
+            doc_id = process_single_document(str(doc_path), markdown_processor, chunker, db, resource_manager)
+            if doc_id:
+                successful_docs += 1
+                processed_files.append(str(doc_path))
+                # logger.info(f"Documento procesado correctamente, ID: {doc_id}") # Log ya está dentro de la condición anterior
+            else:
+                failed_docs += 1
+                # logger.error(f"Error al procesar documento: {doc_path}") # Log ya está dentro de la condición anterior
+    
+    # Actualizar metadatos de sesión con la lista de archivos procesados si se proporcionó session_name
+    if session_name and processed_files:
+        try:
+            # Obtener la sesión actual
+            session = session_manager.get_session(session_name)
+            if session:
+                # Actualizar la lista de archivos (añadir a los existentes)
+                current_files = session.get("files", [])
+                # Combinar los archivos actuales con los nuevos y eliminar duplicados
+                updated_files = list(set(current_files + processed_files))
+                # Actualizar la sesión
+                session_manager.update_session_metadata(session_name, {"files": updated_files})
+                logger.info(f"Metadatos de sesión {session_name} actualizados con {len(processed_files)} archivos procesados.")
+        except Exception as e:
+            logger.warning(f"No se pudo actualizar la lista de archivos en los metadatos de sesión: {e}")
     
     # Mostrar resumen de procesamiento
     elapsed_time = time.time() - start_time
-    logger.info(f"Procesamiento completo en {elapsed_time:.2f} segundos")
-    logger.info(f"Documentos procesados correctamente: {successful_docs}")
+    logger.info(f"Procesamiento completo en {C_VALUE}{elapsed_time:.2f}{C_RESET} segundos")
+    logger.info(f"Documentos procesados correctamente: {C_VALUE}{successful_docs}{C_RESET}")
     
     if failed_docs:
-        logger.warning(f"Documentos con errores: {failed_docs}")
+        logger.warning(f"Documentos con errores: {C_VALUE}{failed_docs}{C_RESET}")
     
     # Optimizar la base de datos después de insertar todos los documentos
+    # (Nota: La concurrencia se gestiona via ResourceManager/ConcurrencyManager)
+    # (Nota: La optimización de memoria (batch_size) se gestiona via ResourceManager/MemoryManager)
     logger.info("Optimizando base de datos...")
     db.optimize_database()
+    
+    # Ahora que hemos terminado con todos los documentos, liberar recursos
+    if resource_manager and resource_manager.memory_manager:
+        logger.info("Realizando limpieza final de memoria...")
+        resource_manager.memory_manager.cleanup(reason="processing_completed")
+    
     logger.info("Proceso de ingestión completado")
+
+# Wrapper para usar con map, ya que process_single_document toma múltiples args
+def process_single_document_wrapper(args_tuple):
+    # Desempaquetar argumentos
+    file_path, markdown_processor, chunker, db, resource_manager = args_tuple
+    # Llamar a la función original
+    # Añadir manejo de excepciones aquí por si la función falla dentro del proceso worker
+    try:
+        return process_single_document(file_path, markdown_processor, chunker, db, resource_manager)
+    except Exception as e:
+        # Loggear el error desde el proceso worker puede ser complicado dependiendo de la config de logging.
+        # Es más seguro retornar None y loggear el error en el bucle principal que recoge resultados.
+        # logger.error(...) # Podría no funcionar como se espera
+        print(f"[Worker Error] Error procesando {os.path.basename(file_path)}: {e}", file=sys.stderr) # Imprimir a stderr
+        return None 
 
 def process_single_document(file_path: str, 
                            markdown_processor: Any, 
                            chunker: Any, 
-                           db: Any) -> Optional[int]:
+                           db: Any,
+                           resource_manager: Any = None) -> Optional[int]:
     """
     Procesa un único documento Markdown y lo inserta en la base de datos.
     Utiliza un enfoque de streaming para procesar documentos grandes sin
@@ -187,56 +258,44 @@ def process_single_document(file_path: str,
         markdown_processor: Instancia del procesador de Markdown
         chunker: Instancia del chunker
         db: Instancia de la base de datos
+        resource_manager: Instancia de ResourceManager
         
     Returns:
         ID del documento insertado o None si falla
     """
+    if resource_manager is None:
+        # Solo si no recibimos el resource_manager como parámetro
+        from modulos.resource_management.resource_manager import ResourceManager
+        resource_manager = ResourceManager()
+    memory_manager = resource_manager.memory_manager
+
     try:
         # Obtener configuración de optimización de memoria
         from config import config
         chunks_config = config.get_chunks_config()
         memory_config = chunks_config.get("memory_optimization", {})
         
-        memory_optimization_enabled = memory_config.get("enabled", True)
-        batch_size = memory_config.get("batch_size", 50)
-        force_gc = memory_config.get("force_gc", True)
-        memory_monitor = memory_config.get("memory_monitor", False)
+        # memory_optimization_enabled = memory_config.get("enabled", True) # Ya no se usa directamente aquí
+        base_batch_size = memory_config.get("batch_size", 50) # Mantenemos la config como base
         
+        # Obtener batch_size optimizado desde MemoryManager
+        if memory_manager:
+            batch_size = memory_manager.optimize_batch_size(base_batch_size=base_batch_size, min_batch_size=10) 
+            logger.info(f"Batch size optimizado por MemoryManager a: {C_VALUE}{batch_size}{C_RESET}")
+        else:
+            batch_size = base_batch_size
+            logger.warning(f"MemoryManager no disponible, usando batch_size de configuración: {C_VALUE}{batch_size}{C_RESET}")
+
         # Procesar el documento para obtener metadatos y contenido
         metadata, content = markdown_processor.process_document(file_path)
         
         # Obtener el título del documento desde los metadatos
         doc_title = metadata.get('title', 'Documento')
         
-        # Si la optimización de memoria está desactivada, usar el método original
-        if not memory_optimization_enabled:
-            # Método original: procesar todos los chunks y guardar de una vez
-            raw_chunks = chunker.process_content(content, doc_title=doc_title)
-            
-            # Preparar chunks con embeddings
-            prepared_chunks = []
-            for chunk in raw_chunks:
-                # Obtener embedding combinando encabezado y texto
-                embedding = chunker.model.get_document_embedding(chunk['header'], chunk['text'])
-                
-                # Crear chunk final con embedding
-                prepared_chunk = {
-                    'text': chunk['text'],
-                    'header': chunk['header'],
-                    'page': chunk.get('page', ''),
-                    'embedding': embedding,
-                    'embedding_dim': chunker.model.get_dimensions()
-                }
-                
-                prepared_chunks.append(prepared_chunk)
-            
-            # Insertar en la base de datos
-            document_id = db.insert_document(metadata, prepared_chunks)
-            
-            return document_id
+        # La decisión de streaming vs no-streaming ahora se maneja internamente
+        # por el chunker/db según la configuración y el MemoryManager, ya no se necesita if aquí.
         
-        # Método optimizado: streaming de chunks
-        # Insertar primero los metadatos del documento y obtener su ID
+        # Método optimizado: streaming de chunks (Asumiendo que es el modo por defecto ahora)
         document_id = db.insert_document_metadata(metadata)
         
         if not document_id:
@@ -250,71 +309,77 @@ def process_single_document(file_path: str,
         processed_chunks = 0
         start_time = time.time()
         
-        # Si el monitoreo de memoria está activo, iniciar seguimiento
-        if memory_monitor:
-            import psutil
-            process = psutil.Process()
-            initial_memory = process.memory_info().rss / 1024 / 1024  # MB
-            logger.info(f"Memoria inicial: {initial_memory:.2f} MB")
-        
         try:
             # Generar, procesar e insertar chunks uno por uno usando streaming
             for chunk in chunker.process_content_stream(content, doc_title=doc_title):
-                # Obtener embedding combinando encabezado y texto
-                embedding = chunker.model.get_document_embedding(chunk['header'], chunk['text'])
+                logger.debug(f"Procesando chunk con header: {chunk.get('header', 'Sin header')} y longitud de texto: {len(chunk.get('text', ''))} caracteres")
                 
-                # Crear chunk final con embedding
-                prepared_chunk = {
-                    'text': chunk['text'],
-                    'header': chunk['header'],
-                    'page': chunk.get('page', ''),
-                    'embedding': embedding,
-                    'embedding_dim': chunker.model.get_dimensions()
-                }
+                # Verificar si el modelo está inicializado
+                if chunker.model is None:
+                    logger.error(f"{C_ERROR}Error: El modelo de embeddings en chunker es None. No se puede generar embedding.")
+                    db.rollback_transaction()
+                    return None
                 
-                # Insertar el chunk individual
-                db.insert_single_chunk(document_id, prepared_chunk)
-                
-                # Liberar memoria explícitamente
-                del embedding
-                del prepared_chunk
-                
-                processed_chunks += 1
+                try:
+                    # Obtener embedding combinando encabezado y texto
+                    embedding = chunker.model.get_document_embedding(chunk['header'], chunk['text'])
+                    logger.debug(f"Embedding generado correctamente con dimensiones: {len(embedding) if embedding else 'None'}")
+                    
+                    # Crear chunk final con embedding
+                    prepared_chunk = {
+                        'text': chunk['text'],
+                        'header': chunk['header'],
+                        'page': chunk.get('page', ''),
+                        'embedding': embedding,
+                        'embedding_dim': chunker.model.get_dimensions()
+                    }
+                    
+                    # Insertar el chunk individual
+                    chunk_id = db.insert_single_chunk(document_id, prepared_chunk)
+                    
+                    if chunk_id:
+                        logger.debug(f"Chunk insertado correctamente con ID: {chunk_id}")
+                    else:
+                        logger.error(f"{C_ERROR}Error: La inserción del chunk retornó None o 0. Verificar la implementación de insert_single_chunk.")
+                    
+                    # Liberar memoria explícitamente
+                    del embedding
+                    del prepared_chunk
+                    
+                    processed_chunks += 1
+                    
+                except Exception as chunk_e:
+                    logger.error(f"{C_ERROR}Error al procesar/insertar chunk individual: {chunk_e}", exc_info=True)
                 
                 # Mostrar progreso y forzar garbage collection periódicamente
                 if processed_chunks % batch_size == 0:
                     elapsed = time.time() - start_time
                     rate = processed_chunks / elapsed if elapsed > 0 else 0
-                    logger.info(f"Procesados {processed_chunks} chunks ({rate:.2f} chunks/seg)")
-                    
-                    # Monitoreo de memoria si está activo
-                    if memory_monitor:
-                        current_memory = process.memory_info().rss / 1024 / 1024  # MB
-                        logger.info(f"Uso de memoria: {current_memory:.2f} MB (Δ: {current_memory - initial_memory:.2f} MB)")
-                    
-                    # Forzar garbage collection si está configurado
-                    if force_gc:
-                        gc.collect()
+                    logger.info(f"Procesados {C_VALUE}{processed_chunks}{C_RESET} chunks ({C_VALUE}{rate:.2f}{C_RESET} chunks/seg)")
             
-            # Commit de la transacción cuando todos los chunks han sido procesados
+            # Confirmar transacción
             db.commit_transaction()
             
-            # Mostrar estadísticas finales
-            total_time = time.time() - start_time
-            logger.info(f"Documento procesado: {processed_chunks} chunks en {total_time:.2f} segundos " +
-                       f"({processed_chunks/total_time:.2f} chunks/seg)")
-            
+            # Ahora que hemos terminado de procesar todos los chunks, podemos liberar memoria
+            if memory_manager:
+                # Forzar una recolección de basura pero sin intentar liberar el modelo de embedding
+                # ya que lo necesitaremos para futuros documentos
+                gc.collect()
+                
+            logger.info(f"Completado: {file_path} -> {C_VALUE}{processed_chunks}{C_RESET} chunks procesados en {C_VALUE}{time.time() - start_time:.2f}{C_RESET}s")
             return document_id
             
         except Exception as e:
             # Rollback en caso de error
-            db.rollback_transaction()
-            raise e
-    
+            logger.error(f"{C_ERROR}Error procesando chunks de {file_path}: {e}", exc_info=True)
+            try:
+                db.rollback_transaction()
+                logger.info("Transacción revertida.")
+            except Exception as rollback_e:
+                logger.error(f"Error adicional al intentar rollback: {rollback_e}")
+            return None
     except Exception as e:
-        logger.error(f"{C_ERROR}Error al procesar documento {file_path}: {e}")
-        # Asegurar liberación de memoria en caso de error
-        gc.collect()
+        logger.error(f"{C_ERROR}Error procesando documento {file_path}: {e}", exc_info=True)
         return None
 
 def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None, 

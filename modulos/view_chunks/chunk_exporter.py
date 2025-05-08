@@ -202,6 +202,19 @@ class ChunkExporter:
                 pass
             lines.append(f"Fecha de procesamiento: {created_at}")
         
+        # Obtener el número de chunks del documento
+        try:
+            doc_id = document.get('id')
+            if doc_id:
+                # Contar los chunks del documento
+                cursor = self.db._cursor
+                cursor.execute("SELECT COUNT(*) FROM chunks WHERE document_id = ?", (doc_id,))
+                count_result = cursor.fetchone()
+                total_chunks = count_result[0] if count_result else 0
+                lines.append(f"Total de chunks: {total_chunks}")
+        except Exception as e:
+            self.logger.warning(f"No se pudo obtener el número total de chunks: {e}")
+        
         lines.append("\n=================== CHUNKS GENERADOS ===================\n")
         
         return "\n".join(lines)

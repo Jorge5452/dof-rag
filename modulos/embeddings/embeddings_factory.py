@@ -2,10 +2,15 @@ import logging
 import threading
 import time
 import weakref
-from typing import Optional, Dict, Set, List, Any
+import gc
+import importlib.util # Para chequear torch
+from typing import Optional, Dict, Set, List, Any, TYPE_CHECKING
 
 from config import config
-from modulos.embeddings.embeddings_manager import EmbeddingManager
+from .embeddings_manager import EmbeddingManager
+
+# ModelReference se define en este archivo, no necesita ser importada desde embeddings_manager.
+# La anotación de tipo para _instances usará la clase local ModelReference.
 
 # Configurar logging
 logger = logging.getLogger(__name__)
@@ -49,12 +54,9 @@ class EmbeddingFactory:
     Implementa el patrón Factory y Singleton combinados con gestión de recursos.
     """
     
-    _instances: Dict[str, ModelReference] = {}
+    _instances: Dict[str, 'ModelReference'] = {}
     _lock = threading.RLock()
-    _cleanup_thread = None
-    _cleanup_interval = 300  # 5 minutos
     _inactive_timeout = 600  # 10 minutos sin uso
-    _running = True
     
     @staticmethod
     def get_embedding_manager(model_type: Optional[str] = None) -> EmbeddingManager:
@@ -75,9 +77,6 @@ class EmbeddingFactory:
         # Clave única para este tipo de modelo
         instance_key = f"embedding:{model_type}"
         
-        # Iniciar el hilo de limpieza si aún no está corriendo
-        EmbeddingFactory._ensure_cleanup_thread()
-        
         with EmbeddingFactory._lock:
             # Si ya existe una instancia para este modelo, retornarla
             if instance_key in EmbeddingFactory._instances:
@@ -88,9 +87,15 @@ class EmbeddingFactory:
             
             # Crear una nueva instancia
             logger.info(f"Creando nueva instancia de modelo de embeddings: {model_type}")
-            manager = EmbeddingManager(model_type)
-            
-            # Almacenar la instancia con su contador de referencias
+            try:
+                manager = EmbeddingManager(model_type=model_type)
+                # Cargar el modelo aquí puede ser intensivo, considerar la gestión de errores
+                manager.load_model() 
+            except Exception as e:
+                logger.error(f"Error al crear o cargar EmbeddingManager para {model_type}: {e}", exc_info=True)
+                # Propagar la excepción o devolver None/manejar según la política de errores
+                raise RuntimeError(f"No se pudo inicializar el modelo de embeddings {model_type}") from e
+
             model_ref = ModelReference(manager)
             model_ref.increment()  # Primera referencia
             EmbeddingFactory._instances[instance_key] = model_ref
@@ -157,80 +162,90 @@ class EmbeddingFactory:
                 }
         return result
     
-    @staticmethod
-    def _cleanup_unused_models():
+    @classmethod
+    def release_inactive_models(cls, aggressive: bool = False) -> int:
         """
-        Limpia modelos que no han sido utilizados por un tiempo.
+        Libera modelos de embedding que no han sido utilizados recientemente
+        y no tienen referencias activas.
+
+        Esta función es típicamente invocada por `MemoryManager.cleanup`,
+        que a su vez es llamado por `ResourceManager.request_cleanup`.
+
+        Args:
+            aggressive (bool): Si True, el tiempo de inactividad para considerar
+                               un modelo como liberable se reduce (hace la
+                               liberación más probable).
+                               Defaults to False.
+
+        Returns:
+            int: El número de modelos que fueron liberados.
         """
-        to_remove = []
-        
-        with EmbeddingFactory._lock:
+        cls.logger.debug(f"Solicitud para liberar modelos inactivos (agresivo={aggressive}).")
+        released_count = 0
+        keys_to_remove = []
+        # Determinar timeout efectivo
+        effective_timeout = cls._inactive_timeout / 2 if aggressive else cls._inactive_timeout
+        if aggressive:
+            cls.logger.warning(f"Modo agresivo: Timeout de inactividad reducido a {effective_timeout}s.")
+
+        with cls._lock:
             current_time = time.time()
+            for key, model_ref in cls._instances.items():
+                if model_ref.get_ref_count() == 0 and (current_time - model_ref.last_used) > effective_timeout:
+                    keys_to_remove.append(key)
             
-            for key, model_ref in EmbeddingFactory._instances.items():
-                # Si no hay referencias activas y ha pasado suficiente tiempo
-                if model_ref.get_ref_count() == 0 and (current_time - model_ref.last_used) > EmbeddingFactory._inactive_timeout:
-                    to_remove.append(key)
-            
-            # Eliminar modelos inactivos
-            for key in to_remove:
-                logger.info(f"Liberando memoria de modelo inactivo: {key}")
-                # Liberar explícitamente el modelo
-                model = EmbeddingFactory._instances[key].model
-                
-                # Intentar liberar la memoria del modelo
+            model_was_on_gpu = False # Flag para saber si llamar a empty_cache
+            for key in keys_to_remove:
                 try:
-                    if hasattr(model, "_model") and model._model:
-                        model._model = None
+                    cls.logger.info(f"Liberando memoria de modelo inactivo: {key}")
+                    model_instance = cls._instances[key].model
                     
-                    if hasattr(model, "embedding_dim"):
-                        model.embedding_dim = None
-                except:
-                    pass
-                
-                # Eliminar la referencia
-                del EmbeddingFactory._instances[key]
-        
-        # Forzar recolección de basura si se eliminaron modelos
-        if to_remove:
-            import gc
+                    # Intentar liberar memoria específica del modelo (depende de la implementación de EmbeddingManager)
+                    if hasattr(model_instance, 'release_resources'):
+                        model_instance.release_resources()
+                        cls.logger.debug(f"Llamado a release_resources() para {key}.")
+                    
+                    # Comprobar si el modelo usaba GPU (esto es heurístico, necesita info del modelo)
+                    if hasattr(model_instance, 'device') and 'cuda' in str(model_instance.device):
+                         model_was_on_gpu = True
+
+                    # Eliminar la referencia de la factory
+                    del cls._instances[key]
+                    released_count += 1
+
+                except Exception as e:
+                    cls.logger.error(f"Error al liberar modelo {key}: {e}", exc_info=True)
+
+        # Limpiar caché de GPU si se liberaron modelos de GPU y torch está disponible
+        if released_count > 0 and model_was_on_gpu:
+            if importlib.util.find_spec("torch"):
+                try:
+                    import torch
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        cls.logger.info("torch.cuda.empty_cache() llamado tras liberar modelo GPU.")
+                except ImportError:
+                    cls.logger.warning("Torch importado pero no se pudo llamar a empty_cache (quizás no instalado correctamente).")
+                except Exception as e:
+                    cls.logger.error(f"Error al llamar a torch.cuda.empty_cache(): {e}", exc_info=True)
+            else:
+                 cls.logger.debug("Torch no parece estar instalado, no se limpiará caché de GPU.")
+
+        # Usar nivel de log apropiado según si se liberaron modelos o no
+        if released_count > 0:
+            # Forzar GC después de eliminar referencias puede ayudar
             gc.collect()
-            logger.info(f"Limpieza completada: {len(to_remove)} modelos eliminados")
-    
-    @staticmethod
-    def _ensure_cleanup_thread():
-        """
-        Asegura que el hilo de limpieza está en ejecución.
-        """
-        if EmbeddingFactory._cleanup_thread is None or not EmbeddingFactory._cleanup_thread.is_alive():
-            EmbeddingFactory._running = True
-            EmbeddingFactory._cleanup_thread = threading.Thread(target=EmbeddingFactory._cleanup_worker, daemon=True)
-            EmbeddingFactory._cleanup_thread.start()
-            logger.info("Hilo de limpieza de modelos de embeddings iniciado")
-    
-    @staticmethod
-    def _cleanup_worker():
-        """
-        Hilo de trabajo para limpieza periódica.
-        """
-        while EmbeddingFactory._running:
-            try:
-                time.sleep(EmbeddingFactory._cleanup_interval)
-                EmbeddingFactory._cleanup_unused_models()
-            except Exception as e:
-                logger.error(f"Error en hilo de limpieza de modelos: {str(e)}")
-    
-    @staticmethod
-    def shutdown():
-        """
-        Detiene el hilo de limpieza y libera todos los recursos.
-        """
-        EmbeddingFactory._running = False
-        
-        if EmbeddingFactory._cleanup_thread and EmbeddingFactory._cleanup_thread.is_alive():
-            EmbeddingFactory._cleanup_thread.join(timeout=1.0)
-        
-        with EmbeddingFactory._lock:
-            EmbeddingFactory._instances.clear()
-        
-        logger.info("Gestor de modelos de embeddings detenido y recursos liberados")
+            cls.logger.info(f"{released_count} modelos de embedding fueron liberados.")
+        else:
+            cls.logger.debug("No se encontraron modelos inactivos para liberar.")
+            
+        return released_count
+
+    @classmethod
+    def get_active_model_count(cls) -> int:
+        """Devuelve el número de instancias de modelos gestionadas por la factory."""
+        with cls._lock:
+            return len(cls._instances)
+
+# Adjuntar logger a la clase para los classmethods
+EmbeddingFactory.logger = logger

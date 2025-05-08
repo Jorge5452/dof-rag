@@ -15,7 +15,7 @@ import threading
 import psutil
 import gc
 import glob
-from typing import Dict, Any, List, Optional, Tuple
+from typing import Dict, Any, List, Optional, Tuple, Union
 from pathlib import Path
 from datetime import datetime
 import weakref
@@ -23,6 +23,8 @@ import weakref
 from config import Config
 from modulos.databases.FactoryDatabase import DatabaseFactory
 from modulos.embeddings.embeddings_factory import EmbeddingFactory
+# Evitar importación directa que causa dependencia circular
+# from modulos.resource_management.resource_manager import ResourceManager
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +97,7 @@ class SessionManager:
     
     # Valores predeterminados de configuración
     MAX_SESSIONS = 100            # Límite máximo de sesiones activas
-    SESSION_TIMEOUT = 3600        # Tiempo de inactividad (en segundos) antes de eliminar sesión
+    SESSION_TIMEOUT = 3600 * 24 * 7  # 1 semana por defecto, podría ser configurable
     CLEANUP_INTERVAL = 60         # Intervalo (en segundos) entre limpiezas automáticas
     MAX_CONTEXTS_PER_SESSION = 30 # Número máximo de contextos almacenados por sesión
     
@@ -118,178 +120,80 @@ class SessionManager:
             return
             
         with self._lock:
-            # Sesiones y contextos
-            self.sessions = {}              # {session_id: session_data}
-            self.contexts = {}              # {session_id: {message_id: context_data}}
+            if self._initialized: # Doble check por si otro hilo inicializó
+                return
             
-            # Monitoreo de recursos
-            self.resource_usage = {
-                "memory_percent": 0.0,      # Porcentaje de memoria utilizada
-                "cpu_percent": 0.0,         # Porcentaje de CPU utilizada
-                "active_sessions": 0,       # Número de sesiones activas
-                "last_check": time.time(),  # Timestamp de la última verificación
-                "cleanup_count": 0          # Contador de limpiezas realizadas
-            }
+            self.config = Config()
+            self.general_config = self.config.get_general_config()
+            self.sessions_dir = Path(self.general_config.get("sessions_dir", "sessions"))
+            self.sessions_dir.mkdir(parents=True, exist_ok=True)
+
+            self.sessions_file = self.sessions_dir / "sessions.json"
+            self.db_metadata_file = self.sessions_dir / "db_metadata.json"
+
+            self.sessions: Dict[str, Any] = self._load_from_file(self.sessions_file)
+            self.db_metadata: Dict[str, Any] = self._load_from_file(self.db_metadata_file)
             
-            # Cargar configuración
-            self._load_config()
-            
-            # Iniciar hilo de limpieza
-            self._start_cleanup_thread()
-            
-            logger.info(f"SessionManager inicializado: max_sessions={self.MAX_SESSIONS}, "
-                      f"timeout={self.SESSION_TIMEOUT}s, cleanup_interval={self.CLEANUP_INTERVAL}s")
-            
+            # Validar y limpiar metadatos de BD al inicio (eliminar entradas sin archivo físico)
+            self._validate_db_metadata()
+
+            # Inicializar espacio para contextos
+            self.contexts = {}
+
+            # Inicializar referencia a ResourceManager (inicialización perezosa)
+            self._resource_manager = None
+
             self._initialized = True
+            logger.info("SessionManager inicializado. La limpieza ahora es coordinada por ResourceManager.")
     
-    def _load_config(self):
+    def _load_from_file(self, file_path: Path) -> Dict[str, Any]:
         """
-        Carga los valores de configuración desde config.py
-        """
-        try:
-            # Cargar configuración de sesiones
-            session_config = get_value("sessions", {})
-            
-            # Establecer valores desde configuración o usar predeterminados
-            self.MAX_SESSIONS = session_config.get("max_sessions", self.MAX_SESSIONS)
-            self.SESSION_TIMEOUT = session_config.get("timeout", self.SESSION_TIMEOUT)
-            self.CLEANUP_INTERVAL = session_config.get("cleanup_interval", self.CLEANUP_INTERVAL)
-            self.MAX_CONTEXTS_PER_SESSION = session_config.get("max_contexts", self.MAX_CONTEXTS_PER_SESSION)
-            
-            # Validar valores
-            if self.MAX_SESSIONS < 1:
-                logger.warning("max_sessions debe ser al menos 1, usando valor 10")
-                self.MAX_SESSIONS = 10
-                
-            if self.SESSION_TIMEOUT < 60:
-                logger.warning("timeout debe ser al menos 60 segundos, usando valor 3600")
-                self.SESSION_TIMEOUT = 3600
-            
-            logger.debug(f"Configuración cargada: max_sessions={self.MAX_SESSIONS}, "
-                       f"timeout={self.SESSION_TIMEOUT}s")
-                       
-        except Exception as e:
-            # Cambiar nivel de log de error a debug ya que manejamos el error correctamente
-            logger.debug(f"Usando valores predeterminados para configuración: {e}")
-            # Valores predeterminados ya definidos en la clase
-    
-    def _start_cleanup_thread(self):
-        """
-        Inicia el hilo de limpieza automática de sesiones.
-        """
-        def cleanup_thread():
-            try:
-                while True:
-                    # Dormir el intervalo configurado
-                    time.sleep(self.CLEANUP_INTERVAL)
-                    
-                    # Actualizar uso de recursos
-                    self._update_resource_usage()
-                    
-                    # Verificar si es necesario realizar limpieza
-                    current_time = time.time()
-                    memory_high = self.resource_usage["memory_percent"] > 80
-                    cpu_high = self.resource_usage["cpu_percent"] > 70
-                    many_sessions = len(self.sessions) > self.MAX_SESSIONS * 0.8
-                    
-                    # Realizar limpieza normal o agresiva según uso de recursos
-                    if memory_high or cpu_high or many_sessions:
-                        logger.info(f"Limpieza agresiva - Memoria: {self.resource_usage['memory_percent']:.1f}%, "
-                                  f"CPU: {self.resource_usage['cpu_percent']:.1f}%, "
-                                  f"Sesiones: {len(self.sessions)}/{self.MAX_SESSIONS}")
-                        self.clean_expired_sessions(aggressive=True)
-                    else:
-                        # Limpieza normal
-                        self.clean_expired_sessions()
-            
-            except Exception as e:
-                logger.error(f"Error en hilo de limpieza: {e}")
-        
-        # Iniciar hilo de limpieza como daemon
-        cleanup_thread = threading.Thread(target=cleanup_thread, daemon=True)
-        cleanup_thread.name = "SessionCleanupThread"
-        cleanup_thread.start()
-        logger.debug("Hilo de limpieza de sesiones iniciado")
-    
-    def _update_resource_usage(self):
-        """
-        Actualiza información sobre uso de recursos del sistema.
-        """
-        try:
-            # Obtener proceso actual
-            process = psutil.Process(os.getpid())
-            
-            # Actualizar métricas
-            self.resource_usage["memory_percent"] = process.memory_percent()
-            self.resource_usage["cpu_percent"] = process.cpu_percent(interval=0.1)
-            self.resource_usage["active_sessions"] = len(self.sessions)
-            self.resource_usage["last_check"] = time.time()
-            
-            # Log informativo periódico (cada 10 limpiezas)
-            if self.resource_usage["cleanup_count"] % 10 == 0:
-                logger.info(f"Estado del sistema - Memoria: {self.resource_usage['memory_percent']:.1f}%, "
-                          f"CPU: {self.resource_usage['cpu_percent']:.1f}%, "
-                          f"Sesiones activas: {len(self.sessions)}")
-            
-            self.resource_usage["cleanup_count"] += 1
-            
-        except Exception as e:
-            logger.error(f"Error al actualizar uso de recursos: {e}")
-    
-    def clean_expired_sessions(self, aggressive: bool = False):
-        """
-        Elimina sesiones inactivas basadas en su último tiempo de actividad.
+        Carga datos desde un archivo JSON.
         
         Args:
-            aggressive: Si es True, usa un timeout más corto para limpieza agresiva
+            file_path: Ruta al archivo JSON
+            
+        Returns:
+            Diccionario con los datos cargados
         """
-        with self._lock:
-            try:
-                # Determinar el timeout a utilizar
-                timeout = self.SESSION_TIMEOUT
-                if aggressive:
-                    # En modo agresivo, reducir el timeout a la mitad o menos
-                    timeout = min(self.SESSION_TIMEOUT // 2, 600)  # Máx 10 minutos en modo agresivo
-                
-                current_time = time.time()
-                sessions_to_remove = []
-                
-                # Identificar sesiones expiradas
-                for session_id, session_data in self.sessions.items():
-                    last_activity = session_data.get("last_activity", 0)
-                    if current_time - last_activity > timeout:
-                        sessions_to_remove.append(session_id)
-                
-                # Eliminar sesiones expiradas
-                for session_id in sessions_to_remove:
-                    self.delete_session(session_id)
-                
-                # Si hay demasiadas sesiones incluso después de limpiar las expiradas,
-                # eliminar las más antiguas (excepto las activas recientemente)
-                if aggressive and len(self.sessions) > self.MAX_SESSIONS * 0.9:
-                    # Ordenar por actividad (más antiguas primero)
-                    sorted_sessions = sorted(
-                        self.sessions.items(),
-                        key=lambda x: x[1].get("last_activity", 0)
-                    )
-                    
-                    # Determinar cuántas sesiones eliminar (hasta un 25% de las más antiguas)
-                    sessions_to_force_remove = sorted_sessions[:max(1, len(sorted_sessions) // 4)]
-                    
-                    for session_id, _ in sessions_to_force_remove:
-                        logger.warning(f"Eliminando sesión {session_id} por restricción de recursos")
-                        self.delete_session(session_id)
-                
-                # Forzar recolección de basura si la limpieza fue agresiva
-                if aggressive:
-                    gc.collect()
-                
-                if sessions_to_remove:
-                    logger.info(f"Limpieza completada: {len(sessions_to_remove)} sesiones eliminadas, "
-                              f"{len(self.sessions)} activas")
-                
-            except Exception as e:
-                logger.error(f"Error durante limpieza de sesiones: {e}")
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.warning(f"Error al cargar datos desde {file_path}: {e}")
+            return {}
+    
+    def _validate_db_metadata(self):
+        """
+        Valida y limpia metadatos de base de datos al inicio.
+        """
+        try:
+            # Obtener la lista de bases de datos disponibles
+            databases = self.list_available_databases()
+            
+            # Filtrar metadatos de bases de datos que no tienen archivo físico
+            self.db_metadata = {db_name: metadata for db_name, metadata in databases.items() if metadata.get('db_path')}
+            
+            # Guardar metadatos actualizados
+            self._save_to_file(self.db_metadata_file, self.db_metadata)
+            
+            logger.info("Metadatos de base de datos actualizados y guardados correctamente")
+        except Exception as e:
+            logger.error(f"Error al validar y limpiar metadatos de base de datos: {e}")
+    
+    def _save_to_file(self, file_path: Path, data: Dict[str, Any]):
+        """
+        Guarda datos en un archivo JSON.
+        
+        Args:
+            file_path: Ruta al archivo JSON
+            data: Datos a guardar
+        """
+        try:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception as e:
+            logger.warning(f"Error al guardar datos en {file_path}: {e}")
     
     def create_session(self, session_id: Optional[str] = None, 
                       metadata: Optional[Dict[str, Any]] = None) -> str:
@@ -331,7 +235,8 @@ class SessionManager:
             session_data = {
                 "id": session_id,
                 "created_at": time.time(),
-                "last_activity": time.time()
+                "last_activity": time.time(),
+                "files": []  # Lista vacía para almacenar archivos procesados
             }
             
             # Añadir metadata si se proporciona
@@ -343,6 +248,13 @@ class SessionManager:
             
             # Inicializar espacio para contextos
             self.contexts[session_id] = {}
+            
+            # Persistir los cambios inmediatamente
+            try:
+                self._save_to_file(self.sessions_file, self.sessions)
+                logger.debug(f"Sesiones guardadas después de crear {session_id}")
+            except Exception as e:
+                logger.error(f"Error al guardar sesiones después de crear {session_id}: {e}")
             
             logger.info(f"Sesión creada: {session_id} ({len(self.sessions)} sesiones activas)")
             return session_id
@@ -374,6 +286,13 @@ class SessionManager:
             # Añadir o actualizar metadata si se proporciona
             if metadata:
                 self.sessions[session_id].update(metadata)
+            
+            # Persistir los cambios inmediatamente
+            try:
+                self._save_to_file(self.sessions_file, self.sessions)
+                logger.debug(f"Sesiones guardadas después de actualizar {session_id}")
+            except Exception as e:
+                logger.error(f"Error al guardar sesiones después de actualizar {session_id}: {e}")
             
             return session_id
     
@@ -422,6 +341,13 @@ class SessionManager:
             
             # Eliminar sesión
             del self.sessions[session_id]
+            
+            # Guardar los cambios en el archivo para mantener persistencia
+            try:
+                self._save_to_file(self.sessions_file, self.sessions)
+                logger.debug(f"Sesiones guardadas después de eliminar {session_id}")
+            except Exception as e:
+                logger.error(f"Error al guardar sesiones después de eliminar {session_id}: {e}")
             
             logger.info(f"Sesión eliminada: {session_id} (duración: {duration}s, "
                       f"inactividad: {int(time.time() - last_activity)}s)")
@@ -1047,3 +973,175 @@ class SessionManager:
             
             # Devolver toda la configuración
             return dict(self.sessions[session_id]['config'])
+
+    def _save_sessions(self) -> None:
+        """
+        Guarda el estado actual de las sesiones en el archivo de sesiones.
+        
+        Este método es llamado después de modificar sesiones, como al crear
+        una nueva sesión, eliminar una existente o después de una limpieza masiva.
+        """
+        try:
+            with self._lock:
+                # Guardar sesiones actuales en el archivo
+                self._save_to_file(self.sessions_file, self.sessions)
+            logger.debug(f"Sesiones guardadas en {self.sessions_file}")
+        except Exception as e:
+            logger.error(f"Error al guardar sesiones: {e}")
+
+    def _save_db_metadata(self) -> None:
+        """
+        Guarda los metadatos de bases de datos en su archivo correspondiente.
+        """
+        try:
+            with self._lock:
+                # Guardar metadatos de bases de datos
+                self._save_to_file(self.db_metadata_file, self.db_metadata)
+            logger.debug(f"Metadatos de BD guardados en {self.db_metadata_file}")
+        except Exception as e:
+            logger.error(f"Error al guardar metadatos de bases de datos: {e}")
+
+    def clean_expired_sessions(self, aggressive: bool = False, cleanup_reason: str = "routine") -> Dict[str, Any]:
+        """
+        Limpia sesiones expiradas y recursos asociados.
+
+        Esta función ahora es típicamente invocada por `ResourceManager.request_cleanup`.
+        La decisión de si la limpieza es `aggressive` la toma `ResourceManager`
+        basándose en los umbrales globales de recursos.
+
+        Args:
+            aggressive (bool): Indica si se debe realizar una limpieza más agresiva
+                               (eliminar sesiones más antiguas si aún hay demasiadas
+                               después de eliminar las expiradas).
+                               Defaults to False.
+            cleanup_reason (str): Motivo por el cual se está ejecutando la limpieza.
+                                  Defaults to "routine".
+
+        Returns:
+            Dict[str, Any]: Resultados de la limpieza (sesiones eliminadas, errores).
+        """
+        results = {
+            "status": "success", 
+            "timeout_removed": 0,
+            "aggressive_removed": 0,
+            "remaining_sessions": len(self.sessions)
+        }
+        logger.info(f"Iniciando clean_expired_sessions. Invocación agresiva: {aggressive}, Razón: {cleanup_reason}")
+        with self._lock:
+            try:
+                current_time = time.time()
+                sessions_to_remove_by_timeout = []
+                
+                # Identificar sesiones expiradas por timeout
+                for session_id, session_data in list(self.sessions.items()): # Iterar sobre una copia para modificar el original
+                    last_activity = session_data.get("last_activity", 0)
+                    if current_time - last_activity > self.SESSION_TIMEOUT:
+                        sessions_to_remove_by_timeout.append(session_id)
+                
+                for session_id in sessions_to_remove_by_timeout:
+                    if session_id in self.sessions: # Doble check por si acaso
+                        self.delete_session(session_id)
+                        results["timeout_removed"] += 1
+                
+                if results["timeout_removed"] > 0:
+                    logger.info(f"{results['timeout_removed']} sesiones eliminadas por timeout.")
+
+                # Si la limpieza es agresiva y aún hay demasiadas sesiones
+                # (MAX_SESSIONS es un límite superior, aquí actuamos si estamos cerca)
+                if aggressive and len(self.sessions) > self.MAX_SESSIONS * 0.8: 
+                    logger.warning(f"Limpieza agresiva de sesiones activada debido a alta presión y {len(self.sessions)}/{self.MAX_SESSIONS} sesiones.")
+                    # Ordenar por actividad (más antiguas primero), excluyendo las que se actualizaron muy recientemente
+                    # para evitar eliminar sesiones que acaban de interactuar.
+                    min_inactive_time_for_aggressive = 60 # No eliminar si se usó en el último minuto, por ejemplo
+                    
+                    eligible_for_aggressive_removal = []
+                    for session_id, session_data in self.sessions.items():
+                        if current_time - session_data.get("last_activity", 0) > min_inactive_time_for_aggressive:
+                            eligible_for_aggressive_removal.append((session_id, session_data.get("last_activity", 0)))
+                    
+                    # Ordenar las elegibles por más antiguas primero
+                    eligible_for_aggressive_removal.sort(key=lambda x: x[1])
+                    
+                    num_to_remove_aggressively = len(self.sessions) - int(self.MAX_SESSIONS * 0.7) # Reducir al 70%
+                    num_to_remove_aggressively = max(0, num_to_remove_aggressively)
+
+                    if num_to_remove_aggressively > 0 and eligible_for_aggressive_removal:
+                        actual_removed_aggressively = 0
+                        for i in range(min(num_to_remove_aggressively, len(eligible_for_aggressive_removal))):
+                            session_id_to_remove = eligible_for_aggressive_removal[i][0]
+                            if session_id_to_remove in self.sessions:
+                                logger.warning(f"Eliminando sesión {session_id_to_remove} agresivamente por restricción de recursos.")
+                                self.delete_session(session_id_to_remove)
+                                results["aggressive_removed"] += 1
+                                actual_removed_aggressively += 1
+                        if actual_removed_aggressively > 0:
+                            logger.info(f"{actual_removed_aggressively} sesiones eliminadas agresivamente.")
+
+            except Exception as e:
+                logger.error(f"Error durante clean_expired_sessions: {e}", exc_info=True)
+                results["status"] = "error"
+                results["error"] = str(e)
+            
+            # Guardar estado de sesiones después de la limpieza
+            try:
+                self._save_sessions()
+            except Exception as e:
+                logger.error(f"Error al guardar sesiones después de limpieza: {e}")
+                results["sessions_save_error"] = str(e)
+
+        results["remaining_sessions"] = len(self.sessions)
+        logger.info(f"clean_expired_sessions completado. Resultados: {results}")
+        return results
+
+    def get_active_sessions_count(self) -> int:
+        """Devuelve el número actual de sesiones activas."""
+        with self._lock:
+            return len(self.sessions)
+
+    # Propiedad para inicialización perezosa de ResourceManager
+    @property
+    def resource_manager(self):
+        """Obtiene la instancia de ResourceManager con inicialización perezosa."""
+        if self._resource_manager is None:
+            try:
+                # Importación dentro del método para evitar dependencia circular
+                from modulos.resource_management.resource_manager import ResourceManager
+                self._resource_manager = ResourceManager()
+                logger.debug("ResourceManager recuperado para SessionManager.")
+            except Exception as e:
+                logger.error(f"Error al acceder a ResourceManager: {e}")
+        return self._resource_manager
+
+    def add_context(self, session_id: str, query: str, response: str, sources: Optional[List[Dict]] = None) -> None:
+        """
+        Añade un contexto de pregunta-respuesta a una sesión.
+        
+        Args:
+            session_id: ID de la sesión
+            query: Consulta del usuario
+            response: Respuesta generada
+            sources: Fuentes utilizadas para la respuesta
+        """
+        if session_id not in self.sessions:
+            logger.warning(f"Intento de añadir contexto a una sesión inexistente: {session_id}")
+            return
+        
+        if session_id not in self.contexts:
+            self.contexts[session_id] = []
+            
+        # Añadir contexto
+        context_entry = {
+            "query": query,
+            "response": response,
+            "timestamp": time.time(),
+            "sources": sources or []
+        }
+        
+        # Actualizar último uso
+        self.update_session_metadata(session_id, {"last_activity": time.time()})
+        
+        # Añadir al contexto y limitar tamaño
+        self.contexts[session_id].append(context_entry)
+        if len(self.contexts[session_id]) > self.MAX_CONTEXT_ENTRIES:
+            # Remover los más antiguos manteniendo el máximo
+            self.contexts[session_id] = self.contexts[session_id][-self.MAX_CONTEXT_ENTRIES:]

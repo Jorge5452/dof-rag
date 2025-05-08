@@ -4,6 +4,7 @@ from typing import Dict, Any, Optional
 import json
 import time
 from pathlib import Path
+import uuid
 
 from modulos.databases.VectorialDatabase import VectorialDatabase
 from config import config
@@ -244,8 +245,11 @@ class DatabaseFactory:
         if '/' in embedding_model:
             embedding_model = embedding_model.split('/')[1]
         
+        # Generar un identificador aleatorio
+        random_id = str(uuid.uuid4())[:8]  # Usar los primeros 8 caracteres del UUID
+        
         # Crear nombre seguro
-        safe_name = f"rag_{embedding_model}_{chunking_method}_{db_type}"
+        safe_name = f"rag_{embedding_model}_{chunking_method}_{db_type}_{random_id}"
         
         # Reemplazar caracteres no permitidos en nombres de archivo
         safe_name = safe_name.replace('-', '_').replace('.', '_').lower()

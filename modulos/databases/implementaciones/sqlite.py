@@ -25,36 +25,44 @@ logger = logging.getLogger(__name__)
 
 class SQLiteVectorialDatabase(VectorialDatabase):
     """
-    Implementación de base de datos vectorial usando SQLite con soporte para operaciones vectoriales.
-    Utiliza la extensión sqlite-vec para realizar búsquedas vectoriales eficientes.
+    Implementación de una base de datos vectorial usando SQLite.
+    Proporciona métodos para inserción, búsqueda y recuperación de documentos y chunks,
+    además de soporte para búsqueda vectorial eficiente.
     
-    La dimensión del embedding se fija en la inicialización y se utiliza para todas las operaciones
-    vectoriales posteriores, garantizando consistencia y mejor rendimiento.
+    Esta implementación utiliza la extensión sqlite-vss si está disponible para mejorar
+    el rendimiento de las búsquedas vectoriales.
     """
     
     def __init__(self, embedding_dim: int = None):
         """
-        Inicializa la instancia de SQLiteVectorialDatabase.
+        Inicializa la base de datos SQLite.
         
         Args:
-            embedding_dim: Dimensión fija de los embeddings que se utilizarán.
-                          Si se proporciona, todos los vectores deben tener esta dimensión.
-                          Si es None, se utilizará una dimensión predeterminada de 384.
+            embedding_dim: Dimensión de los embeddings.
         """
-        # Llamar al constructor de la clase padre para inicializar _logger y otros atributos comunes
-        super().__init__()
+        super().__init__()  # Asegurarse de inicializar la clase base
+        logger.debug("Inicializando SQLiteVectorialDatabase")
         
         self._conn = None
         self._cursor = None
         self._db_path = None
-        self._use_vector_extension = True
-        self._similarity_threshold = 0.3
-        self._vector_table_name = "vec_chunks_embedding"
-        self._extension_loaded = False
         
-        # Fijar la dimensión del embedding durante la inicialización
-        self._embedding_dim = embedding_dim if embedding_dim is not None else 384
-        logger.info(f"Dimensión de embedding fijada en: {self._embedding_dim}")
+        # Establecer la dimensión de los embeddings
+        if embedding_dim is None:
+            raise ValueError("Se requiere la dimensión de embeddings para inicializar la base de datos SQLite")
+        self._embedding_dim = embedding_dim
+        
+        # Configuración para extensión vectorial
+        self._extension_loaded = False
+        self._extension_path = None
+        self._vector_table_name = 'chunks_vectors'
+        self._use_vector_extension = True  # Por defecto intentar usar la extensión
+        
+        # Inicializar metadatos
+        self._metadata = {}
+        
+        # Inicializar umbral de similitud
+        self._similarity_threshold = 0.3  # Valor por defecto
     
     def connect(self, db_path: str) -> None:
         """
@@ -84,6 +92,12 @@ class SQLiteVectorialDatabase(VectorialDatabase):
             
             # Habilitar claves foráneas
             self._cursor.execute("PRAGMA foreign_keys = ON;")
+            
+            # Actualizar la configuración desde config.py
+            from config import config
+            sqlite_config = config.get_database_config().get('sqlite', {})
+            self._similarity_threshold = sqlite_config.get('similarity_threshold', 0.3)
+            logger.debug(f"Umbral de similitud establecido en: {self._similarity_threshold}")
             
             # Cargar extensiones vectoriales
             self._extension_loaded = self.load_extensions()
@@ -791,8 +805,10 @@ class SQLiteVectorialDatabase(VectorialDatabase):
             int: ID del chunk insertado, None si falla
         """
         try:
+            logger.debug(f"Iniciando inserción de chunk para documento ID {document_id}")
             # Verificar el estado de la extensión vectorial
             vector_extension_enabled = self._extension_loaded and self._use_vector_extension
+            logger.debug(f"Estado de extensión vectorial: {vector_extension_enabled}")
             
             # Convertir el embedding a bytes para almacenamiento eficiente
             embedding = chunk.get('embedding')
@@ -801,24 +817,36 @@ class SQLiteVectorialDatabase(VectorialDatabase):
             if embedding is not None:
                 if isinstance(embedding, list):
                     embedding_bytes = self.serialize_vector(embedding)
+                    logger.debug(f"Embedding serializado: {len(embedding)} dimensiones -> {len(embedding_bytes)} bytes")
                 elif isinstance(embedding, np.ndarray):
                     embedding_bytes = self.serialize_vector(embedding.tolist())
+                    logger.debug(f"Embedding (numpy) serializado: {embedding.shape} -> {len(embedding_bytes)} bytes")
+            else:
+                logger.warning(f"Embedding es None para chunk: {chunk.get('header', 'Sin encabezado')[:50]}")
             
             # Insertar el chunk en la tabla principal
-            self._cursor.execute("""
+            sql_insert = """
                 INSERT INTO chunks (document_id, text, header, page, embedding, embedding_dim)
                 VALUES (?, ?, ?, ?, ?, ?)
-            """, (
+            """
+            
+            params = (
                 int(document_id),  # Asegurar que es un entero
                 chunk.get('text', ''),
                 chunk.get('header', None),
                 chunk.get('page', None),
                 embedding_bytes,
                 chunk.get('embedding_dim', self._embedding_dim)  # Usar la dimensión propuesta o la fija
-            ))
+            )
+            
+            logger.debug(f"Ejecutando SQL: {sql_insert}")
+            logger.debug(f"Parámetros: doc_id={document_id}, header_len={len(chunk.get('header', '')) if chunk.get('header') else 0}, text_len={len(chunk.get('text', ''))}, embedding_dim={chunk.get('embedding_dim', self._embedding_dim)}")
+            
+            self._cursor.execute(sql_insert, params)
             
             # Obtener el ID del chunk insertado
             chunk_id = self._cursor.lastrowid
+            logger.debug(f"Chunk insertado con ID: {chunk_id}")
             
             # Solo intentar actualizar el índice vectorial si todo está configurado
             if vector_extension_enabled and chunk_id and embedding_bytes:
@@ -829,25 +857,88 @@ class SQLiteVectorialDatabase(VectorialDatabase):
                         WHERE type='table' AND name='{self._vector_table_name}';
                     """)
                     vector_table_exists = self._cursor.fetchone() is not None
+                    logger.debug(f"Tabla vectorial existe: {vector_table_exists}")
                     
                     if vector_table_exists:
                         # Usar la sintaxis exacta del ejemplo proporcionado
-                        self._cursor.execute(
-                            f"INSERT INTO {self._vector_table_name}(rowid, embedding) VALUES (?, ?)",
-                            (chunk_id, embedding_bytes)
-                        )
+                        sql_vector = f"INSERT INTO {self._vector_table_name}(rowid, embedding) VALUES (?, ?)"
+                        logger.debug(f"Actualizando índice vectorial con SQL: {sql_vector}")
+                        self._cursor.execute(sql_vector, (chunk_id, embedding_bytes))
+                        logger.debug("Índice vectorial actualizado correctamente")
                     else:
                         # Si no existe, intentar crearla
+                        logger.warning(f"Tabla vectorial {self._vector_table_name} no existe. Intentando crear...")
                         if self.create_vector_index():
+                            logger.debug(f"Tabla vectorial creada. Insertando datos...")
                             self._cursor.execute(
                                 f"INSERT INTO {self._vector_table_name}(rowid, embedding) VALUES (?, ?)",
                                 (chunk_id, embedding_bytes)
                             )
+                        else:
+                            logger.error("No se pudo crear el índice vectorial")
                 except sqlite3.Error as e:
                     logger.warning(f"Error al actualizar índice vectorial para chunk {chunk_id} (no crítico): {e}")
             
             return chunk_id
             
         except Exception as e:
-            logger.error(f"Error al insertar chunk individual: {e}")
+            logger.error(f"Error al insertar chunk individual: {e}", exc_info=True)
             return None
+
+    def begin_transaction(self) -> bool:
+        """
+        Inicia una transacción manual para inserción masiva.
+        Útil para mejorar rendimiento con muchas inserciones.
+        
+        Returns:
+            bool: True si se inició correctamente la transacción
+        """
+        try:
+            if self._conn:
+                logger.debug("Iniciando transacción en SQLite")
+                self._conn.execute("BEGIN TRANSACTION;")
+                return True
+            else:
+                logger.error("No se puede iniciar transacción: conexión no disponible")
+                return False
+        except Exception as e:
+            logger.error(f"Error al iniciar transacción en SQLite: {e}", exc_info=True)
+            return False
+    
+    def commit_transaction(self) -> bool:
+        """
+        Confirma una transacción en curso.
+        
+        Returns:
+            bool: True si se confirmó correctamente la transacción
+        """
+        try:
+            if self._conn:
+                logger.debug("Confirmando transacción en SQLite")
+                self._conn.commit()
+                return True
+            else:
+                logger.error("No se puede confirmar transacción: conexión no disponible")
+                return False
+        except Exception as e:
+            logger.error(f"Error al confirmar transacción en SQLite: {e}", exc_info=True)
+            return False
+    
+    def rollback_transaction(self) -> bool:
+        """
+        Revierte una transacción en curso.
+        
+        Returns:
+            bool: True si se revirtió correctamente la transacción
+        """
+        try:
+            if self._conn:
+                logger.debug("Revirtiendo transacción en SQLite")
+                self._conn.rollback()
+                return True
+            else:
+                logger.error("No se puede revertir transacción: conexión no disponible")
+                return False
+        except Exception as e:
+            logger.error(f"Error al revertir transacción en SQLite: {e}", exc_info=True)
+            return False

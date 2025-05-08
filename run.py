@@ -63,6 +63,7 @@ def main() -> int:
     mode_group.add_argument("--optimize-db", type=int, help="Optimiza una base de datos específica por índice")
     mode_group.add_argument("--optimize-all", action="store_true", help="Optimiza todas las bases de datos")
     mode_group.add_argument("--db-stats", action="store_true", help="Muestra estadísticas de bases de datos")
+    mode_group.add_argument("--resource-status", action="store_true", help="Muestra el estado actual del gestor de recursos")
     
     # Argumentos para el modo de ingestión
     parser.add_argument("--files", type=str, help="Directorio o archivo Markdown a procesar")
@@ -118,6 +119,8 @@ def main() -> int:
             return 0
         elif args.export_chunks:
             return handle_export_chunks_mode(args)
+        elif args.resource_status:
+            return show_resource_status()
         
         return 0
     except Exception as e:
@@ -283,20 +286,59 @@ def list_sessions() -> int:
     Lista las sesiones disponibles.
     
     Returns:
-        int: Código de salida (0 para éxito)
+        int: Código de resultado (0=éxito, 1=error).
     """
-    # Importar solo cuando sea necesario
+    # Importar el gestor de sesiones
     from modulos.session_manager.session_manager import SessionManager
     
+    # Usar el gestor de sesiones para listar sesiones
     session_manager = SessionManager()
     sessions = session_manager.list_sessions()
     
-    print_header(f"SESIONES DISPONIBLES ({len(sessions)})")
+    # Mostrar título
+    print("\n" + C_TITLE + " SESIONES DISPONIBLES " + C_RESET)
+    print_separator()
     
-    for i, session in enumerate(sessions, 1):
-        print(f"{C_HIGHLIGHT}{i}. ID: {session['id']} - Modelo: {session['embedding_model']} - Chunking: {session['chunking_method']} - DB: {session['db_type']}")
-        if session.get('custom_name'):
-            print(f"   Nombre: {session['custom_name']}")
+    if not sessions:
+        print_status("warning", "No hay sesiones disponibles")
+        print()
+        return 0
+        
+    # Ordenar las sesiones por actividad más reciente
+    sessions.sort(key=lambda s: s.get('last_activity', 0), reverse=True)
+    
+    for i, session in enumerate(sessions):
+        # Simplificar tiempos para mostrar
+        created_readable = datetime.fromtimestamp(session.get('created_at', 0)).strftime('%Y-%m-%d %H:%M')
+        last_activity_readable = datetime.fromtimestamp(session.get('last_activity', 0)).strftime('%Y-%m-%d %H:%M')
+        
+        # Obtener BD asociadas
+        databases = session.get('databases', [])
+        
+        # Obtener archivos procesados
+        files = session.get('files', [])
+        
+        print(f"{C_HIGHLIGHT}{i}. ID: {session['id']} - Creado: {created_readable} - Última actividad: {last_activity_readable}")
+        
+        # Mostrar detalles de bases de datos
+        if databases:
+            print(f"{C_INFO}   Bases de datos ({len(databases)}):")
+            for j, db in enumerate(databases[:3]):  # Limitar a 3 bases de datos para evitar spam
+                print(f"{C_INFO}     {j+1}. {db.get('name', 'Sin nombre')} - Modelo: {db.get('model', 'desconocido')} - Chunking: {db.get('chunking', 'desconocido')}")
+            if len(databases) > 3:
+                print(f"{C_INFO}     ...y {len(databases) - 3} más")
+        
+        # Mostrar archivos procesados
+        if files:
+            print(f"{C_INFO}   Archivos procesados ({len(files)}):")
+            # Mostrar máximo 3 archivos y resumir el resto
+            for j, file_path in enumerate(files[:3]):
+                file_name = os.path.basename(file_path)
+                print(f"{C_INFO}     {j+1}. {file_name}")
+            if len(files) > 3:
+                print(f"{C_INFO}     ...y {len(files) - 3} más")
+        
+        print()
     
     print(Style.BRIGHT + "=" * 80 + "\n")
     return 0
@@ -468,6 +510,7 @@ def show_available_databases(show_output: bool = True) -> List[Tuple[str, Dict[s
     # Importar el gestor de sesiones
     from modulos.session_manager.session_manager import SessionManager
     from colorama import Style  # Asegurar que Style está disponible
+    import os
     
     # Usar el gestor de sesiones para listar bases de datos
     session_manager = SessionManager()
@@ -492,22 +535,61 @@ def show_available_databases(show_output: bool = True) -> List[Tuple[str, Dict[s
             
         # Mostrar información resumida de cada base de datos
         for i, (name, db) in enumerate(sorted_dbs):
+            # Formatear fechas para lectura humana
             created_date = datetime.fromtimestamp(db.get('created_at', 0)).strftime('%Y-%m-%d')
-            model = db.get('embedding_model', 'desconocido')
-            chunks = db.get('chunking_method', 'desconocido')
-            db_type = db.get('db_type', 'desconocido').upper()  # Tipo de base de datos
+            last_used_date = datetime.fromtimestamp(db.get('last_used', 0)).strftime('%Y-%m-%d')
             
-            # Formato más compacto y visual, incluyendo el tipo de base de datos
-            if i == 0:  # Resaltar la más reciente
-                print(f"{C_SUCCESS}[{i}] {C_HIGHLIGHT}{name}{C_RESET} - {created_date} - DB: {C_VALUE}{db_type}{C_RESET} - Modelo: {C_VALUE}{model}{C_RESET} - Chunking: {chunks}")
-            else:
-                print(f"[{i}] {C_HIGHLIGHT}{name}{C_RESET} - {created_date} - DB: {db_type} - Modelo: {model} - Chunking: {chunks}")
+            # Obtener información básica
+            model = db.get('embedding_model', 'desconocido')
+            chunking = db.get('chunking_method', 'desconocido')
+            db_type = db.get('db_type', 'desconocido')
+            db_path = db.get('db_path', 'desconocido')
+            
+            # Obtener tamaño del archivo si existe
+            size_str = ""
+            if db_path and os.path.exists(db_path):
+                size_bytes = os.path.getsize(db_path)
+                # Convertir a KB, MB, GB según sea apropiado
+                if size_bytes < 1024:
+                    size_str = f"{size_bytes} bytes"
+                elif size_bytes < 1024 * 1024:
+                    size_str = f"{size_bytes/1024:.1f} KB"
+                elif size_bytes < 1024 * 1024 * 1024:
+                    size_str = f"{size_bytes/(1024*1024):.1f} MB"
+                else:
+                    size_str = f"{size_bytes/(1024*1024*1024):.2f} GB"
+                size_str = f" - Tamaño: {size_str}"
+            
+            # Obtener información de sesión asociada
+            session_info = ""
+            session_id = db.get('session_id')
+            if session_id:
+                session_info = f" - Sesión: {session_id}"
+            
+            # Obtener nombre personalizado si existe
+            custom_name = db.get('custom_name', '')
+            custom_name_info = f" - Nombre: {custom_name}" if custom_name else ""
+            
+            # Mostrar información con formato mejorado
+            print(f"{C_HIGHLIGHT}{i}. {name}{custom_name_info}")
+            print(f"{C_INFO}   Modelo: {C_VALUE}{model}{C_RESET} - Chunking: {C_VALUE}{chunking}{C_RESET} - Tipo: {C_VALUE}{db_type}{C_RESET}")
+            print(f"{C_INFO}   Creado: {C_VALUE}{created_date}{C_RESET} - Último uso: {C_VALUE}{last_used_date}{C_RESET}{size_str}{session_info}")
+            
+            # Mostrar información de archivos si está disponible
+            files = db.get('files', [])
+            if files:
+                print(f"{C_INFO}   Archivos: {C_VALUE}{len(files)}{C_RESET}")
+                # Mostrar hasta 2 archivos de ejemplo
+                for j, file_path in enumerate(files[:2]):
+                    file_name = os.path.basename(file_path)
+                    print(f"{C_INFO}     - {file_name}")
+                if len(files) > 2:
+                    print(f"{C_INFO}     - ...y {len(files) - 2} más")
+            
+            print()  # Separación entre bases de datos
         
         print_separator()
         
-        # Mostrar comandos útiles
-        print_useful_commands()
-    
     return sorted_dbs
 
 def optimize_database(db_index: int) -> None:
@@ -743,6 +825,82 @@ def handle_export_chunks_mode(args: argparse.Namespace) -> int:
         
     except Exception as e:
         logger.error(f"{C_ERROR}Error al exportar chunks: {e}")
+        return 1
+
+def show_resource_status() -> int:
+    """
+    Muestra el estado actual del ResourceManager y sus métricas.
+    
+    Returns:
+        int: Código de salida (0 para éxito, 1 para error)
+    """
+    try:
+        from modulos.resource_management.resource_manager import ResourceManager
+        from modulos.utils.formatting import print_header, print_separator, C_HIGHLIGHT, C_VALUE, C_INFO, C_ERROR, C_RESET, C_SUCCESS
+        import pprint
+
+        print_header("ESTADO DEL GESTOR DE RECURSOS")
+
+        # Obtener instancia (debe estar inicializada previamente en el flujo normal)
+        resource_manager = ResourceManager()
+
+        # Forzar actualización de métricas para obtener los valores más recientes
+        resource_manager.update_metrics()
+        
+        metrics = resource_manager.metrics
+        static_info = resource_manager.get_system_static_info()
+
+        print(f"{C_HIGHLIGHT}Información Estática del Sistema:{C_RESET}")
+        if "error" in static_info:
+            print(f"{C_ERROR}  Error al obtener información estática: {static_info['error']}{C_RESET}")
+        else:
+            print(f"{C_INFO}  OS: {C_VALUE}{static_info.get('os_platform', 'N/A')} {static_info.get('os_release', '')}{C_RESET}")
+            print(f"{C_INFO}  Arquitectura: {C_VALUE}{static_info.get('architecture', 'N/A')}{C_RESET}")
+            print(f"{C_INFO}  Python: {C_VALUE}{static_info.get('python_version', 'N/A')}{C_RESET}")
+            print(f"{C_INFO}  CPU Cores (L/F): {C_VALUE}{static_info.get('cpu_cores_logical', 'N/A')} / {static_info.get('cpu_cores_physical', 'N/A')}{C_RESET}")
+            print(f"{C_INFO}  RAM Total: {C_VALUE}{static_info.get('total_ram_gb', 'N/A')} GB{C_RESET}")
+        print_separator()
+
+        print(f"{C_HIGHLIGHT}Métricas Dinámicas:{C_RESET}")
+        print(f"{C_INFO}  Actualización: {C_VALUE}{datetime.fromtimestamp(metrics.get('last_metrics_update_ts', 0)).strftime('%Y-%m-%d %H:%M:%S')}{C_RESET}")
+        print(f"{C_INFO}  Monitor Activo: {C_VALUE}{metrics.get('monitoring_thread_active', 'N/A')}{C_RESET}")
+        print_separator()
+        print(f"{C_INFO}  Uso Memoria Sistema:")
+        print(f"{C_INFO}    Total: {C_VALUE}{metrics.get('system_memory_total_gb', 'N/A')} GB{C_RESET}")
+        print(f"{C_INFO}    Disponible: {C_VALUE}{metrics.get('system_memory_available_gb', 'N/A')} GB{C_RESET}")
+        print(f"{C_INFO}    Usada: {C_VALUE}{metrics.get('system_memory_used_gb', 'N/A')} GB ({metrics.get('system_memory_percent', 'N/A')} %){C_RESET}")
+        print_separator()
+        print(f"{C_INFO}  Uso Memoria Proceso RAG:")
+        print(f"{C_INFO}    RSS: {C_VALUE}{metrics.get('process_memory_rss_mb', 'N/A')} MB{C_RESET}")
+        print(f"{C_INFO}    VMS: {C_VALUE}{metrics.get('process_memory_vms_mb', 'N/A')} MB{C_RESET}")
+        print(f"{C_INFO}    Porcentaje: {C_VALUE}{metrics.get('process_memory_percent', 'N/A')} %{C_RESET}")
+        print_separator()
+        print(f"{C_INFO}  Uso CPU:")
+        print(f"{C_INFO}    Sistema: {C_VALUE}{metrics.get('cpu_percent_system', 'N/A')} %{C_RESET}")
+        print(f"{C_INFO}    Proceso RAG: {C_VALUE}{metrics.get('cpu_percent_process', 'N/A')} %{C_RESET}")
+        print_separator()
+        print(f"{C_HIGHLIGHT}Componentes RAG:{C_RESET}")
+        print(f"{C_INFO}  Sesiones Activas: {C_VALUE}{metrics.get('active_sessions_rag', 'N/A')}{C_RESET}")
+        print(f"{C_INFO}  Modelos Embedding Activos: {C_VALUE}{metrics.get('active_embedding_models', 'N/A')}{C_RESET}")
+        
+        # Opcional: Mostrar configuración cargada por ResourceManager
+        print_separator()
+        print(f"{C_HIGHLIGHT}Configuración de Gestión de Recursos Cargada:{C_RESET}")
+        print(f"{C_INFO}  Intervalo Monitoreo: {C_VALUE}{getattr(resource_manager, 'monitoring_interval_sec', 'N/A')}s{C_RESET}")
+        print(f"{C_INFO}  Umbral Memoria Agresivo: {C_VALUE}{getattr(resource_manager, 'aggressive_cleanup_threshold_mem_pct', 'N/A')}%{C_RESET}")
+        print(f"{C_INFO}  Umbral Memoria Advertencia: {C_VALUE}{getattr(resource_manager, 'warning_cleanup_threshold_mem_pct', 'N/A')}%{C_RESET}")
+        print(f"{C_INFO}  Umbral CPU Advertencia: {C_VALUE}{getattr(resource_manager, 'warning_threshold_cpu_pct', 'N/A')}%{C_RESET}")
+        print(f"{C_INFO}  Monitoreo Habilitado: {C_VALUE}{getattr(resource_manager, 'monitoring_enabled', 'N/A')}{C_RESET}")
+        print(f"{C_INFO}  Workers CPU: {C_VALUE}{getattr(resource_manager, 'default_cpu_workers', 'N/A')}{C_RESET}")
+        print(f"{C_INFO}  Workers IO: {C_VALUE}{getattr(resource_manager, 'default_io_workers', 'N/A')}{C_RESET}")
+        print(f"{C_INFO}  Max Workers Total: {C_VALUE}{getattr(resource_manager, 'max_total_workers', 'N/A')}{C_RESET}")
+
+        print_separator()
+        return 0
+
+    except Exception as e:
+        print(f"{C_ERROR}Error al obtener el estado del gestor de recursos: {e}{C_RESET}")
+        logger.error("Error detallado en show_resource_status", exc_info=True)
         return 1
 
 if __name__ == "__main__":

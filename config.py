@@ -227,6 +227,16 @@ class Config:
         processing_config = self.config.get("processing", {})
         return self._process_env_vars(processing_config)
     
+    def get_resource_management_config(self) -> Dict[str, Any]:
+        """
+        Obtiene la configuración del gestor de recursos.
+        
+        Returns:
+            Diccionario con la configuración de gestión de recursos.
+        """
+        resource_config = self.config.get("resource_management", {})
+        return self._process_env_vars(resource_config)
+    
     def get_specific_model_config(self, model_type: str) -> Dict[str, Any]:
         """
         Obtiene la configuración específica de un modelo de embedding.
