@@ -127,83 +127,100 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
     from modulos.resource_management.resource_manager import ResourceManager
     resource_manager = ResourceManager()
     concurrency_manager = resource_manager.concurrency_manager
-
+    
+    # Actualizar ResourceManager sobre la operación en proceso
+    resource_manager.metrics["operation_in_progress"] = "document_processing"
+    resource_manager.metrics["total_documents"] = len(md_files)
+    resource_manager.update_metrics() # Forzar actualización inicial de métricas
+ 
     # Procesar cada documento
     successful_docs = 0
     failed_docs = 0
     total_files = len(md_files)
     logger.info(f"Preparando para procesar {total_files} documentos...")
 
-    # Lista para almacenar los archivos procesados exitosamente (para actualizar metadatos de sesión)
+    # Lista para almacenar los archivos procesados exitosamente y sus metadatos
     processed_files = []
+    file_metadata = {}  # Diccionario para guardar metadatos ricos para cada archivo
 
-    if concurrency_manager and total_files > 1: # Usar concurrencia solo si hay manager y más de 1 archivo
-        logger.info("Utilizando ConcurrencyManager para procesamiento paralelo.")
+    # Usar concurrencia solo si hay manager y más de 1 archivo
+    if concurrency_manager and total_files > 1:
+        logger.info(f"Utilizando ConcurrencyManager para procesamiento paralelo de {total_files} documentos.")
         
-        executor = concurrency_manager.get_thread_pool_executor()
-        map_function = concurrency_manager.map_tasks_in_thread_pool
-
-        if executor and map_function:
-            # Crear iterador de argumentos para process_single_document
-            # Convertimos doc_path a string aquí y pasamos resource_manager
-            args_iterator = ((str(doc_path), markdown_processor, chunker, db, resource_manager) for doc_path in md_files)
-            
-            try:
-                # El map devuelve los resultados en el orden de los iterables
-                results = map_function(process_single_document_wrapper, args_iterator)
-                
-                processed_count = 0
-                for doc_path, doc_id in zip(md_files, results):
-                    processed_count += 1
-                    if doc_id is not None:
-                        successful_docs += 1
-                        # Agregar a la lista de archivos procesados
-                        processed_files.append(str(doc_path))
-                        logger.info(f"({processed_count}/{total_files}) Documento procesado OK: {doc_path} -> ID: {doc_id}")
-                    else:
-                        failed_docs += 1
-                        logger.error(f"({processed_count}/{total_files}) Error procesando: {doc_path}")
-            except Exception as e:
-                logger.error(f"{C_ERROR}Error durante el procesamiento paralelo: {e}", exc_info=True)
-                failed_docs = total_files - successful_docs # Marcar los restantes como fallidos
-        else:
-            logger.warning("ConcurrencyManager no pudo obtener un ejecutor. Procesando secuencialmente.")
-            # Fallback a procesamiento secuencial
-            for i, doc_path in enumerate(md_files):
-                logger.info(f"Procesando secuencialmente ({i+1}/{total_files}): {doc_path}")
-                doc_id = process_single_document(str(doc_path), markdown_processor, chunker, db, resource_manager)
-                if doc_id:
+        # Determinar chunksize óptimo para distribuir archivos entre workers
+        iterable_length = len(md_files)
+        chunksize = concurrency_manager.get_optimal_chunksize(
+            task_type="default", 
+            iterable_length=iterable_length
+        )
+        logger.info(f"Tamaño de lote (chunksize) calculado para procesamiento: {chunksize}")
+        
+        # Crear el iterador de argumentos
+        args_iterator = ((str(doc_path), markdown_processor, chunker, db, resource_manager) 
+                        for doc_path in md_files)
+        
+        # Usar el nuevo método map_tasks que selecciona automáticamente el mejor pool
+        results = concurrency_manager.map_tasks(
+            process_single_document_wrapper,
+            args_iterator,
+            chunksize=chunksize,
+            task_type="default",  # El tipo de tarea determinará el pool óptimo
+            # Sugerencia: usar ProcessPool para más de 10 archivos
+            prefer_process=total_files >= 10
+        )
+        
+        # Procesar los resultados de la ejecución paralela
+        if results:
+            processed_count = 0
+            for doc_path, result in zip(md_files, results):
+                processed_count += 1
+                if isinstance(result, dict) and result.get("document_id") is not None:
                     successful_docs += 1
+                    doc_id = result.get("document_id")
+                    # Agregar a la lista de archivos procesados
                     processed_files.append(str(doc_path))
+                    
+                    # Guardar metadatos enriquecidos
+                    file_path_str = str(doc_path)
+                    file_metadata[file_path_str] = {
+                        "size": doc_path.stat().st_size,
+                        "chunks": result.get("chunk_count", 0),
+                        "processing_time": result.get("processing_time", 0)
+                    }
+                    
+                    logger.info(f"({processed_count}/{total_files}) Documento procesado OK: {doc_path} -> ID: {doc_id}")
                 else:
                     failed_docs += 1
+                    logger.error(f"({processed_count}/{total_files}) Error procesando: {doc_path}")
+        else:
+            logger.error(f"{C_ERROR}No se recibieron resultados del procesamiento paralelo.")
+            failed_docs = total_files  # Marcar todos como fallidos si no hay resultados
     else:
         # Procesamiento secuencial si no hay ConcurrencyManager o es un solo archivo
         logger.info("Procesando secuencialmente.")
         for i, doc_path in enumerate(md_files):
             logger.info(f"({i+1}/{total_files}) Procesando: {doc_path}")
-            doc_id = process_single_document(str(doc_path), markdown_processor, chunker, db, resource_manager)
-            if doc_id:
+            result = process_single_document(str(doc_path), markdown_processor, chunker, db, resource_manager)
+            if isinstance(result, dict) and result.get("document_id") is not None:
                 successful_docs += 1
                 processed_files.append(str(doc_path))
-                # logger.info(f"Documento procesado correctamente, ID: {doc_id}") # Log ya está dentro de la condición anterior
+                
+                # Guardar metadatos enriquecidos
+                file_path_str = str(doc_path)
+                file_metadata[file_path_str] = {
+                    "size": doc_path.stat().st_size,
+                    "chunks": result.get("chunk_count", 0),
+                    "processing_time": result.get("processing_time", 0)
+                }
             else:
                 failed_docs += 1
-                # logger.error(f"Error al procesar documento: {doc_path}") # Log ya está dentro de la condición anterior
-    
-    # Actualizar metadatos de sesión con la lista de archivos procesados si se proporcionó session_name
+
+    # Actualizar metadatos de sesión con la lista de archivos procesados y sus metadatos
     if session_name and processed_files:
         try:
-            # Obtener la sesión actual
-            session = session_manager.get_session(session_name)
-            if session:
-                # Actualizar la lista de archivos (añadir a los existentes)
-                current_files = session.get("files", [])
-                # Combinar los archivos actuales con los nuevos y eliminar duplicados
-                updated_files = list(set(current_files + processed_files))
-                # Actualizar la sesión
-                session_manager.update_session_metadata(session_name, {"files": updated_files})
-                logger.info(f"Metadatos de sesión {session_name} actualizados con {len(processed_files)} archivos procesados.")
+            # Actualizar la lista de archivos usando el nuevo método mejorado
+            session_manager.update_session_file_list(session_name, processed_files, file_metadata)
+            logger.info(f"Metadatos de sesión {session_name} actualizados con {len(processed_files)} archivos procesados.")
         except Exception as e:
             logger.warning(f"No se pudo actualizar la lista de archivos en los metadatos de sesión: {e}")
     
@@ -265,9 +282,16 @@ def process_single_document(file_path: str,
     """
     if resource_manager is None:
         # Solo si no recibimos el resource_manager como parámetro
-        from modulos.resource_management.resource_manager import ResourceManager
-        resource_manager = ResourceManager()
-    memory_manager = resource_manager.memory_manager
+        try:
+            from modulos.resource_management.resource_manager import ResourceManager
+            resource_manager = ResourceManager()
+        except Exception as e:
+            logger.error(f"Error al inicializar ResourceManager: {e}")
+            resource_manager = None
+    
+    memory_manager = None
+    if resource_manager:
+        memory_manager = resource_manager.memory_manager
 
     try:
         # Obtener configuración de optimización de memoria
@@ -278,9 +302,14 @@ def process_single_document(file_path: str,
         # memory_optimization_enabled = memory_config.get("enabled", True) # Ya no se usa directamente aquí
         base_batch_size = memory_config.get("batch_size", 50) # Mantenemos la config como base
         
-        # Obtener batch_size optimizado desde MemoryManager
+        # Obtener batch_size optimizado desde MemoryManager y verificar si están suspendidas las verificaciones
+        verification_suspended = resource_manager.is_verification_suspended() if resource_manager else False
         if memory_manager:
-            batch_size = memory_manager.optimize_batch_size(base_batch_size=base_batch_size, min_batch_size=10) 
+            batch_size = memory_manager.optimize_batch_size(
+                base_batch_size=base_batch_size, 
+                min_batch_size=10,
+                verification_suspended=verification_suspended
+            )
             logger.info(f"Batch size optimizado por MemoryManager a: {C_VALUE}{batch_size}{C_RESET}")
         else:
             batch_size = base_batch_size
@@ -292,8 +321,18 @@ def process_single_document(file_path: str,
         # Obtener el título del documento desde los metadatos
         doc_title = metadata.get('title', 'Documento')
         
-        # La decisión de streaming vs no-streaming ahora se maneja internamente
-        # por el chunker/db según la configuración y el MemoryManager, ya no se necesita if aquí.
+        # Determinar el tamaño del documento para posible suspensión de verificaciones
+        document_size_kb = len(content) / 1024  # Tamaño aproximado en KB
+        
+        # Estimar si es un documento grande basado en tamaño
+        is_large_document = document_size_kb > 500  # Documentos > 500KB son considerados grandes
+        
+        # Solo considerar suspensión para documentos pequeños
+        if resource_manager and not is_large_document:
+            logger.info(f"Documento pequeño detectado ({document_size_kb:.1f}KB). Considerando suspensión de verificaciones.")
+            resource_manager.auto_suspend_if_needed(document_size_kb=document_size_kb, duration_seconds=300)
+        else:
+            logger.info(f"Documento de tamaño considerable ({document_size_kb:.1f}KB). Manteniendo verificaciones activas.")
         
         # Método optimizado: streaming de chunks (Asumiendo que es el modo por defecto ahora)
         document_id = db.insert_document_metadata(metadata)
@@ -309,7 +348,26 @@ def process_single_document(file_path: str,
         processed_chunks = 0
         start_time = time.time()
         
+        # Determinar el tamaño óptimo de lote para procesamiento
+        if resource_manager and resource_manager.concurrency_manager:
+            # Usar el tamaño óptimo de lote para embeddings
+            concurrency_manager = resource_manager.concurrency_manager
+            batch_size = concurrency_manager.get_optimal_chunksize("embeddings")
+            logger.info(f"Usando batch_size optimizado para embeddings: {batch_size}")
+        else:
+            # Si no hay ConcurrencyManager, usar el valor de la configuración
+            batch_size = base_batch_size
+            logger.info(f"Usando batch_size de configuración: {batch_size}")
+        
+        # Si es un documento grande, considerar incrementar el batch size
+        if document_size_kb > 1000:  # Más de 1MB
+            batch_size = max(batch_size, 32)  # Usar al menos 32 para documentos grandes
+            logger.info(f"Documento grande detectado, usando batch_size aumentado: {batch_size}")
+        
         try:
+            # Lista temporal para acumular chunks durante el procesamiento por lotes
+            chunks_buffer = []
+            
             # Generar, procesar e insertar chunks uno por uno usando streaming
             for chunk in chunker.process_content_stream(content, doc_title=doc_title):
                 logger.debug(f"Procesando chunk con header: {chunk.get('header', 'Sin header')} y longitud de texto: {len(chunk.get('text', ''))} caracteres")
@@ -321,41 +379,45 @@ def process_single_document(file_path: str,
                     return None
                 
                 try:
-                    # Obtener embedding combinando encabezado y texto
-                    embedding = chunker.model.get_document_embedding(chunk['header'], chunk['text'])
-                    logger.debug(f"Embedding generado correctamente con dimensiones: {len(embedding) if embedding else 'None'}")
+                    # Agregar el chunk al buffer de procesamiento
+                    chunks_buffer.append(chunk)
                     
-                    # Crear chunk final con embedding
-                    prepared_chunk = {
-                        'text': chunk['text'],
-                        'header': chunk['header'],
-                        'page': chunk.get('page', ''),
-                        'embedding': embedding,
-                        'embedding_dim': chunker.model.get_dimensions()
-                    }
-                    
-                    # Insertar el chunk individual
-                    chunk_id = db.insert_single_chunk(document_id, prepared_chunk)
-                    
-                    if chunk_id:
-                        logger.debug(f"Chunk insertado correctamente con ID: {chunk_id}")
-                    else:
-                        logger.error(f"{C_ERROR}Error: La inserción del chunk retornó None o 0. Verificar la implementación de insert_single_chunk.")
-                    
-                    # Liberar memoria explícitamente
-                    del embedding
-                    del prepared_chunk
-                    
-                    processed_chunks += 1
-                    
+                    # Cuando el buffer alcanza el tamaño de lote, procesar todos juntos
+                    if len(chunks_buffer) >= batch_size:
+                        _process_chunks_batch(chunks_buffer, chunker, document_id, db)
+                        processed_chunks += len(chunks_buffer)
+                        chunks_buffer = []  # Reiniciar el buffer
+                        
+                        # Mostrar progreso
+                        elapsed = time.time() - start_time
+                        rate = processed_chunks / elapsed if elapsed > 0 else 0
+                        logger.info(f"Procesados {C_VALUE}{processed_chunks}{C_RESET} chunks ({C_VALUE}{rate:.2f}{C_RESET} chunks/seg)")
+                        
+                        # Forzar garbage collection periódicamente para evitar acumulación de memoria
+                        if processed_chunks % (batch_size * 2) == 0:
+                            gc.collect()
+                            
+                            # Actualizar batch_size dinámicamente según uso de recursos
+                            if memory_manager:
+                                verification_suspended = resource_manager.is_verification_suspended() if resource_manager else False
+                                new_batch_size = memory_manager.optimize_batch_size(
+                                    base_batch_size=batch_size, 
+                                    min_batch_size=10,
+                                    verification_suspended=verification_suspended
+                                )
+                                
+                                if new_batch_size != batch_size:
+                                    batch_size = new_batch_size
+                                    logger.debug(f"Batch size re-optimizado a: {batch_size}")
+                                
                 except Exception as chunk_e:
                     logger.error(f"{C_ERROR}Error al procesar/insertar chunk individual: {chunk_e}", exc_info=True)
-                
-                # Mostrar progreso y forzar garbage collection periódicamente
-                if processed_chunks % batch_size == 0:
-                    elapsed = time.time() - start_time
-                    rate = processed_chunks / elapsed if elapsed > 0 else 0
-                    logger.info(f"Procesados {C_VALUE}{processed_chunks}{C_RESET} chunks ({C_VALUE}{rate:.2f}{C_RESET} chunks/seg)")
+            
+            # Procesar los chunks restantes en el buffer
+            if chunks_buffer:
+                _process_chunks_batch(chunks_buffer, chunker, document_id, db)
+                processed_chunks += len(chunks_buffer)
+                chunks_buffer = []
             
             # Confirmar transacción
             db.commit_transaction()
@@ -365,9 +427,25 @@ def process_single_document(file_path: str,
                 # Forzar una recolección de basura pero sin intentar liberar el modelo de embedding
                 # ya que lo necesitaremos para futuros documentos
                 gc.collect()
+            
+            # Evaluar al final del procesamiento si debemos reconsiderar la suspensión
+            # basado en el número total de chunks procesados
+            if resource_manager and is_large_document and processed_chunks < 10:
+                # Si teníamos un documento teóricamente grande pero generó pocos chunks,
+                # reconsiderar y posiblemente suspender verificaciones
+                logger.info(f"Documento grande ({document_size_kb:.1f}KB) pero generó pocos chunks ({processed_chunks}). Reconsiderando suspensión.")
+                resource_manager.auto_suspend_if_needed(
+                    document_size_kb=document_size_kb, 
+                    chunk_count=processed_chunks,
+                    duration_seconds=300
+                )
                 
             logger.info(f"Completado: {file_path} -> {C_VALUE}{processed_chunks}{C_RESET} chunks procesados en {C_VALUE}{time.time() - start_time:.2f}{C_RESET}s")
-            return document_id
+            return {
+                "document_id": document_id, 
+                "chunk_count": processed_chunks,
+                "processing_time": time.time() - start_time
+            }
             
         except Exception as e:
             # Rollback en caso de error
@@ -567,3 +645,70 @@ def verify_database_file(db_path: str) -> bool:
         logger.error(f"{C_ERROR}✗ Archivo de base de datos no encontrado: {C_VALUE}{db_path}")
         
     return exists
+
+def _process_chunks_batch(chunks_batch, chunker, document_id, db):
+    """
+    Procesa un lote de chunks, generando embeddings e insertándolos en la base de datos.
+    
+    Esta función se encarga de procesar múltiples chunks en una sola operación,
+    lo que mejora el rendimiento al reducir la sobrecarga.
+    
+    Args:
+        chunks_batch (List[Dict]): Lista de chunks a procesar
+        chunker: Instancia del chunker que contiene el modelo de embeddings
+        document_id: ID del documento al que pertenecen los chunks
+        db: Instancia de la base de datos para inserción
+    """
+    if not chunks_batch:
+        return
+    
+    # Extraer textos y encabezados para procesamiento por lotes
+    headers = [chunk['header'] for chunk in chunks_batch]
+    texts = [chunk['text'] for chunk in chunks_batch]
+    
+    try:
+        # Verificar si el modelo tiene capacidad de procesamiento por lotes
+        if hasattr(chunker.model, 'get_document_embeddings_batch'):
+            # Procesar el lote completo en una sola llamada (muy eficiente)
+            embeddings = chunker.model.get_document_embeddings_batch(headers, texts)
+        else:
+            # Fallback: procesar uno por uno si no hay método de lotes
+            embeddings = []
+            for header, text in zip(headers, texts):
+                embedding = chunker.model.get_document_embedding(header, text)
+                embeddings.append(embedding)
+        
+        # Preparar chunks para inserción
+        prepared_chunks = []
+        for i, chunk in enumerate(chunks_batch):
+            if i < len(embeddings):  # Verificación de seguridad
+                prepared_chunks.append({
+                    'text': chunk['text'],
+                    'header': chunk['header'],
+                    'page': chunk.get('page', ''),
+                    'embedding': embeddings[i],
+                    'embedding_dim': chunker.model.get_dimensions()
+                })
+        
+        # Intentar inserción por lotes si está disponible
+        if hasattr(db, 'insert_chunks_batch'):
+            # Insertar todo el lote en una sola operación
+            chunk_ids = db.insert_chunks_batch(document_id, prepared_chunks)
+            if chunk_ids and len(chunk_ids) > 0:
+                logger.debug(f"Batch de {len(prepared_chunks)} chunks insertado correctamente")
+            else:
+                logger.warning(f"La inserción del batch de chunks no devolvió IDs")
+        else:
+            # Fallback: insertar uno por uno
+            for prepared_chunk in prepared_chunks:
+                chunk_id = db.insert_single_chunk(document_id, prepared_chunk)
+                if not chunk_id:
+                    logger.warning(f"La inserción del chunk retornó None o 0")
+        
+        # Liberar memoria explícitamente
+        del embeddings
+        del prepared_chunks
+        
+    except Exception as e:
+        logger.error(f"{C_ERROR}Error al procesar lote de chunks: {e}", exc_info=True)
+        raise

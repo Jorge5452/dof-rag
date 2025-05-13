@@ -211,14 +211,17 @@ class VectorialDatabase(ABC):
     @abstractmethod
     def insert_single_chunk(self, document_id, chunk_data):
         """
-        Inserta un único chunk asociado a un documento en la base de datos.
-        Diseñado para procesamiento streaming de documentos grandes.
+        Inserta un solo chunk asociado a un documento específico.
         
         Args:
             document_id (int): ID del documento al que pertenece el chunk
-            chunk_data (dict): Diccionario con los datos del chunk
-                Debe contener: 'text', 'header', 'page', 'embedding', 'embedding_dim'
-            
+            chunk_data (dict): Diccionario con los datos del chunk:
+                - text (str): Texto del chunk
+                - header (str, opcional): Encabezado del chunk
+                - page (str, opcional): Número o identificador de página
+                - embedding (list): Vector de embedding del chunk
+                - embedding_dim (int): Dimensión del embedding
+                
         Returns:
             int: ID del chunk insertado, None si falla
         """
@@ -670,3 +673,59 @@ class VectorialDatabase(ABC):
         except Exception as e:
             self._logger.error(f"Error al obtener chunks adyacentes: {str(e)}")
             return []
+
+    def insert_chunks_batch(self, document_id, chunks_data):
+        """
+        Inserta un lote de chunks asociados a un documento específico.
+        
+        Este método permite la inserción eficiente de múltiples chunks en una sola operación,
+        lo que puede mejorar sustancialmente el rendimiento al reducir el número de
+        operaciones individuales y aprovechar transacciones.
+        
+        Las implementaciones concretas pueden optimizar este proceso utilizando
+        características específicas del motor de base de datos subyacente.
+        
+        Args:
+            document_id (int): ID del documento al que pertenecen los chunks
+            chunks_data (List[dict]): Lista de diccionarios con los datos de cada chunk:
+                - text (str): Texto del chunk
+                - header (str, opcional): Encabezado del chunk
+                - page (str, opcional): Número o identificador de página
+                - embedding (list): Vector de embedding del chunk
+                - embedding_dim (int): Dimensión del embedding
+                
+        Returns:
+            List[int]: Lista de IDs de los chunks insertados, o None si falla
+        """
+        # Implementación por defecto que inserta cada chunk individualmente
+        # Las clases derivadas deberían sobrescribir esto con una implementación más eficiente
+        self._logger.debug(f"Insertando batch de {len(chunks_data)} chunks usando método por defecto")
+        chunk_ids = []
+        try:
+            # Asegurarse de que estamos en una transacción
+            in_transaction = getattr(self, '_in_transaction', False)
+            if not in_transaction:
+                self.begin_transaction()
+                transaction_started = True
+            else:
+                transaction_started = False
+                
+            # Procesar cada chunk
+            for chunk_data in chunks_data:
+                chunk_id = self.insert_single_chunk(document_id, chunk_data)
+                if chunk_id:
+                    chunk_ids.append(chunk_id)
+                else:
+                    self._logger.warning("Fallo al insertar chunk individual en batch")
+            
+            # Commit solo si iniciamos la transacción
+            if transaction_started:
+                self.commit_transaction()
+                
+            return chunk_ids
+        except Exception as e:
+            self._logger.error(f"Error al insertar batch de chunks: {e}")
+            # Rollback solo si iniciamos la transacción
+            if 'transaction_started' in locals() and transaction_started:
+                self.rollback_transaction()
+            return None

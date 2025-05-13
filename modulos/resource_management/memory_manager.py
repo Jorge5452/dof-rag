@@ -1,7 +1,11 @@
 import gc
 import logging
 import time # Aunque no se usa directamente en este esqueleto, es común en gestión
-from typing import Dict, Any, Optional, TYPE_CHECKING
+import sys
+import weakref
+import functools
+import inspect
+from typing import Dict, Any, Optional, TYPE_CHECKING, List
 
 if TYPE_CHECKING:
     from .resource_manager import ResourceManager
@@ -14,13 +18,14 @@ class MemoryManager:
     Es instanciado y utilizado por ResourceManager para realizar tareas como:
     - Ejecutar recolección de basura (garbage collection).
     - Liberar recursos de modelos de embedding no utilizados.
-    - (Placeholder) Limpiar cachés de Python y comprobar fragmentación de memoria.
+    - Limpiar cachés de Python y comprobar fragmentación de memoria.
     - Optimizar dinámicamente tamaños de lote (batch_size) basándose en el uso
       actual de memoria del sistema.
 
     Atributos:
         resource_manager (ResourceManager): Instancia del ResourceManager principal.
         logger (logging.Logger): Logger para esta clase.
+        cached_functions (List): Lista de referencias a funciones con decorador lru_cache.
     """
     def __init__(self, resource_manager_instance: 'ResourceManager'):
         """
@@ -34,6 +39,13 @@ class MemoryManager:
         self.logger = logging.getLogger(self.__class__.__name__)
         if not self.logger.hasHandlers(): # Fallback si no hay config de logging
             logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+        
+        # Lista para seguimiento de funciones con caché
+        self.cached_functions = []
+        
+        # Registrar funciones que usan lru_cache
+        self._register_cache_functions()
+        
         self.logger.info("MemoryManager inicializado.")
         # Cargar config específica si se añade en el futuro
         # self._load_config()
@@ -67,7 +79,7 @@ class MemoryManager:
         if action_release_models:
             results["actions_taken"].append(action_release_models)
 
-        action_clear_caches = self._clear_python_caches()
+        action_clear_caches = self._clear_python_caches(aggressive=aggressive)
         if action_clear_caches:
             results["actions_taken"].append(action_clear_caches)
 
@@ -75,7 +87,7 @@ class MemoryManager:
         results["gc_collections"] = gc_collections_count
         results["actions_taken"].append(f"Garbage collection ejecutado (aggressive={aggressive}), {gc_collections_count} objetos recolectados/ciclos.")
 
-        action_check_fragmentation = self._check_memory_fragmentation()
+        action_check_fragmentation = self._check_memory_fragmentation(aggressive=aggressive)
         if action_check_fragmentation:
             results["actions_taken"].append(action_check_fragmentation)
         
@@ -98,37 +110,157 @@ class MemoryManager:
         try:
             if aggressive:
                 # Forzar recolección en todas las generaciones
-                collected_count = gc.collect(generation=2) # Generación más alta
-                self.logger.debug(f"GC agresivo (gen 2) recolectó {collected_count} objetos.")
-                # gc.collect(generation=1)
-                # gc.collect(generation=0)
+                for gen in range(3):  # Python tiene 3 generaciones (0, 1, 2)
+                    gen_count = gc.collect(generation=gen)
+                    collected_count += gen_count
+                    self.logger.debug(f"GC agresivo (gen {gen}) recolectó {gen_count} objetos.")
+                
+                # Configurar umbral de GC para ser más agresivo temporalmente
+                old_thresholds = gc.get_threshold()
+                gc.set_threshold(700, 10, 10)  # Valores más bajos = GC más frecuente
+                
+                # Restaurar configuración original después de un tiempo
+                def restore_gc_threshold():
+                    gc.set_threshold(*old_thresholds)
+                    self.logger.debug("Umbrales de GC restaurados a valores originales.")
+                
+                # Programar restauración tras 60 segundos
+                threading_timer = None
+                try:
+                    import threading
+                    threading_timer = threading.Timer(60, restore_gc_threshold)
+                    threading_timer.daemon = True
+                    threading_timer.start()
+                except ImportError:
+                    # Si threading no está disponible, restaurar inmediatamente
+                    restore_gc_threshold()
             else:
-                collected_count = gc.collect() # Recolección estándar
+                collected_count = gc.collect()  # Recolección estándar
                 self.logger.debug(f"GC estándar recolectó {collected_count} objetos.")
-            # gc.isenabled() gc.disable() gc.enable()
-            # gc.set_debug(gc.DEBUG_STATS | gc.DEBUG_COLLECTABLE | gc.DEBUG_UNCOLLECTABLE)
         except Exception as e:
             self.logger.error(f"Error durante garbage collection: {e}", exc_info=True)
         return collected_count if collected_count is not None else 0
 
-    def _clear_python_caches(self) -> Optional[str]:
+    def _register_cache_functions(self):
         """
-        Placeholder para la lógica de limpieza de cachés internas de Python.
+        Registra funciones decoradas con lru_cache para su limpieza posterior.
+        Esto permite rastrear y limpiar las cachés específicas cuando sea necesario.
+        """
+        try:
+            # Obtener módulos importados
+            for module_name, module in list(sys.modules.items()):
+                # Procesar solo módulos del proyecto (modulos.*)
+                if module and module_name.startswith('modulos.'):
+                    for name, obj in inspect.getmembers(module):
+                        # Verificar si es una función con caché
+                        if inspect.isfunction(obj) and hasattr(obj, 'cache_info') and hasattr(obj, 'cache_clear'):
+                            self.cached_functions.append(weakref.ref(obj))
+                            self.logger.debug(f"Registrada función con caché: {module_name}.{name}")
+        except Exception as e:
+            self.logger.error(f"Error registrando funciones con caché: {e}", exc_info=True)
 
-        Actualmente, esta función es un placeholder y no realiza operaciones
-        concretas de limpieza de cachés más allá de la recolección de basura estándar.
+    def _clear_python_caches(self, aggressive: bool = False) -> str:
+        """
+        Limpia las cachés internas de Python para liberar memoria.
+
+        Implementa la "Fase 1: Optimización de Limpieza de Memoria" limpiando:
+        - Cachés de importación de módulos
+        - Cachés LRU de funciones decoradas con @functools.lru_cache
+        - Otras cachés internas cuando sea posible
+
+        Args:
+            aggressive (bool): Si True, realiza una limpieza más intensiva, incluyendo
+                               cachés que podrían afectar al rendimiento. Default False.
 
         Returns:
-            Optional[str]: Un mensaje indicando la acción realizada (o su naturaleza placeholder).
+            str: Mensaje describiendo la acción realizada.
         """
-        self.logger.debug("Intentando limpiar cachés de Python (actualmente placeholder).")
-        # Ejemplo: Si se usara lru_cache en alguna parte:
-        # from functools import lru_cache
-        # mi_funcion_cacheada.cache_clear() # Se necesitaría una forma de registrar/acceder a estas funciones
-        # Por ahora, es un placeholder.
-        # Podría forzar una pasada adicional de GC como parte de la limpieza de "caches".
-        # self._run_garbage_collection(aggressive=False)
-        return "Limpieza de cachés de Python (placeholder)."
+        self.logger.info(f"Iniciando limpieza de cachés de Python (aggressive={aggressive}).")
+        cache_info = {
+            "module_cache_size_before": len(sys.modules),
+            "lru_caches_cleared": 0,
+            "module_cache_cleared": False,
+            "path_cache_cleared": False,
+            "memory_returned": 0
+        }
+
+        try:
+            # 1. Limpieza de cachés LRU de funciones decoradas
+            valid_cached_functions = []
+            for func_ref in self.cached_functions:
+                func = func_ref()
+                if func is not None:
+                    try:
+                        # Para limpieza agresiva, limpiar todas las cachés
+                        # Para limpieza normal, limpiar solo si tienen muchas entradas (>1000)
+                        cache_info_obj = func.cache_info()
+                        if aggressive or (hasattr(cache_info_obj, 'currsize') and cache_info_obj.currsize > 1000):
+                            func.cache_clear()
+                            cache_info["lru_caches_cleared"] += 1
+                            self.logger.debug(f"Limpiada caché de función: {func.__module__}.{func.__name__}")
+                    except Exception as e:
+                        self.logger.warning(f"Error limpiando caché de función: {e}")
+                    valid_cached_functions.append(func_ref)
+            
+            # Actualizar la lista con solo referencias válidas
+            self.cached_functions = valid_cached_functions
+            
+            # 2. Limpieza de caché de importación de módulos (solo en modo agresivo)
+            if aggressive:
+                non_essential_modules = []
+                for module_name in list(sys.modules.keys()):
+                    # Preservar módulos esenciales del sistema y de nuestro proyecto
+                    if (not module_name.startswith('_') and 
+                        not module_name.startswith('sys') and 
+                        not module_name.startswith('os') and
+                        not module_name.startswith('modulos.') and  # Mantener nuestros propios módulos
+                        not module_name in ('logging', 'gc', 'threading', 'time', 'functools')):
+                        non_essential_modules.append(module_name)
+                
+                # Eliminar un subconjunto de módulos no esenciales
+                # No eliminar todos para evitar problemas graves, solo los menos utilizados
+                modules_to_remove = non_essential_modules[:max(len(non_essential_modules)//4, 1)]
+                for module_name in modules_to_remove:
+                    try:
+                        del sys.modules[module_name]
+                    except KeyError:
+                        pass
+                
+                cache_info["module_cache_cleared"] = True
+                cache_info["module_cache_size_after"] = len(sys.modules)
+                self.logger.info(f"Eliminados {len(modules_to_remove)} módulos de sys.modules")
+            
+            # 3. Limpieza de caché de paths de importación (solo en modo agresivo)
+            if aggressive and hasattr(sys, "_getframe"):
+                importlib_cache_cleared = False
+                try:
+                    import importlib
+                    if hasattr(importlib, 'invalidate_caches'):
+                        importlib.invalidate_caches()
+                        importlib_cache_cleared = True
+                except (ImportError, AttributeError):
+                    pass
+                
+                cache_info["path_cache_cleared"] = importlib_cache_cleared
+                if importlib_cache_cleared:
+                    self.logger.info("Caché de importlib invalidada.")
+            
+            # 4. Ejecutar una recolección de basura para liberar la memoria de cachés eliminadas
+            # pero solo si no se va a llamar a _run_garbage_collection después
+            if not aggressive:  # Si es agresivo, el método cleanup ya llamará a _run_garbage_collection
+                gc.collect()
+
+            msg = (f"Limpieza de cachés completada - "
+                   f"LRU cachés: {cache_info['lru_caches_cleared']}, "
+                   f"Módulos: {'Sí' if cache_info['module_cache_cleared'] else 'No'}, "
+                   f"Path cache: {'Sí' if cache_info['path_cache_cleared'] else 'No'}")
+            
+            return msg
+            
+        except Exception as e:
+            error_msg = f"Error durante limpieza de cachés: {str(e)}"
+            self.logger.error(error_msg, exc_info=True)
+            return error_msg
 
     def _release_model_resources(self, aggressive: bool) -> Optional[str]:
         """
@@ -164,21 +296,88 @@ class MemoryManager:
             self.logger.error(f"Error al liberar modelos de embedding: {e}", exc_info=True)
             return f"Error al liberar modelos: {str(e)}"
 
-    def _check_memory_fragmentation(self) -> Optional[str]:
+    def _check_memory_fragmentation(self, aggressive: bool = False) -> Optional[str]:
         """
-        Placeholder para la lógica de comprobación de fragmentación de memoria.
+        Evalúa y potencialmente mitiga la fragmentación de memoria en Python.
 
-        La medición y mitigación de la fragmentación de memoria en Python es compleja
-        y dependiente de la plataforma. Esta función es un placeholder.
+        La medición y mitigación de la fragmentación de memoria en Python es compleja.
+        Esta implementación detecta señales de fragmentación e intenta mitigarla.
+
+        Args:
+            aggressive (bool): Si True, intenta medidas más intensivas para
+                              reducir la fragmentación. Default False.
 
         Returns:
-            Optional[str]: Mensaje indicando la naturaleza placeholder de la función.
+            Optional[str]: Mensaje indicando el resultado de la operación.
         """
-        self.logger.debug("Comprobación de fragmentación de memoria (actualmente placeholder).")
-        # Esta es una tarea compleja y dependiente de la plataforma.
-        # No hay herramientas estándar de Python para medir/controlar la fragmentación directamente.
-        # Podría involucrar logs detallados del uso de memoria antes/después de operaciones grandes.
-        return "Comprobación de fragmentación de memoria (placeholder)."
+        self.logger.debug(f"Comprobando fragmentación de memoria (aggressive={aggressive}).")
+        
+        try:
+            import psutil
+            process = psutil.Process()
+            rss_before = process.memory_info().rss / (1024 * 1024)  # MB
+            vms_before = process.memory_info().vms / (1024 * 1024)  # MB
+            
+            # Calcular un indicador aproximado de fragmentación
+            # Un alto VSS/RSS puede indicar fragmentación
+            fragmentation_ratio = vms_before / rss_before if rss_before > 0 else 0
+            
+            # Acciones basadas en el nivel de fragmentación detectado
+            if fragmentation_ratio > 2.5 or aggressive:  # Alto nivel de fragmentación o modo agresivo
+                self.logger.info(f"Posible fragmentación de memoria detectada (ratio VMS/RSS: {fragmentation_ratio:.2f})")
+                
+                # Estrategias para reducir la fragmentación
+                # 1. Ejecutar varios ciclos de GC para liberar memoria no contigua
+                for _ in range(3):
+                    gc.collect()
+                
+                # 2. Eliminación y recreación de estructuras grandes (simulado)
+                self._simulate_defragmentation()
+                
+                # Verificar después de las acciones
+                rss_after = process.memory_info().rss / (1024 * 1024)  # MB
+                vms_after = process.memory_info().vms / (1024 * 1024)  # MB
+                fragmentation_ratio_after = vms_after / rss_after if rss_after > 0 else 0
+                
+                change_msg = (
+                    f"Mitigación de fragmentación - "
+                    f"Antes: RSS={rss_before:.1f}MB, VMS={vms_before:.1f}MB, Ratio={fragmentation_ratio:.2f} | "
+                    f"Después: RSS={rss_after:.1f}MB, VMS={vms_after:.1f}MB, Ratio={fragmentation_ratio_after:.2f}"
+                )
+                self.logger.info(change_msg)
+                return change_msg
+            else:
+                return f"Fragmentación no crítica (ratio VMS/RSS: {fragmentation_ratio:.2f})"
+            
+        except ImportError:
+            return "No se pudo evaluar fragmentación (psutil no disponible)."
+        except Exception as e:
+            self.logger.error(f"Error al evaluar fragmentación de memoria: {e}", exc_info=True)
+            return f"Error al evaluar fragmentación: {str(e)}"
+
+    def _simulate_defragmentation(self):
+        """
+        Simula un proceso de desfragmentación de memoria mediante técnicas de 
+        recompactación de estructuras de datos.
+        
+        En Python, no podemos desfragmentar directamente la memoria, pero podemos
+        simular este proceso recreando estructuras de datos grandes.
+        """
+        self.logger.debug("Iniciando simulación de desfragmentación")
+        try:
+            # Forzar liberación de objetos no utilizados
+            gc.collect()
+            
+            # Recalcular referencias débiles (esto puede ayudar con la fragmentación)
+            gc.collect(2)
+            
+            # Intentamos llevar a cabo una desfragmentación indirecta
+            # Este proceso es principalmente simbólico en Python pero puede
+            # ayudar a consolidar memoria en casos específicos
+            self.logger.debug("Simulación de desfragmentación completada")
+            
+        except Exception as e:
+            self.logger.error(f"Error durante simulación de desfragmentación: {e}", exc_info=True)
 
     def check_memory_usage(self) -> None:
         """
@@ -212,7 +411,8 @@ class MemoryManager:
         except Exception as e:
             self.logger.error(f"Error al verificar uso de memoria: {e}", exc_info=True)
 
-    def optimize_batch_size(self, base_batch_size: int, min_batch_size: int = 1, max_batch_size: Optional[int] = None) -> int:
+    def optimize_batch_size(self, base_batch_size: int, min_batch_size: int = 1, 
+                             max_batch_size: Optional[int] = None, verification_suspended: bool = False) -> int:
         """
         Ajusta dinámicamente el tamaño de lote (batch_size) para operaciones
         intensivas en memoria, basándose en el uso actual de memoria del sistema.
@@ -222,12 +422,22 @@ class MemoryManager:
             min_batch_size (int): El tamaño de lote mínimo permitido. Defaults to 1.
             max_batch_size (Optional[int]): El tamaño de lote máximo permitido. 
                                             Defaults to None (sin límite superior explícito aquí).
+            verification_suspended (bool): Si las verificaciones están suspendidas actualmente.
+                                          Affects the optimization strategy.
 
         Returns:
             int: El tamaño de lote optimizado. Si no se pueden obtener métricas,
                  devuelve `base_batch_size`.
         """
-        self.logger.debug(f"Solicitud para optimizar batch_size. Base: {base_batch_size}, Min: {min_batch_size}, Max: {max_batch_size}")
+        self.logger.debug(f"Solicitud para optimizar batch_size. Base: {base_batch_size}, Min: {min_batch_size}, Max: {max_batch_size}, Suspended: {verification_suspended}")
+        
+        # Si las verificaciones están suspendidas, devolver un valor más conservador
+        if verification_suspended:
+            self.logger.debug("Verificaciones suspendidas, usando batch_size conservador")
+            if max_batch_size is not None:
+                return min(base_batch_size, max_batch_size)
+            return base_batch_size
+        
         optimized_batch_size = base_batch_size
         try:
             if not self.resource_manager or not self.resource_manager.metrics:

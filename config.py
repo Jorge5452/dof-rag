@@ -231,11 +231,34 @@ class Config:
         """
         Obtiene la configuración del gestor de recursos.
         
+        El método procesa la sección 'resource_management' de la configuración,
+        que incluye subsecciones como 'monitoring', 'memory' y 'concurrency'.
+        
         Returns:
-            Diccionario con la configuración de gestión de recursos.
+            Diccionario con la configuración de gestión de recursos, transformado
+            a una estructura plana para facilitar su uso en el ResourceManager.
         """
         resource_config = self.config.get("resource_management", {})
-        return self._process_env_vars(resource_config)
+        
+        # Procesar variables de entorno en la configuración
+        processed_config = self._process_env_vars(resource_config)
+        
+        # Convertir la estructura jerárquica a una estructura plana para facilitar su uso
+        # en ResourceManager, manteniendo las claves originales de las subsecciones
+        flat_config = {}
+        
+        # Incluir propiedades de nivel superior
+        for key, value in processed_config.items():
+            if not isinstance(value, dict):
+                flat_config[key] = value
+        
+        # Incluir subsecciones con sus claves originales
+        for section_name, section_values in processed_config.items():
+            if isinstance(section_values, dict):
+                for key, value in section_values.items():
+                    flat_config[f"{key}"] = value
+        
+        return flat_config
     
     def get_specific_model_config(self, model_type: str) -> Dict[str, Any]:
         """

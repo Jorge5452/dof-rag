@@ -241,11 +241,21 @@ class EmbeddingFactory:
             
         return released_count
 
-    @classmethod
-    def get_active_model_count(cls) -> int:
-        """Devuelve el número de instancias de modelos gestionadas por la factory."""
-        with cls._lock:
-            return len(cls._instances)
+    @staticmethod
+    def get_active_model_count():
+        """
+        Devuelve el número de modelos de embeddings activos.
+        Utilizado por ResourceManager para monitoreo de recursos.
+        
+        Returns:
+            int: Número de modelos activos con referencias > 0
+        """
+        with EmbeddingFactory._lock:
+            active_count = 0
+            for model_key, model_ref in EmbeddingFactory._instances.items():
+                if model_ref.get_ref_count() > 0:
+                    active_count += 1
+            return active_count
 
 # Adjuntar logger a la clase para los classmethods
 EmbeddingFactory.logger = logger

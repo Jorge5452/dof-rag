@@ -527,24 +527,67 @@ class SessionManager:
     
     def list_sessions(self) -> List[Dict[str, Any]]:
         """
-        Lista todas las sesiones activas.
+        Devuelve una lista de todas las sesiones disponibles con información resumida.
         
         Returns:
-            Lista de sesiones con sus metadatos
+            Lista de diccionarios con información resumida de sesiones
         """
         with self._lock:
-            # Crear una lista con todas las sesiones
-            sessions_list = []
+            results = []
             for session_id, session_data in self.sessions.items():
-                # Crear una copia para evitar modificaciones no controladas
-                session_copy = dict(session_data)
-                session_copy["id"] = session_id
-                sessions_list.append(session_copy)
+                # Información básica
+                session_info = {
+                    "id": session_id,
+                    "created_at": session_data.get("created_at", 0),
+                    "last_activity": session_data.get("last_activity", 0)
+                }
+                
+                # Conteo de archivos
+                files = session_data.get("files", [])
+                session_info["file_count"] = len(files)
+                
+                # Añadir información resumida de archivos si hay archivos
+                if files:
+                    # Calcular tamaño total (si está disponible)
+                    total_size = 0
+                    total_chunks = 0
+                    file_list = []
+                    
+                    for file_item in files:
+                        if isinstance(file_item, dict):
+                            file_name = file_item.get("name", os.path.basename(file_item.get("path", "unknown")))
+                            file_info = {"name": file_name}
+                            
+                            # Añadir tamaño si está disponible
+                            if "size" in file_item:
+                                file_info["size"] = file_item["size"]
+                                total_size += file_item["size"]
+                                
+                            # Añadir conteo de chunks si está disponible
+                            if "chunks" in file_item:
+                                file_info["chunks"] = file_item["chunks"]
+                                total_chunks += file_item["chunks"]
+                                
+                            file_list.append(file_info)
+                        elif isinstance(file_item, str):
+                            file_list.append({"name": os.path.basename(file_item)})
+                    
+                    session_info["files"] = file_list[:5]  # Mostrar solo los primeros 5 archivos
+                    if len(file_list) > 5:
+                        session_info["files"].append({"name": f"...y {len(file_list) - 5} más"})
+                    
+                    if total_size > 0:
+                        session_info["total_size"] = total_size
+                    if total_chunks > 0:
+                        session_info["total_chunks"] = total_chunks
+                
+                # Información de base de datos
+                if "db_name" in session_data:
+                    session_info["db_name"] = session_data["db_name"]
+                    
+                results.append(session_info)
             
-            # Ordenar por último uso (más reciente primero)
-            sessions_list.sort(key=lambda x: x.get("last_activity", 0), reverse=True)
-            
-            return sessions_list
+            return results
     
     def get_database_by_index(self, index: int, session_id: Optional[str] = None) -> Tuple[Any, Dict[str, Any]]:
         """
@@ -1101,8 +1144,14 @@ class SessionManager:
     # Propiedad para inicialización perezosa de ResourceManager
     @property
     def resource_manager(self):
-        """Obtiene la instancia de ResourceManager con inicialización perezosa."""
+        """Obtiene la instancia de ResourceManager con inicialización perezosa y prevención de ciclos."""
         if self._resource_manager is None:
+            # Detectar ciclo de inicialización
+            if getattr(self, '_initializing_resource_manager', False):
+                logger.warning("Ciclo de inicialización detectado entre SessionManager y ResourceManager")
+                return None
+            
+            self._initializing_resource_manager = True
             try:
                 # Importación dentro del método para evitar dependencia circular
                 from modulos.resource_management.resource_manager import ResourceManager
@@ -1110,6 +1159,8 @@ class SessionManager:
                 logger.debug("ResourceManager recuperado para SessionManager.")
             except Exception as e:
                 logger.error(f"Error al acceder a ResourceManager: {e}")
+            finally:
+                self._initializing_resource_manager = False
         return self._resource_manager
 
     def add_context(self, session_id: str, query: str, response: str, sources: Optional[List[Dict]] = None) -> None:
@@ -1145,3 +1196,109 @@ class SessionManager:
         if len(self.contexts[session_id]) > self.MAX_CONTEXT_ENTRIES:
             # Remover los más antiguos manteniendo el máximo
             self.contexts[session_id] = self.contexts[session_id][-self.MAX_CONTEXT_ENTRIES:]
+
+    def update_session_file_list(self, session_id: str, new_files: List[str], 
+                           file_metadata: Optional[Dict[str, Dict[str, Any]]] = None) -> bool:
+        """
+        Actualiza la lista de archivos en los metadatos de una sesión con información enriquecida.
+        
+        Esta función maneja la combinación de archivos existentes y nuevos, evitando duplicados
+        y añadiendo información adicional sobre cada archivo (tamaño, chunks, fecha).
+        
+        Args:
+            session_id: ID de la sesión a actualizar
+            new_files: Lista de rutas (str) de archivos a añadir
+            file_metadata: Diccionario donde las claves son rutas de archivos y los valores
+                          son diccionarios con metadatos como 'size', 'chunks', 'timestamp', etc.
+                          
+        Returns:
+            bool: True si la actualización fue exitosa, False en caso contrario
+        """
+        with self._lock:
+            try:
+                # Verificar si la sesión existe
+                if session_id not in self.sessions:
+                    logger.error(f"No se puede actualizar lista de archivos: la sesión {session_id} no existe")
+                    return False
+                    
+                # Obtener la sesión actual
+                session = self.sessions[session_id]
+                
+                # Inicializar la lista de archivos si no existe
+                if "files" not in session:
+                    session["files"] = []
+                
+                # Convertir la lista actual de archivos a un formato estandarizado
+                current_files = session["files"]
+                
+                # Estandarizar formato: convertir entradas simples a estructura enriquecida
+                standardized_current_files = []
+                
+                for item in current_files:
+                    # Si el ítem es string (formato antiguo), convertirlo a diccionario
+                    if isinstance(item, str):
+                        file_path = os.path.abspath(item)
+                        file_info = {
+                            "path": file_path,
+                            "name": os.path.basename(file_path)
+                        }
+                        standardized_current_files.append(file_info)
+                    # Si ya es un diccionario, asegurar que path sea absoluto
+                    elif isinstance(item, dict):
+                        if "path" in item:
+                            item["path"] = os.path.abspath(item["path"])
+                            if "name" not in item:
+                                item["name"] = os.path.basename(item["path"])
+                            standardized_current_files.append(item)
+                
+                # Crear un conjunto de las rutas absolutas existentes para detectar duplicados
+                existing_paths = {item["path"] for item in standardized_current_files}
+                
+                # Procesar y añadir nuevos archivos
+                for file_path in new_files:
+                    abs_path = os.path.abspath(file_path)
+                    
+                    # Comprobar si ya existe
+                    if abs_path in existing_paths:
+                        # Buscamos el índice del archivo existente para actualizarlo
+                        existing_idx = next((i for i, item in enumerate(standardized_current_files) 
+                                          if item["path"] == abs_path), None)
+                        
+                        if existing_idx is not None:
+                            file_info = standardized_current_files[existing_idx]
+                        else:
+                            # No debería ocurrir, pero por si acaso
+                            logger.warning(f"Inconsistencia detectada con archivo {abs_path}")
+                            continue
+                    else:
+                        # Crear una nueva entrada para el archivo
+                        file_info = {
+                            "path": abs_path,
+                            "name": os.path.basename(abs_path),
+                            "first_added": time.time()
+                        }
+                        standardized_current_files.append(file_info)
+                        existing_paths.add(abs_path)
+                    
+                    # Actualizar la fecha de última modificación
+                    file_info["last_updated"] = time.time()
+                    
+                    # Añadir metadatos adicionales si están disponibles
+                    if file_metadata and abs_path in file_metadata:
+                        additional_meta = file_metadata[abs_path]
+                        for key, value in additional_meta.items():
+                            file_info[key] = value
+                
+                # Actualizar la lista de archivos en la sesión con la versión enriquecida
+                session["files"] = standardized_current_files
+                
+                # Guardar los cambios
+                self._save_sessions()
+                
+                logger.info(f"Lista de archivos actualizada para la sesión {session_id}: " 
+                           f"{len(standardized_current_files)} archivos")
+                return True
+                
+            except Exception as e:
+                logger.error(f"Error al actualizar la lista de archivos para la sesión {session_id}: {e}")
+                return False

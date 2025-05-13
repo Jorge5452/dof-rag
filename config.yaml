@@ -213,28 +213,74 @@ processing:
 
 # Configuración para el Gestor de Recursos Centralizado
 resource_management:
-  # Intervalo en segundos para el monitoreo de recursos
-  monitoring_interval: 30
-  # Umbral de porcentaje de uso de memoria para acciones de limpieza agresivas
-  aggressive_threshold_memory: 85
-  # Umbral de porcentaje de uso de memoria para advertencias o limpieza normal
-  warning_threshold_memory: 75
-  # Umbral de porcentaje de uso de CPU para advertencias
-  warning_threshold_cpu: 80
-  # Habilitar/deshabilitar el hilo de monitoreo del ResourceManager
-  monitoring_enabled: true
-  # Nivel de verbosidad para los logs de ResourceManager
-  # minimal: Solo errores y advertencias importantes
-  # normal: Información básica y advertencias (por defecto)
-  # detailed: Información detallada, útil para diagnóstico
-  log_verbosity: "minimal"
-  
-  # Configuración para ConcurrencyManager (se usará en Fase 4)
+  # Nivel de verbosidad de logs (minimal, normal, detailed)
+  log_verbosity: "normal"
+
+  # Configuración para monitoreo y límites
+  monitoring:
+    # Intervalo de monitoreo en segundos (0 para deshabilitar)
+    interval_sec: 180
+    # Intervalo de monitoreo cuando las verificaciones están suspendidas (segundos)
+    suspended_interval_sec: 600
+    # Umbral de memoria (%) para limpieza agresiva
+    aggressive_threshold_mem_pct: 90
+    # Umbral de memoria (%) para mostrar advertencias y limpieza normal
+    warning_threshold_mem_pct: 80
+    # Umbral de CPU (%) para mostrar advertencias
+    warning_threshold_cpu_pct: 90
+
+  # Configuración para gestión de memoria
+  memory:
+    # Umbral de memoria para suspender verificaciones automáticamente (MB)
+    auto_suspend_memory_mb: 1000
+    # Tiempo máximo para suspensión de verificaciones (segundos)
+    max_suspend_duration_sec: 1800
+    # Tamaño mínimo de documento (KB) para suspensión automática
+    document_size_threshold_kb: 5000
+    # Número mínimo de chunks para suspensión automática
+    min_chunks_for_suspend: 200
+
+  # Configuración para concurrencia y paralelismo
   concurrency:
-    # Número de workers por defecto para tareas intensivas en CPU.
-    # Puede ser un valor fijo, "auto" (basado en cores), o ajustado dinámicamente.
-    default_cpu_workers: "auto" # Ejemplo: 'auto' podría significar os.cpu_count()
-    # Número de workers por defecto para tareas I/O bound.
-    default_io_workers: "auto" # Ejemplo: min(32, (os.cpu_count() or 1) + 4)
-    # Máximo de workers global si se desea limitar.
-    max_total_workers: null # null o un entero para un límite superior
+    # Workers para operaciones CPU-bound ("auto" o número específico)
+    cpu_workers: "auto"
+    # Workers para operaciones I/O-bound ("auto" o número específico)
+    io_workers: "auto"
+    # Límite máximo total de workers (opcional) - aumentado para sistemas potentes
+    max_total_workers: 24
+    # Deshabilitar pools de procesos (útil en entornos con memoria limitada)
+    disable_process_pool: false
+    # Timeout por defecto para operaciones concurrentes (segundos)
+    default_timeout_sec: 120
+    
+    # Configuración para tamaños de chunks en procesamiento
+    chunk_sizes:
+      # Tamaño de chunk por defecto para map_tasks en procesamiento de documentos
+      default: 4
+      # Tamaño de chunk para operaciones de I/O (ej. lectura/escritura de archivos)
+      io_operations: 8
+      # Tamaño de chunk para generación de embeddings (procesamiento por lotes)
+      embeddings: 16
+    
+    # Configuración para ajuste adaptativo de workers
+    adaptive_workers:
+      # Habilitar/deshabilitar ajuste adaptativo
+      enabled: true
+      # Intervalo en segundos entre recálculos de workers
+      recalculation_interval: 180
+      # Umbral de CPU (%) para considerar alta carga y reducir workers
+      high_cpu_threshold: 80
+      # Umbral de memoria (%) para considerar alta carga y reducir workers
+      high_memory_threshold: 75
+      # Factor de reducción cuando hay alta carga (ej. 0.7 reduce a un 70% de los workers actuales)
+      reduction_factor: 0.7
+      # Factor de aumento cuando hay baja carga (ej. 1.3 aumenta a un 130% de los workers actuales)
+      increase_factor: 1.3
+      # Umbral de CPU (%) para considerar baja carga y aumentar workers
+      low_cpu_threshold: 30
+      # Umbral de memoria (%) para considerar baja carga y aumentar workers
+      low_memory_threshold: 50
+      # Mínimo de workers CPU permitido
+      min_cpu_workers: 2
+      # Mínimo de workers I/O permitido
+      min_io_workers: 4

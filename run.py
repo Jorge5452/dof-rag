@@ -559,6 +559,8 @@ def show_available_databases(show_output: bool = True) -> List[Tuple[str, Dict[s
                 else:
                     size_str = f"{size_bytes/(1024*1024*1024):.2f} GB"
                 size_str = f" - Tamaño: {size_str}"
+            else:
+                size_str = ""
             
             # Obtener información de sesión asociada
             session_info = ""
@@ -589,7 +591,7 @@ def show_available_databases(show_output: bool = True) -> List[Tuple[str, Dict[s
             print()  # Separación entre bases de datos
         
         print_separator()
-        
+    
     return sorted_dbs
 
 def optimize_database(db_index: int) -> None:
