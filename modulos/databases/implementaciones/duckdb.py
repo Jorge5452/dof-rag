@@ -44,6 +44,7 @@ class DuckDBVectorialDatabase(VectorialDatabase):
         self._schema_created = False
         self._similarity_threshold = 0.3
         self._db_path = None  # Añadido para guardar la ruta de la base de datos
+        self._in_transaction = False  # Flag para rastrear si hay una transacción activa
         
         # Fijar la dimensión del embedding
         self._embedding_dim = embedding_dim
@@ -1227,9 +1228,15 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             if not self._conn:
                 logger.error("No hay conexión a la base de datos para iniciar transacción")
                 return False
+            
+            # Verificar si ya hay una transacción activa
+            if self._in_transaction:
+                logger.debug("Ya hay una transacción activa en DuckDB, ignorando begin_transaction")
+                return True  # Ya estamos en una transacción, no es un error
                 
             # Iniciar transacción en DuckDB
             self._conn.execute("BEGIN TRANSACTION")
+            self._in_transaction = True
             logger.debug("Transacción iniciada en DuckDB")
             return True
         except Exception as e:
@@ -1247,9 +1254,15 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             if not self._conn:
                 logger.error("No hay conexión a la base de datos para confirmar transacción")
                 return False
+            
+            # Verificar si hay una transacción activa para confirmar
+            if not self._in_transaction:
+                logger.debug("No hay transacción activa en DuckDB para confirmar")
+                return True  # No hay transacción que confirmar, no es un error
                 
             # Confirmar transacción en DuckDB
             self._conn.execute("COMMIT")
+            self._in_transaction = False
             logger.debug("Transacción confirmada en DuckDB")
             return True
         except Exception as e:
@@ -1257,6 +1270,7 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             # Intentar hacer rollback en caso de error
             try:
                 self._conn.execute("ROLLBACK")
+                self._in_transaction = False
             except:
                 pass
             return False
@@ -1272,9 +1286,15 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             if not self._conn:
                 logger.error("No hay conexión a la base de datos para revertir transacción")
                 return False
+            
+            # Verificar si hay una transacción activa para revertir
+            if not self._in_transaction:
+                logger.debug("No hay transacción activa en DuckDB para revertir")
+                return True  # No hay transacción que revertir, no es un error
                 
             # Revertir transacción en DuckDB
             self._conn.execute("ROLLBACK")
+            self._in_transaction = False
             logger.debug("Transacción revertida en DuckDB")
             return True
         except Exception as e:

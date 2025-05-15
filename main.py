@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional, Any
 import concurrent.futures # Añadido para concurrencia
 import modulos.session_manager.session_manager # Importación añadida para resolver el warning
+from datetime import datetime
 
 # Configurar logging
 logger = logging.getLogger(__name__)
@@ -69,6 +70,10 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
         from modulos.embeddings.embeddings_factory import EmbeddingFactory
         embedding_manager = EmbeddingFactory().get_embedding_manager()
         embedding_dim = embedding_manager.get_dimensions()
+        
+        # El nombre del modelo se obtendrá directamente de la configuración más adelante
+        # cuando se importe config para las otras configuraciones
+        
         logger.info(f"Dimensiones de embeddings: {C_VALUE}{embedding_dim}{C_RESET}")
     except Exception as e:
         logger.error(f"{C_ERROR}Error al inicializar el modelo de embeddings: {e}")
@@ -76,17 +81,35 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
     
     # Crear o actualizar la base de datos
     db = None
+    db_metadata = {}  # Almacenaremos los metadatos de la base de datos aquí
     try:
-        db_config = None
-        if session_name:
-            session_manager = modulos.session_manager.session_manager.SessionManager()
-            try:
-                db_config = session_manager.get_session_database_config(session_name)
-                logger.info(f"Usando configuración de base de datos de la sesión '{session_name}'")
-            except Exception as e:
-                logger.error(f"{C_ERROR}Error al obtener configuración de BD para la sesión '{session_name}': {e}")
-                return
+        # Obtener configuración de la base de datos
+        from config import config
+        database_config = config.get_database_config()
+        db_type = database_config.get("type", "sqlite")
+        
+        # Obtener configuración de chunking
+        chunks_config = config.get_chunks_config()
+        chunking_method = chunks_config.get("method", "character")
+        
+        # Obtener nombre del modelo directamente de la configuración
+        embedding_config = config.get_embedding_config()
+        embedding_model = embedding_config.get("model", "modernbert")
+        
+        # Crear instancia de la base de datos
         db = DatabaseFactory().get_database_instance(embedding_dim=embedding_dim)
+        
+        # Guardar metadatos relevantes para la sesión unificada
+        db_path = getattr(db, "_db_path", "")
+        db_metadata = {
+            "db_type": db_type,
+            "db_path": db_path,
+            "embedding_dim": embedding_dim,
+            "embedding_model": embedding_model,
+            "chunking_method": chunking_method,
+            "created_at": time.time(),
+            "last_used": time.time()
+        }
     except Exception as e:
         logger.error(f"{C_ERROR}Error al crear o conectar con la base de datos: {e}")
         return
@@ -139,7 +162,7 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
     total_files = len(md_files)
     logger.info(f"Preparando para procesar {total_files} documentos...")
 
-    # Lista para almacenar los archivos procesados exitosamente y sus metadatos
+    # Lista para almacenar los archivos procesados exitosamente
     processed_files = []
     file_metadata = {}  # Diccionario para guardar metadatos ricos para cada archivo
 
@@ -180,7 +203,7 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
                     # Agregar a la lista de archivos procesados
                     processed_files.append(str(doc_path))
                     
-                    # Guardar metadatos enriquecidos
+                    # Guardar metadatos enriquecidos (para estadísticas aunque no se usen en la sesión)
                     file_path_str = str(doc_path)
                     file_metadata[file_path_str] = {
                         "size": doc_path.stat().st_size,
@@ -205,7 +228,7 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
                 successful_docs += 1
                 processed_files.append(str(doc_path))
                 
-                # Guardar metadatos enriquecidos
+                # Guardar metadatos enriquecidos (para estadísticas)
                 file_path_str = str(doc_path)
                 file_metadata[file_path_str] = {
                     "size": doc_path.stat().st_size,
@@ -215,30 +238,58 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
             else:
                 failed_docs += 1
 
-    # Actualizar metadatos de sesión con la lista de archivos procesados y sus metadatos
-    if session_name and processed_files:
-        try:
-            # Actualizar la lista de archivos usando el nuevo método mejorado
-            session_manager.update_session_file_list(session_name, processed_files, file_metadata)
-            logger.info(f"Metadatos de sesión {session_name} actualizados con {len(processed_files)} archivos procesados.")
-        except Exception as e:
-            logger.warning(f"No se pudo actualizar la lista de archivos en los metadatos de sesión: {e}")
-    
-    # Mostrar resumen de procesamiento
+    # Calcular tiempo transcurrido para el procesamiento
     elapsed_time = time.time() - start_time
+    
+    # Optimizar la base de datos después de insertar todos los documentos
+    logger.info("Optimizando base de datos...")
+    db.optimize_database()
+    
+    # Si el procesamiento fue exitoso, crear la sesión unificada
+    if successful_docs > 0:
+        try:
+            # Calcular estadísticas para la sesión
+            total_chunks_processed = sum(metadata.get("chunks", 0) for metadata in file_metadata.values())
+            total_processing_time = sum(metadata.get("processing_time", 0) for metadata in file_metadata.values())
+            
+            # Actualizar metadatos de la base de datos con estadísticas
+            db_metadata.update({
+                "total_chunks": total_chunks_processed,
+                "total_files": successful_docs,
+                "processing_time": total_processing_time,
+                "processing_complete": True,
+                "processing_date": datetime.now().isoformat()
+            })
+            
+            # Crear o obtener sesión a través del nuevo método unificado
+            from modulos.session_manager.session_manager import SessionManager
+            session_manager = SessionManager()
+            
+            # Si se proporcionó un nombre de sesión, usarlo
+            if session_name:
+                db_metadata["name"] = session_name
+                db_metadata["id"] = session_name
+            
+            # Crear la sesión unificada con todos los metadatos
+            unified_session_id = session_manager.create_unified_session(
+                database_metadata=db_metadata,
+                files_list=processed_files
+            )
+            
+            logger.info(f"Sesión unificada creada correctamente: {unified_session_id}")
+        except Exception as e:
+            logger.error(f"{C_ERROR}Error al crear sesión unificada: {e}")
+    else:
+        logger.warning(f"{C_WARNING}No se creó ninguna sesión porque no se procesaron documentos exitosamente.")
+
+    # Mostrar resumen de procesamiento
     logger.info(f"Procesamiento completo en {C_VALUE}{elapsed_time:.2f}{C_RESET} segundos")
     logger.info(f"Documentos procesados correctamente: {C_VALUE}{successful_docs}{C_RESET}")
     
     if failed_docs:
         logger.warning(f"Documentos con errores: {C_VALUE}{failed_docs}{C_RESET}")
     
-    # Optimizar la base de datos después de insertar todos los documentos
-    # (Nota: La concurrencia se gestiona via ResourceManager/ConcurrencyManager)
-    # (Nota: La optimización de memoria (batch_size) se gestiona via ResourceManager/MemoryManager)
-    logger.info("Optimizando base de datos...")
-    db.optimize_database()
-    
-    # Ahora que hemos terminado con todos los documentos, liberar recursos
+    # Liberar recursos
     if resource_manager and resource_manager.memory_manager:
         logger.info("Realizando limpieza final de memoria...")
         resource_manager.memory_manager.cleanup(reason="processing_completed")

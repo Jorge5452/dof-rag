@@ -236,7 +236,12 @@ class SessionManager:
                 "id": session_id,
                 "created_at": time.time(),
                 "last_activity": time.time(),
-                "files": []  # Lista vacía para almacenar archivos procesados
+                "files": [],  # Lista vacía para almacenar archivos procesados
+                "processing_stats": {
+                    "total_files_processed": 0,
+                    "total_chunks_generated": 0,
+                    "creation_date": datetime.now().isoformat()
+                }
             }
             
             # Añadir metadata si se proporciona
@@ -249,14 +254,10 @@ class SessionManager:
             # Inicializar espacio para contextos
             self.contexts[session_id] = {}
             
-            # Persistir los cambios inmediatamente
-            try:
-                self._save_to_file(self.sessions_file, self.sessions)
-                logger.debug(f"Sesiones guardadas después de crear {session_id}")
-            except Exception as e:
-                logger.error(f"Error al guardar sesiones después de crear {session_id}: {e}")
+            # Persistir inmediatamente
+            self._save_sessions()
             
-            logger.info(f"Sesión creada: {session_id} ({len(self.sessions)} sesiones activas)")
+            logger.info(f"Sesión {session_id} creada correctamente")
             return session_id
     
     def update_session_metadata(self, session_id: str, 
@@ -695,7 +696,7 @@ class SessionManager:
         Registra una nueva base de datos en el sistema con sus metadatos asociados.
         
         Args:
-            db_name: Nombre de la base de datos
+            db_name: Nombre de la base de datos (debe ser igual al session_id)
             metadata: Metadatos de la base de datos (tipo, modelo, dimensiones, etc.)
             
         Returns:
@@ -713,7 +714,7 @@ class SessionManager:
             missing_fields = [field for field in required_fields if field not in metadata]
             
             if missing_fields:
-                logger.warning(f"Campos faltantes en metadatos: {missing_fields}. Intentando recuperar...")
+                logger.warning(f"Campos faltantes en metadatos: {missing_fields}. Intentando completar...")
                 
                 # Intentar completar campos faltantes
                 if 'db_type' in missing_fields and 'db_path' in metadata:
@@ -723,11 +724,13 @@ class SessionManager:
                         metadata['db_type'] = 'duckdb'
                 
                 if 'embedding_model' in missing_fields:
-                    embedding_config = config.get_embedding_config()
+                    from config import Config
+                    embedding_config = Config().get_embedding_config()
                     metadata['embedding_model'] = embedding_config.get('model', 'modernbert')
                     
                 if 'chunking_method' in missing_fields:
-                    chunks_config = config.get_chunks_config()
+                    from config import Config
+                    chunks_config = Config().get_chunks_config()
                     metadata['chunking_method'] = chunks_config.get('method', 'character')
                     
                 # Verificar nuevamente los campos requeridos
@@ -735,18 +738,25 @@ class SessionManager:
                 if missing_fields:
                     logger.error(f"No se pudo completar los campos requeridos: {missing_fields}")
                     return False
-                    
-            # Añadir metadatos extras de configuración que pueden ser útiles
-            # para reconstruir el entorno completo
-            if 'additional_config' not in metadata:
-                metadata['additional_config'] = {}
             
-            # Añadir timestmaps si no existen
+            # Asegurar que id y name sean consistentes (mismo valor que db_name)
+            metadata['id'] = db_name
+            metadata['name'] = db_name
+            
+            # Asegurar que session_id existe y es igual a db_name (unificación de IDs)
+            metadata['session_id'] = db_name
+            
+            # Añadir timestamps si no existen
+            current_time = time.time()
             if 'created_at' not in metadata:
-                metadata['created_at'] = time.time()
+                metadata['created_at'] = current_time
                 
             # Actualizar timestamp de último uso
-            metadata["last_used"] = time.time()
+            metadata["last_used"] = current_time
+            
+            # Guardar en la estructura interna
+            self.db_metadata[db_name] = metadata
+            self._save_db_metadata()
             
             # Guardar metadatos en un archivo JSON junto a la base de datos
             meta_path = f"{db_path}.meta.json"
@@ -756,16 +766,15 @@ class SessionManager:
                 json.dump(metadata, f, indent=2, ensure_ascii=False)
                 
             # También guardar una copia en la carpeta de sesiones si está asociada a una sesión
-            if 'session_id' in metadata and metadata['session_id']:
-                session_dir = os.path.join(
-                    config.get_general_config().get('sessions_dir', 'sessions'),
-                    metadata['session_id']
-                )
-                os.makedirs(session_dir, exist_ok=True)
-                session_meta_path = os.path.join(session_dir, f"{db_name}.meta.json")
-                
-                with open(session_meta_path, 'w', encoding='utf-8') as f:
-                    json.dump(metadata, f, indent=2, ensure_ascii=False)
+            session_dir = os.path.join(
+                self.general_config.get('sessions_dir', 'sessions'),
+                db_name  # Usar db_name como session_id (ahora son iguales)
+            )
+            os.makedirs(session_dir, exist_ok=True)
+            session_meta_path = os.path.join(session_dir, f"{db_name}.meta.json")
+            
+            with open(session_meta_path, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
                     
             # Intentar guardar los metadatos dentro de la base de datos también
             try:
@@ -867,6 +876,9 @@ class SessionManager:
         """
         Asocia una base de datos con una sesión específica.
         
+        NOTA: Este método se mantiene por compatibilidad pero ya no es necesario en el nuevo enfoque
+        donde las sesiones y las bases de datos se crean juntas con el mismo ID.
+        
         Args:
             session_id: ID de la sesión
             db_name: Nombre de la base de datos
@@ -875,14 +887,23 @@ class SessionManager:
         Returns:
             True si se asoció correctamente, False en caso contrario
         """
+        logger.warning("El método associate_database_with_session está obsoleto. Use create_unified_session en su lugar.")
+        
         try:
             # Verificar que la sesión existe
             if session_id not in self.sessions:
                 logger.warning(f"Intento de asociar base de datos a sesión inexistente: {session_id}")
                 return False
             
+            # En el nuevo enfoque, la base de datos y la sesión deben tener el mismo ID
+            if session_id != db_name:
+                logger.warning(f"IDs de sesión ({session_id}) y base de datos ({db_name}) no coinciden. " 
+                              f"Se recomienda usar create_unified_session en su lugar.")
+            
             # Actualizar metadatos con la sesión
             db_metadata['session_id'] = session_id
+            db_metadata['id'] = db_name  # Mantener ID de base de datos
+            db_metadata['name'] = db_name  # Mantener nombre de base de datos
             
             # Registrar la base de datos
             success = self.register_database(db_name, db_metadata)
@@ -920,6 +941,9 @@ class SessionManager:
                 
                 # Actualizar timestamp de actividad
                 self.sessions[session_id]['last_activity'] = time.time()
+                
+                # Guardar cambios en sesiones
+                self._save_sessions()
                 
                 return True
         except Exception as e:
@@ -1200,16 +1224,14 @@ class SessionManager:
     def update_session_file_list(self, session_id: str, new_files: List[str], 
                            file_metadata: Optional[Dict[str, Dict[str, Any]]] = None) -> bool:
         """
-        Actualiza la lista de archivos en los metadatos de una sesión con información enriquecida.
+        Actualiza la lista de archivos en los metadatos de una sesión con una lista simple de rutas.
         
-        Esta función maneja la combinación de archivos existentes y nuevos, evitando duplicados
-        y añadiendo información adicional sobre cada archivo (tamaño, chunks, fecha).
+        Esta versión simplificada almacena solo las rutas de los archivos, sin metadatos adicionales.
         
         Args:
             session_id: ID de la sesión a actualizar
             new_files: Lista de rutas (str) de archivos a añadir
-            file_metadata: Diccionario donde las claves son rutas de archivos y los valores
-                          son diccionarios con metadatos como 'size', 'chunks', 'timestamp', etc.
+            file_metadata: Diccionario con metadatos adicionales (ignorado en esta implementación)
                           
         Returns:
             bool: True si la actualización fue exitosa, False en caso contrario
@@ -1224,81 +1246,235 @@ class SessionManager:
                 # Obtener la sesión actual
                 session = self.sessions[session_id]
                 
-                # Inicializar la lista de archivos si no existe
-                if "files" not in session:
-                    session["files"] = []
+                # Inicializar o recuperar la lista de archivos
+                files = session.get("files", [])
                 
-                # Convertir la lista actual de archivos a un formato estandarizado
-                current_files = session["files"]
-                
-                # Estandarizar formato: convertir entradas simples a estructura enriquecida
-                standardized_current_files = []
-                
-                for item in current_files:
-                    # Si el ítem es string (formato antiguo), convertirlo a diccionario
-                    if isinstance(item, str):
-                        file_path = os.path.abspath(item)
-                        file_info = {
-                            "path": file_path,
-                            "name": os.path.basename(file_path)
-                        }
-                        standardized_current_files.append(file_info)
-                    # Si ya es un diccionario, asegurar que path sea absoluto
-                    elif isinstance(item, dict):
-                        if "path" in item:
-                            item["path"] = os.path.abspath(item["path"])
-                            if "name" not in item:
-                                item["name"] = os.path.basename(item["path"])
-                            standardized_current_files.append(item)
-                
-                # Crear un conjunto de las rutas absolutas existentes para detectar duplicados
-                existing_paths = {item["path"] for item in standardized_current_files}
-                
-                # Procesar y añadir nuevos archivos
+                # Añadir nuevas rutas, evitando duplicados
                 for file_path in new_files:
                     abs_path = os.path.abspath(file_path)
-                    
-                    # Comprobar si ya existe
-                    if abs_path in existing_paths:
-                        # Buscamos el índice del archivo existente para actualizarlo
-                        existing_idx = next((i for i, item in enumerate(standardized_current_files) 
-                                          if item["path"] == abs_path), None)
-                        
-                        if existing_idx is not None:
-                            file_info = standardized_current_files[existing_idx]
-                        else:
-                            # No debería ocurrir, pero por si acaso
-                            logger.warning(f"Inconsistencia detectada con archivo {abs_path}")
-                            continue
-                    else:
-                        # Crear una nueva entrada para el archivo
-                        file_info = {
-                            "path": abs_path,
-                            "name": os.path.basename(abs_path),
-                            "first_added": time.time()
-                        }
-                        standardized_current_files.append(file_info)
-                        existing_paths.add(abs_path)
-                    
-                    # Actualizar la fecha de última modificación
-                    file_info["last_updated"] = time.time()
-                    
-                    # Añadir metadatos adicionales si están disponibles
-                    if file_metadata and abs_path in file_metadata:
-                        additional_meta = file_metadata[abs_path]
-                        for key, value in additional_meta.items():
-                            file_info[key] = value
+                    if abs_path not in files:
+                        files.append(abs_path)
                 
-                # Actualizar la lista de archivos en la sesión con la versión enriquecida
-                session["files"] = standardized_current_files
+                # Actualizar la lista en la sesión
+                session["files"] = files
                 
                 # Guardar los cambios
                 self._save_sessions()
                 
                 logger.info(f"Lista de archivos actualizada para la sesión {session_id}: " 
-                           f"{len(standardized_current_files)} archivos")
+                           f"{len(files)} archivos")
                 return True
                 
             except Exception as e:
                 logger.error(f"Error al actualizar la lista de archivos para la sesión {session_id}: {e}")
                 return False
+
+    def get_processed_files(self, session_id: str, 
+                        directory_filter: Optional[str] = None,
+                        pattern_filter: Optional[str] = None) -> List[str]:
+        """
+        Obtiene la lista de archivos procesados para una sesión con opciones de filtrado.
+        
+        Args:
+            session_id: ID de la sesión
+            directory_filter: Directorio para filtrar (opcional)
+            pattern_filter: Patrón de nombre para filtrar (opcional, soporta comodines * y ?)
+            
+        Returns:
+            Lista de rutas de archivos procesados
+        """
+        with self._lock:
+            try:
+                # Verificar si la sesión existe
+                if session_id not in self.sessions:
+                    logger.warning(f"No se pueden obtener archivos procesados: la sesión {session_id} no existe")
+                    return []
+                
+                # Obtener la sesión actual
+                session = self.sessions[session_id]
+                
+                # Comprobar si hay archivos registrados
+                if "files" not in session or not session["files"]:
+                    return []
+                
+                # Obtener lista de archivos
+                files_list = session["files"]
+                result_files = []
+                
+                # Aplicar filtros
+                for file_path in files_list:
+                    # Verificar que sea una ruta de archivo válida (string)
+                    if not isinstance(file_path, str):
+                        continue
+                    
+                    # Filtrar por directorio si se especifica
+                    if directory_filter and not file_path.startswith(os.path.abspath(directory_filter)):
+                        continue
+                    
+                    # Filtrar por patrón si se especifica
+                    if pattern_filter:
+                        import fnmatch
+                        file_name = os.path.basename(file_path)
+                        if not fnmatch.fnmatch(file_name, pattern_filter):
+                            continue
+                    
+                    # Añadir a la lista de resultados
+                    result_files.append(file_path)
+                
+                return result_files
+                
+            except Exception as e:
+                logger.error(f"Error al obtener archivos procesados para la sesión {session_id}: {e}")
+                return []
+
+    def get_session_files_summary(self, session_id: str) -> Dict[str, Any]:
+        """
+        Obtiene un resumen de los archivos procesados en una sesión.
+        
+        Args:
+            session_id: ID de la sesión
+            
+        Returns:
+            Diccionario con estadísticas sobre los archivos procesados:
+            - total_files: Número total de archivos
+            - file_types: Diccionario con conteo por tipo de archivo
+        """
+        with self._lock:
+            try:
+                # Obtener todos los archivos procesados
+                files = self.get_processed_files(session_id)
+                
+                if not files:
+                    return {
+                        "total_files": 0,
+                        "file_types": {}
+                    }
+                
+                # Inicializar contadores
+                total_files = len(files)
+                file_types = {}
+                
+                # Analizar cada archivo
+                for file_path in files:
+                    # Determinar el tipo de archivo basado en la extensión
+                    if isinstance(file_path, str):
+                        file_ext = os.path.splitext(file_path)[1].lower()
+                        file_type = file_ext[1:] if file_ext.startswith('.') else file_ext
+                        file_types[file_type] = file_types.get(file_type, 0) + 1
+                
+                return {
+                    "total_files": total_files,
+                    "file_types": file_types
+                }
+                
+            except Exception as e:
+                logger.error(f"Error al obtener resumen de archivos para la sesión {session_id}: {e}")
+                return {
+                    "error": str(e),
+                    "total_files": 0
+                }
+
+    def create_unified_session(self, 
+                          database_metadata: Dict[str, Any],
+                          files_list: Optional[List[str]] = None) -> str:
+        """
+        Crea una sesión unificada que integra metadatos de sesión y base de datos con un ID común.
+        
+        Este método reemplaza los anteriores métodos separados para crear sesiones y registrar bases de datos,
+        asegurando que todo se cree de una sola vez al final del procesamiento.
+        
+        Args:
+            database_metadata: Metadatos completos de la base de datos
+            files_list: Lista opcional de rutas de archivos procesados
+            
+        Returns:
+            ID de la sesión/base de datos unificada
+        """
+        with self._lock:
+            try:
+                # Verificar límite de sesiones
+                if len(self.sessions) >= self.MAX_SESSIONS:
+                    # Intentar limpiar primero
+                    self.clean_expired_sessions(aggressive=True)
+                    
+                    # Si aún hay demasiadas sesiones, rechazar la creación
+                    if len(self.sessions) >= self.MAX_SESSIONS:
+                        logger.error(f"Límite de sesiones alcanzado: {self.MAX_SESSIONS}")
+                        raise ValueError(f"Se alcanzó el límite máximo de sesiones ({self.MAX_SESSIONS})")
+                
+                # Obtener o generar el ID único para sesión/base de datos
+                db_name = database_metadata.get("name", "")
+                session_id = db_name
+                
+                # Si no hay nombre, generarlo a partir de los metadatos
+                if not session_id:
+                    # Generar un nombre basado en configuración (ej: rag_modernbert_page_sqlite_xxx)
+                    db_type = database_metadata.get("db_type", "sqlite")
+                    embedding_model = database_metadata.get("embedding_model", "default")
+                    chunking_method = database_metadata.get("chunking_method", "default")
+                    
+                    # Generar un hash corto único
+                    import hashlib
+                    import time
+                    hash_input = f"{embedding_model}_{chunking_method}_{time.time()}"
+                    short_hash = hashlib.md5(hash_input.encode()).hexdigest()[:8]
+                    
+                    # Construir nombre con formato consistente
+                    session_id = f"rag_{embedding_model}_{chunking_method}_{db_type}_{short_hash}"
+                    database_metadata["name"] = session_id
+                
+                # Asegurarnos que ID y nombre sean iguales
+                database_metadata["id"] = session_id
+                
+                # Crear la sesión con timestamp actual
+                current_time = time.time()
+                session_data = {
+                    "id": session_id,
+                    "created_at": current_time,
+                    "last_activity": current_time,
+                    "files": files_list or [],  # Lista simplificada de archivos
+                    "processing_stats": {
+                        "total_files_processed": len(files_list) if files_list else 0,
+                        "creation_date": datetime.now().isoformat()
+                    }
+                }
+                
+                # Unificar los IDs entre sesión y base de datos
+                database_metadata["session_id"] = session_id
+                
+                # Verificar que estén todos los campos requeridos
+                required_fields = ["db_type", "db_path", "embedding_dim", "embedding_model", 
+                                  "chunking_method", "session_id", "created_at", "last_used"]
+                
+                # Completar campos faltantes 
+                for field in required_fields:
+                    if field not in database_metadata:
+                        if field == "created_at" or field == "last_used":
+                            database_metadata[field] = current_time
+                
+                # Almacenar la sesión
+                self.sessions[session_id] = session_data
+                
+                # Inicializar espacio para contextos
+                self.contexts[session_id] = {}
+                
+                # Registrar la base de datos con los mismos metadatos
+                success = self.register_database(session_id, database_metadata)
+                if not success:
+                    logger.error(f"Error al registrar base de datos: {session_id}")
+                    # Limpiar la sesión creada si falla el registro de la BD
+                    if session_id in self.sessions:
+                        del self.sessions[session_id]
+                    if session_id in self.contexts:
+                        del self.contexts[session_id]
+                    raise ValueError("Error al registrar la base de datos")
+                
+                # Persistir sesiones inmediatamente
+                self._save_sessions()
+                
+                logger.info(f"Sesión unificada {session_id} creada correctamente")
+                return session_id
+                
+            except Exception as e:
+                logger.error(f"Error al crear sesión unificada: {e}")
+                raise

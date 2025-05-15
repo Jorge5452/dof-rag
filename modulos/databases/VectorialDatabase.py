@@ -28,6 +28,7 @@ class VectorialDatabase(ABC):
         self._cursor = None
         self._db_path = None
         self._metadata = {}  # Caché local de metadatos
+        self._in_transaction = False  # Flag para rastrear si hay una transacción activa
     
     @abstractmethod
     def connect(self, db_path):
@@ -381,7 +382,13 @@ class VectorialDatabase(ABC):
         """
         try:
             if hasattr(self, "_conn") and self._conn:
+                # Verificar si ya hay una transacción activa
+                if hasattr(self, "_in_transaction") and self._in_transaction:
+                    self._logger.debug("Ya hay una transacción activa, ignorando begin_transaction")
+                    return True  # Devolver True porque conceptualmente ya estamos en una transacción
+                
                 self._conn.execute("BEGIN TRANSACTION;")
+                self._in_transaction = True
                 self._logger.info("Transacción iniciada")
                 return True
             return False
@@ -398,7 +405,13 @@ class VectorialDatabase(ABC):
         """
         try:
             if hasattr(self, "_conn") and self._conn:
+                # Verificar si hay una transacción activa
+                if not hasattr(self, "_in_transaction") or not self._in_transaction:
+                    self._logger.debug("No hay transacción activa para confirmar")
+                    return True  # No hay transacción que confirmar, pero no es un error
+                
                 self._conn.commit()
+                self._in_transaction = False
                 self._logger.info("Transacción confirmada")
                 return True
             return False
@@ -415,7 +428,13 @@ class VectorialDatabase(ABC):
         """
         try:
             if hasattr(self, "_conn") and self._conn:
+                # Verificar si hay una transacción activa
+                if not hasattr(self, "_in_transaction") or not self._in_transaction:
+                    self._logger.debug("No hay transacción activa para revertir")
+                    return True  # No hay transacción que revertir, pero no es un error
+                
                 self._conn.rollback()
+                self._in_transaction = False
                 self._logger.info("Transacción revertida")
                 return True
             return False

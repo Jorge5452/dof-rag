@@ -38,25 +38,19 @@ class SQLiteVectorialDatabase(VectorialDatabase):
         Inicializa la base de datos SQLite.
         
         Args:
-            embedding_dim: Dimensión de los embeddings.
+            embedding_dim (int, optional): Dimensión de los embeddings
         """
-        super().__init__()  # Asegurarse de inicializar la clase base
-        logger.debug("Inicializando SQLiteVectorialDatabase")
+        super().__init__()
+        self._embedding_dim = embedding_dim or 384  # Valor por defecto
+        self._use_vector_extension = True  # Por defecto intentar usar la extensión vectorial
+        self._extension_loaded = False  # Indicador de si la extensión fue cargada
+        self._vector_table_name = 'embeddings_index'  # Nombre de la tabla vectorial
+        self.logger = logging.getLogger(__name__)
+        self._in_transaction = False  # Flag para rastrear si hay una transacción activa
         
         self._conn = None
         self._cursor = None
         self._db_path = None
-        
-        # Establecer la dimensión de los embeddings
-        if embedding_dim is None:
-            raise ValueError("Se requiere la dimensión de embeddings para inicializar la base de datos SQLite")
-        self._embedding_dim = embedding_dim
-        
-        # Configuración para extensión vectorial
-        self._extension_loaded = False
-        self._extension_path = None
-        self._vector_table_name = 'chunks_vectors'
-        self._use_vector_extension = True  # Por defecto intentar usar la extensión
         
         # Inicializar metadatos
         self._metadata = {}
@@ -895,8 +889,14 @@ class SQLiteVectorialDatabase(VectorialDatabase):
         """
         try:
             if self._conn:
+                # Verificar si ya hay una transacción activa
+                if self._in_transaction:
+                    logger.debug("Ya hay una transacción activa, ignorando begin_transaction")
+                    return True  # Devolver True porque conceptualmente ya estamos en una transacción
+                
                 logger.debug("Iniciando transacción en SQLite")
                 self._conn.execute("BEGIN TRANSACTION;")
+                self._in_transaction = True
                 return True
             else:
                 logger.error("No se puede iniciar transacción: conexión no disponible")
@@ -914,8 +914,14 @@ class SQLiteVectorialDatabase(VectorialDatabase):
         """
         try:
             if self._conn:
+                # Solo hacer commit si hay una transacción activa
+                if not self._in_transaction:
+                    logger.debug("No hay transacción activa para confirmar")
+                    return True
+                
                 logger.debug("Confirmando transacción en SQLite")
                 self._conn.commit()
+                self._in_transaction = False
                 return True
             else:
                 logger.error("No se puede confirmar transacción: conexión no disponible")
@@ -933,8 +939,14 @@ class SQLiteVectorialDatabase(VectorialDatabase):
         """
         try:
             if self._conn:
+                # Solo hacer rollback si hay una transacción activa
+                if not self._in_transaction:
+                    logger.debug("No hay transacción activa para revertir")
+                    return True
+                
                 logger.debug("Revirtiendo transacción en SQLite")
                 self._conn.rollback()
+                self._in_transaction = False
                 return True
             else:
                 logger.error("No se puede revertir transacción: conexión no disponible")
