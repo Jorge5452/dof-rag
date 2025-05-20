@@ -162,84 +162,139 @@ class EmbeddingFactory:
                 }
         return result
     
-    @classmethod
-    def release_inactive_models(cls, aggressive: bool = False) -> int:
+    @staticmethod
+    def release_inactive_models(aggressive: bool = False, force_release_active: bool = False) -> int:
         """
-        Libera modelos de embedding que no han sido utilizados recientemente
-        y no tienen referencias activas.
-
-        Esta función es típicamente invocada por `MemoryManager.cleanup`,
-        que a su vez es llamado por `ResourceManager.request_cleanup`.
-
+        Libera la memoria ocupada por modelos de embedding inactivos.
+        
         Args:
-            aggressive (bool): Si True, el tiempo de inactividad para considerar
-                               un modelo como liberable se reduce (hace la
-                               liberación más probable).
-                               Defaults to False.
-
-        Returns:
-            int: El número de modelos que fueron liberados.
-        """
-        cls.logger.debug(f"Solicitud para liberar modelos inactivos (agresivo={aggressive}).")
-        released_count = 0
-        keys_to_remove = []
-        # Determinar timeout efectivo
-        effective_timeout = cls._inactive_timeout / 2 if aggressive else cls._inactive_timeout
-        if aggressive:
-            cls.logger.warning(f"Modo agresivo: Timeout de inactividad reducido a {effective_timeout}s.")
-
-        with cls._lock:
-            current_time = time.time()
-            for key, model_ref in cls._instances.items():
-                if model_ref.get_ref_count() == 0 and (current_time - model_ref.last_used) > effective_timeout:
-                    keys_to_remove.append(key)
+            aggressive (bool): Si es True, usa estrategia más agresiva liberando incluso
+                              modelos con pocas referencias. Default False.
+            force_release_active (bool): Si es True, puede liberar incluso modelos activos
+                                        con referencias cuando sea necesario en situaciones críticas.
+                                        Default False.
             
-            model_was_on_gpu = False # Flag para saber si llamar a empty_cache
-            for key in keys_to_remove:
+        Returns:
+            int: Número de modelos liberados.
+        """
+        logger = logging.getLogger("EmbeddingFactory")
+        
+        with EmbeddingFactory._lock:
+            if not EmbeddingFactory._instances:
+                logger.debug("No hay modelos de embeddings activos para liberar.")
+                return 0
+                
+            models_count_before = len(EmbeddingFactory._instances)
+            models_to_remove = []
+            
+            # Primera pasada: identificar modelos a liberar
+            for model_key, model_ref in list(EmbeddingFactory._instances.items()):
                 try:
-                    cls.logger.info(f"Liberando memoria de modelo inactivo: {key}")
-                    model_instance = cls._instances[key].model
+                    # Verificar si el modelo es candidato para liberación
+                    refs = model_ref.get_ref_count()
+                    last_used = time.time() - model_ref.last_used
+                    is_inactive = refs == 0
                     
-                    # Intentar liberar memoria específica del modelo (depende de la implementación de EmbeddingManager)
-                    if hasattr(model_instance, 'release_resources'):
-                        model_instance.release_resources()
-                        cls.logger.debug(f"Llamado a release_resources() para {key}.")
+                    # Política de liberación basada en referencias y uso
+                    release_condition = False
                     
-                    # Comprobar si el modelo usaba GPU (esto es heurístico, necesita info del modelo)
-                    if hasattr(model_instance, 'device') and 'cuda' in str(model_instance.device):
-                         model_was_on_gpu = True
-
-                    # Eliminar la referencia de la factory
-                    del cls._instances[key]
-                    released_count += 1
-
+                    if is_inactive:
+                        # Modelos sin referencias: liberar siempre
+                        release_condition = True
+                        reason = "sin referencias"
+                    elif aggressive and refs <= 1 and last_used > 300:  # 5 minutos
+                        # Modo agresivo: liberar modelos con pocas referencias y sin uso reciente
+                        release_condition = True
+                        reason = f"agresivo con {refs} refs y {last_used:.0f}s inactivo"
+                    elif force_release_active and last_used > 60:
+                        # Forzar liberación: liberar incluso modelos activos sin uso muy reciente
+                        release_condition = True
+                        reason = f"forzado con {refs} refs y {last_used:.0f}s inactivo"
+                        
+                    if release_condition:
+                        models_to_remove.append((model_key, model_ref, reason))
+                        
                 except Exception as e:
-                    cls.logger.error(f"Error al liberar modelo {key}: {e}", exc_info=True)
-
-        # Limpiar caché de GPU si se liberaron modelos de GPU y torch está disponible
-        if released_count > 0 and model_was_on_gpu:
-            if importlib.util.find_spec("torch"):
+                    logger.error(f"Error evaluando modelo {model_key} para liberación: {e}")
+                    
+            # Segunda pasada: liberar modelos
+            models_released = 0
+            
+            for model_key, model_ref, reason in models_to_remove:
+                try:
+                    # Obtener el modelo antes de eliminarlo de _instances
+                    model = model_ref.model
+                    
+                    # Intentar limpieza profunda del modelo
+                    try:
+                        # Acceder al modelo interno si es posible
+                        if hasattr(model, "_model") and model._model is not None:
+                            # Descargar modelo específico a CPU primero si está en GPU
+                            if hasattr(model._model, "to") and callable(model._model.to):
+                                try:
+                                    if hasattr(model._model, "device"):
+                                        device_str = str(model._model.device)
+                                        if "cuda" in device_str or "mps" in device_str:
+                                            logger.debug(f"Moviendo modelo {model_key} de {device_str} a CPU antes de liberarlo")
+                                            model._model.to("cpu")
+                                except Exception as move_err:
+                                    logger.debug(f"Error moviendo modelo a CPU: {move_err}")
+                            
+                            # Eliminar referencias circulares
+                            if hasattr(model._model, "encoder") and model._model.encoder is not None:
+                                model._model.encoder = None
+                            
+                            # Liberar capa embeddings explícitamente
+                            if hasattr(model._model, "embeddings") and model._model.embeddings is not None:
+                                model._model.embeddings = None
+                            
+                            # Liberar modelo completamente
+                            model._model = None
+                        
+                        # Liberación de memoria específica para sentence-transformers
+                        if hasattr(model, "model") and model.model is not None:
+                            if hasattr(model.model, "to") and callable(model.model.to):
+                                model.model.to("cpu")
+                            model.model = None
+                            
+                        # Liberar tokenizador que puede contener caché
+                        if hasattr(model, "tokenizer") and model.tokenizer is not None:
+                            model.tokenizer = None
+                    except Exception as cleanup_err:
+                        logger.debug(f"Error durante limpieza profunda del modelo: {cleanup_err}")
+                    
+                    # Eliminar la referencia de _instances
+                    del EmbeddingFactory._instances[model_key]
+                    models_released += 1
+                    
+                    logger.info(f"Modelo liberado: {model_key} - Razón: {reason}")
+                    
+                except Exception as e:
+                    logger.error(f"Error liberando modelo {model_key}: {e}")
+                    
+            # Forzar GC explícito después de liberar modelos si hubo liberaciones
+            if models_released > 0:
+                gc.collect()
+                
+                # Intentar liberar memoria GPU si está disponible
                 try:
                     import torch
-                    if torch.cuda.is_available():
+                    if hasattr(torch, 'cuda') and torch.cuda.is_available():
                         torch.cuda.empty_cache()
-                        cls.logger.info("torch.cuda.empty_cache() llamado tras liberar modelo GPU.")
+                        logger.debug("Caché CUDA liberada después de eliminar modelos")
+                    elif hasattr(torch, 'mps') and hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                        if hasattr(torch.mps, 'empty_cache'):
+                            torch.mps.empty_cache()
+                            logger.debug("Caché MPS liberada después de eliminar modelos")
                 except ImportError:
-                    cls.logger.warning("Torch importado pero no se pudo llamar a empty_cache (quizás no instalado correctamente).")
-                except Exception as e:
-                    cls.logger.error(f"Error al llamar a torch.cuda.empty_cache(): {e}", exc_info=True)
-            else:
-                 cls.logger.debug("Torch no parece estar instalado, no se limpiará caché de GPU.")
-
-        # Usar nivel de log apropiado según si se liberaron modelos o no
-        if released_count > 0:
-            # Forzar GC después de eliminar referencias puede ayudar
-            gc.collect()
-            cls.logger.info(f"{released_count} modelos de embedding fueron liberados.")
-        else:
-            cls.logger.debug("No se encontraron modelos inactivos para liberar.")
+                    pass
+                except Exception as torch_err:
+                    logger.debug(f"Error liberando caché GPU: {torch_err}")
             
-        return released_count
+            models_count_after = len(EmbeddingFactory._instances)
+            logger.info(f"Liberación de modelos: {models_count_before} -> {models_count_after} ({models_released} liberados)")
+            
+            return models_released
 
     @staticmethod
     def get_active_model_count():

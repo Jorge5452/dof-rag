@@ -97,8 +97,8 @@ def main() -> int:
         # Ejecutar el modo correspondiente
         if args.ingest:
             result = handle_ingest_mode(args)
-            # Exportar chunks si se solicitó
-            if args.export_chunks:
+            # Exportar chunks si se solicitó y la ingestión fue exitosa (result = 0)
+            if args.export_chunks and result == 0:
                 handle_export_chunks_mode(args)
             return result
         elif args.query is not None:

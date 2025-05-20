@@ -1,851 +1,1295 @@
+# Standard library imports
 import os
 import logging
 import math
 import time
 from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, Future
-from typing import Optional, Union, Callable, Iterable, Iterator, TYPE_CHECKING, Any, Dict, Tuple
+import inspect
+import functools
+import types
+import re
+import sys
+import pickle
+import weakref
+from collections import defaultdict
+import threading
+import platform
+import psutil
 
+# Type checking imports
+from typing import Optional, Union, Callable, Iterable, Iterator, TYPE_CHECKING, Any, Dict, Tuple, List, Literal, Set, TypeVar, cast
+
+# Type hints for avoiding circular imports
 if TYPE_CHECKING:
     from .resource_manager import ResourceManager
 
-class ConcurrencyManager:
+# Definición de estados de pool
+PoolState = Literal["active", "hibernated", "shutdown"]
+
+# Tipo genérico para resultados
+T = TypeVar('T')
+R = TypeVar('R')
+
+# Caché global de verificaciones de serialización
+_PICKLEABILITY_CACHE: Dict[str, bool] = {}
+_PICKLEABILITY_CACHE_MAX_SIZE = 500  # Limitar tamaño para evitar crecimiento descontrolado
+_PICKLEABILITY_CACHE_HITS = 0
+_PICKLEABILITY_CACHE_MISSES = 0
+_LAST_CACHE_CLEANUP = time.time()
+
+# Lista de tipos nativos que son siempre serializables
+_ALWAYS_SERIALIZABLE_TYPES = {
+    int, float, bool, str, bytes, 
+    tuple, list, dict, set, frozenset,
+    type(None)
+}
+
+# Patrones para detectar tareas según el nombre
+_CPU_TASK_PATTERNS = [
+    r'process', r'calc', r'comput', r'transform', r'convert', 
+    r'generat', r'hash', r'encod', r'encrypt', r'decrypt'
+]
+_IO_TASK_PATTERNS = [
+    r'read', r'write', r'load', r'save', r'fetch', r'download',
+    r'upload', r'request', r'query', r'get', r'post', r'send'
+]
+
+def _cleanup_pickleability_cache():
     """
-    Gestiona la concurrencia para tareas intensivas en CPU y I/O.
+    Limpia la caché de verificación de serialización cuando supera el tamaño máximo.
+    
+    Esto evita que la caché crezca indefinidamente, manteniendo las entradas más recientes.
+    """
+    global _PICKLEABILITY_CACHE, _LAST_CACHE_CLEANUP
+    
+    # Solo limpiar si realmente es necesario y ha pasado suficiente tiempo
+    now = time.time()
+    if len(_PICKLEABILITY_CACHE) > _PICKLEABILITY_CACHE_MAX_SIZE and now - _LAST_CACHE_CLEANUP > 300:
+        # Crear una nueva caché con solo la mitad de las entradas más recientes
+        cache_items = list(_PICKLEABILITY_CACHE.items())
+        half_size = _PICKLEABILITY_CACHE_MAX_SIZE // 2
+        _PICKLEABILITY_CACHE = dict(cache_items[-half_size:])
+        _LAST_CACHE_CLEANUP = now
 
-    Es instanciado y utilizado por ResourceManager. Proporciona acceso a pools
-    de hilos (ThreadPoolExecutor) y procesos (ProcessPoolExecutor) configurados
-    dinámicamente según los recursos del sistema y la configuración proporcionada
-    a través de ResourceManager.
-
-    Permite ejecutar tareas individuales o mapear funciones sobre iterables de
-    forma concurrente.
+# Clase nueva para el tracking histórico de rendimiento de los workers
+class WorkerPerformanceTracker:
+    """
+    Rastrea el rendimiento histórico de diferentes configuraciones de workers
+    para permitir análisis predictivo y toma de decisiones más inteligentes.
 
     Atributos:
-        resource_manager (ResourceManager): Instancia del ResourceManager principal.
-        logger (logging.Logger): Logger para esta clase.
-        thread_pool_executor (Optional[ThreadPoolExecutor]): Pool para tareas I/O bound.
-        process_pool_executor (Optional[ProcessPoolExecutor]): Pool para tareas CPU bound.
-        adaptive_config (Dict): Configuración para la gestión adaptativa de workers.
-        cpu_workers (int): Número actual de workers CPU.
-        io_workers (int): Número actual de workers I/O.
-        base_cpu_workers (int): Número base de workers CPU calculado inicialmente.
-        base_io_workers (int): Número base de workers I/O calculado inicialmente.
-        last_recalculation_time (float): Timestamp de la última recalculación de workers.
+        max_history_entries (int): Número máximo de entradas históricas a mantener por tipo
+        history (Dict): Historial de rendimiento para diferentes configuraciones
+        last_recalculation_time (float): Timestamp de la última recalculación
+        cooling_period_sec (float): Periodo de enfriamiento tras recálculos
+        stability_threshold (int): Número mínimo de muestras antes de considerar cambios
+        performance_variance_threshold (float): Umbral de variación para considerar cambios
     """
-    def __init__(self, resource_manager_instance: 'ResourceManager'):
-        """
-        Inicializa el ConcurrencyManager.
-
-        Args:
-            resource_manager_instance (ResourceManager): La instancia de ResourceManager
-                que gestionará este ConcurrencyManager y de donde se obtendrá
-                la configuración de concurrencia.
-        """
-        self.resource_manager = resource_manager_instance
-        self.logger = logging.getLogger(self.__class__.__name__)
-        if not self.logger.hasHandlers(): # Fallback
-            logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-        self.logger.info("ConcurrencyManager inicializado.")
-
-        self.thread_pool_executor: Optional[ThreadPoolExecutor] = None
-        self.process_pool_executor: Optional[ProcessPoolExecutor] = None
+    def __init__(self, max_history_entries: int = 20, cooling_period_sec: float = 300.0):
+        self.max_history_entries = max_history_entries
+        self.cooling_period_sec = cooling_period_sec
+        self.last_recalculation_time = 0.0
+        self.stability_threshold = 3  # Mínimo de muestras para considerar estable
+        self.performance_variance_threshold = 0.15  # 15% de variación
         
-        # Atributos para gestión adaptativa de workers
-        self.adaptive_config = self._load_adaptive_config()
-        self.cpu_workers = 0
-        self.io_workers = 0
-        self.base_cpu_workers = 0
-        self.base_io_workers = 0
-        self.last_recalculation_time = 0
-        
-        self._initialize_pools()
-
-    def _load_adaptive_config(self) -> Dict[str, Any]:
-        """
-        Carga la configuración para la gestión adaptativa de workers.
-        
-        Returns:
-            Dict[str, Any]: Diccionario con la configuración adaptativa.
-        """
-        # Valores por defecto si no se encuentra configuración
-        default_config = {
-            "enabled": True,
-            "recalculation_interval": 300,  # 5 minutos
-            "high_cpu_threshold": 85,
-            "high_memory_threshold": 80,
-            "reduction_factor": 0.7,
-            "increase_factor": 1.2,
-            "low_cpu_threshold": 30,
-            "low_memory_threshold": 50
+        # Estructura para almacenar historial por tipo de pool y configuración
+        self.history: Dict[str, List[Dict[str, Any]]] = {
+            "thread_pool": [],
+            "process_pool": [],
+            "task_performance": {},  # Rendimiento por tipo de tarea
+            "global_metrics": []     # Métricas globales del sistema
         }
         
-        # Intentar obtener configuración del ResourceManager
-        try:
-            if hasattr(self.resource_manager, 'config') and self.resource_manager.config:
-                config = self.resource_manager.config
-                if hasattr(config, 'get_resource_management_config'):
-                    resource_config = config.get_resource_management_config() or {}
-                    concurrency_config = resource_config.get("concurrency", {})
-                    adaptive_config = concurrency_config.get("adaptive_workers", {})
-                    
-                    # Actualizar los valores predeterminados con los de la configuración
-                    for key, default_value in default_config.items():
-                        if key not in adaptive_config:
-                            adaptive_config[key] = default_value
-                    
-                    self.logger.info(f"Configuración adaptativa cargada: {adaptive_config}")
-                    return adaptive_config
-        except Exception as e:
-            self.logger.warning(f"Error al cargar la configuración adaptativa: {e}")
+        # Métricas actuales que representan la última ejecución conocida
+        self.current_metrics = {
+            "thread_pool": None,
+            "process_pool": None,
+            "system_pressure": 0.0,  # Combinación de CPU y memoria
+            "last_update_time": 0.0
+        }
         
-        self.logger.warning("Usando configuración adaptativa predeterminada")
-        return default_config
+        # Contador para establecer un período de calentamiento
+        self.warmup_count = 0
+        self.warmup_threshold = 5  # Mínimo de ejecuciones de calentamiento
 
-    def _calculate_workers(self, config_value: Union[str, int], core_count: int, worker_type: str) -> int:
+    def record_pool_performance(self, pool_type: str, worker_count: int, 
+                               tasks_completed: int, execution_time: float,
+                               task_type: str, system_metrics: Dict[str, float]) -> None:
         """
-        Calcula el número óptimo de workers para un tipo de tarea específico.
-
+        Registra el rendimiento de un pool de workers para una configuración específica.
+        
         Args:
-            config_value (Union[str, int]): El valor de configuración para el número
-                de workers (puede ser un entero o "auto").
-            core_count (int): El número de cores de CPU disponibles.
-            worker_type (str): Tipo de worker ("CPU" o "IO") para aplicar heurísticas.
-
-        Returns:
-            int: El número calculado de workers, asegurando un mínimo de 1.
+            pool_type (str): Tipo de pool ("thread_pool" o "process_pool")
+            worker_count (int): Número de workers utilizados
+            tasks_completed (int): Número de tareas completadas
+            execution_time (float): Tiempo total de ejecución en segundos
+            task_type (str): Tipo de tarea ejecutada
+            system_metrics (Dict[str, float]): Métricas del sistema durante la ejecución
         """
-        self.logger.debug(f"Calculando workers para {worker_type}. Config: '{config_value}', Cores: {core_count}")
-        num_workers = 0
-        if isinstance(config_value, int):
-            num_workers = config_value
-        elif isinstance(config_value, str) and config_value.lower() == "auto":
-            if worker_type == "CPU":
-                num_workers = core_count
-            elif worker_type == "IO":
-                num_workers = min(32, (core_count * 2) + 4) # Ajuste común para IO bound
-            else:
-                num_workers = core_count # Default a core_count si el tipo no es reconocido
-        else:
-            self.logger.warning(f"Valor de configuración de workers '{config_value}' no reconocido para {worker_type}. Usando {core_count} workers.")
-            num_workers = core_count
-        
-        # Asegurar un mínimo de 1 worker
-        calculated_workers = max(1, num_workers)
-        self.logger.debug(f"Workers calculados para {worker_type}: {calculated_workers}")
-        return calculated_workers
-
-    def _initialize_pools(self) -> None:
-        """
-        Inicializa los pools de ThreadPoolExecutor y ProcessPoolExecutor.
-
-        El número de workers para cada pool se determina a partir de la configuración
-        obtenida del ResourceManager (que a su vez la carga de config.yaml)
-        y el número de cores del sistema. Se aplica una heurística para ajustar
-        el número de workers si se excede un `max_total_workers` configurado.
-        """
-        self.logger.info("Inicializando pools de ejecutores...")
-        core_count = os.cpu_count() or 1
-        
-        # Obtener configuración del ResourceManager
-        # Estos atributos deben existir en ResourceManager y ser cargados desde config.yaml
-        cfg_cpu_workers = getattr(self.resource_manager, 'default_cpu_workers', "auto")
-        cfg_io_workers = getattr(self.resource_manager, 'default_io_workers', "auto")
-        max_total_workers_config = getattr(self.resource_manager, 'max_total_workers', None)
-
-        # Calcular el número base de workers
-        self.base_cpu_workers = self._calculate_workers(cfg_cpu_workers, core_count, "CPU")
-        self.base_io_workers = self._calculate_workers(cfg_io_workers, core_count, "IO")
-        
-        # Aplicar ajuste inicial adaptativo si está habilitado
-        if self.adaptive_config["enabled"]:
-            # Establecer los valores iniciales (usamos los valores base para comenzar)
-            self.cpu_workers = self.base_cpu_workers
-            self.io_workers = self.base_io_workers
-            self.last_recalculation_time = time.time()
+        if pool_type not in self.history:
+            return
             
-            # Registrar la configuración inicial
-            self.logger.info(f"Workers iniciales: CPU={self.cpu_workers}, IO={self.io_workers}")
-        else:
-            # Si la gestión adaptativa está desactivada, usar valores base
-            self.cpu_workers = self.base_cpu_workers
-            self.io_workers = self.base_io_workers
+        # Calcular métricas derivadas
+        tasks_per_second = tasks_completed / max(execution_time, 0.001)
+        tasks_per_worker = tasks_completed / max(worker_count, 1)
+        efficiency = tasks_per_second / max(worker_count, 1)
         
-        # Lógica para respetar max_total_workers
-        if isinstance(max_total_workers_config, int) and max_total_workers_config > 0:
-            if (self.cpu_workers + self.io_workers) > max_total_workers_config:
-                self.logger.warning(
-                    f"La suma de workers CPU ({self.cpu_workers}) e IO ({self.io_workers}) excede max_total_workers ({max_total_workers_config}). "
-                    f"Se ajustarán proporcionalmente."
-                )
-                total_calculated = self.cpu_workers + self.io_workers
-                # Reducir proporcionalmente
-                self.cpu_workers = max(1, math.floor(self.cpu_workers * (max_total_workers_config / total_calculated)))
-                self.io_workers = max(1, math.floor(self.io_workers * (max_total_workers_config / total_calculated)))
-                self.logger.info(f"Workers ajustados por límite total: CPU={self.cpu_workers}, IO={self.io_workers}")
+        # Calcular presión del sistema (0-1.0)
+        cpu_pressure = system_metrics.get("cpu_percent", 0) / 100
+        memory_pressure = system_metrics.get("memory_percent", 0) / 100
+        system_pressure = (cpu_pressure * 0.6) + (memory_pressure * 0.4)  # Ponderado
+        
+        # Crear entrada para el historial
+        entry = {
+            "timestamp": time.time(),
+            "worker_count": worker_count,
+            "tasks_completed": tasks_completed,
+            "execution_time": execution_time,
+            "tasks_per_second": tasks_per_second,
+            "tasks_per_worker": tasks_per_worker,
+            "efficiency": efficiency,
+            "task_type": task_type,
+            "system_pressure": system_pressure,
+            "cpu_percent": system_metrics.get("cpu_percent", 0),
+            "memory_percent": system_metrics.get("memory_percent", 0)
+        }
+        
+        # Añadir al historial del tipo específico de pool
+        self.history[pool_type].append(entry)
+        
+        # Limitar el tamaño del historial
+        if len(self.history[pool_type]) > self.max_history_entries:
+            self.history[pool_type] = self.history[pool_type][-self.max_history_entries:]
+            
+        # Registrar en historial específico de tipo de tarea
+        if task_type not in self.history["task_performance"]:
+            self.history["task_performance"][task_type] = []
+            
+        task_entry = entry.copy()
+        self.history["task_performance"][task_type].append(task_entry)
+        
+        # Limitar el historial por tipo de tarea
+        if len(self.history["task_performance"][task_type]) > self.max_history_entries:
+            self.history["task_performance"][task_type] = self.history["task_performance"][task_type][-self.max_history_entries:]
+            
+        # Actualizar métricas actuales
+        self.current_metrics[pool_type] = entry
+        self.current_metrics["system_pressure"] = system_pressure
+        self.current_metrics["last_update_time"] = time.time()
+        
+        # Incrementar contador de calentamiento
+        self.warmup_count += 1
 
-        try:
-            if self._is_executor_shutdown(self.thread_pool_executor):
-                self.thread_pool_executor = ThreadPoolExecutor(max_workers=self.io_workers, thread_name_prefix='RM_Thread')
-                self.logger.info(f"ThreadPoolExecutor inicializado con {self.io_workers} workers.")
-            else:
-                self.logger.info("ThreadPoolExecutor ya estaba inicializado.")
-        except Exception as e:
-            self.logger.error(f"Error al inicializar ThreadPoolExecutor: {e}", exc_info=True)
-            self.thread_pool_executor = None
-
-        try:
-            if self._is_executor_shutdown(self.process_pool_executor):
-                self.process_pool_executor = ProcessPoolExecutor(max_workers=self.cpu_workers)
-                self.logger.info(f"ProcessPoolExecutor inicializado con {self.cpu_workers} workers.")
-            else:
-                self.logger.info("ProcessPoolExecutor ya estaba inicializado.")
-        except Exception as e:
-            self.logger.error(f"Error al inicializar ProcessPoolExecutor: {e}", exc_info=True)
-            self.process_pool_executor = None
-
-    def recalculate_workers_if_needed(self) -> bool:
+    def record_system_metrics(self, metrics: Dict[str, float]) -> None:
         """
-        Recalcula el número de workers según las métricas del sistema si es necesario.
+        Registra métricas del sistema para análisis de tendencias.
         
-        Evalúa las condiciones actuales del sistema (CPU, memoria) y ajusta
-        el número de workers si se superan umbrales configurados, respetando
-        un intervalo mínimo entre recálculos.
+        Args:
+            metrics (Dict[str, float]): Métricas del sistema (CPU, memoria, etc.)
+        """
+        entry = {
+            "timestamp": time.time(),
+            "cpu_percent": metrics.get("cpu_percent", 0),
+            "memory_percent": metrics.get("memory_percent", 0),
+            "cpu_count": metrics.get("cpu_count", os.cpu_count() or 1)
+        }
         
+        self.history["global_metrics"].append(entry)
+        
+        if len(self.history["global_metrics"]) > self.max_history_entries:
+            self.history["global_metrics"] = self.history["global_metrics"][-self.max_history_entries:]
+
+    def predict_optimal_worker_count(self, pool_type: str, task_type: str, 
+                                    system_metrics: Dict[str, float]) -> Optional[int]:
+        """
+        Predice el número óptimo de workers basado en el historial de rendimiento.
+        
+        Args:
+            pool_type (str): Tipo de pool ("thread_pool" o "process_pool")
+            task_type (str): Tipo de tarea a ejecutar
+            system_metrics (Dict[str, float]): Métricas actuales del sistema
+            
         Returns:
-            bool: True si se realizó la recalculación, False si no fue necesaria.
+            Optional[int]: Número óptimo de workers o None si no hay suficientes datos
         """
-        # Si la gestión adaptativa no está habilitada, salir
-        if not self.adaptive_config["enabled"]:
-            return False
+        # Verificar si estamos en período de calentamiento
+        if self.warmup_count < self.warmup_threshold:
+            return None
+            
+        # Verificar suficientes datos históricos
+        if pool_type not in self.history or not self.history[pool_type]:
+            return None
+            
+        # Si tenemos historial específico de tipo de tarea, usarlo
+        task_history = self.history["task_performance"].get(task_type, [])
+        pool_history = self.history[pool_type]
         
-        # Verificar si ha pasado suficiente tiempo desde la última recalculación
+        # Si tenemos suficiente historial específico de tarea, priorizarlo
+        if len(task_history) >= self.stability_threshold:
+            history_to_use = task_history
+        else:
+            history_to_use = pool_history
+            
+        if not history_to_use:
+            return None
+            
+        # Calcular presión del sistema actual
+        cpu_pressure = system_metrics.get("cpu_percent", 0) / 100
+        memory_pressure = system_metrics.get("memory_percent", 0) / 100
+        current_pressure = (cpu_pressure * 0.6) + (memory_pressure * 0.4)
+        
+        # Búsqueda de configuraciones similares en condiciones de sistema similares
+        # 1. Filtrar por similitud de presión del sistema
+        pressure_threshold = 0.2  # Tolerancia de desviación
+        similar_entries = [
+            entry for entry in history_to_use
+            if abs(entry.get("system_pressure", 0) - current_pressure) <= pressure_threshold
+        ]
+        
+        # Si no hay suficientes entradas similares, usar todo el historial
+        if len(similar_entries) < 2:
+            similar_entries = history_to_use
+            
+        # 2. Encontrar configuración con mejor eficiencia
+        if similar_entries:
+            # Ordenar por eficiencia (mayor a menor)
+            sorted_entries = sorted(similar_entries, key=lambda x: x.get("efficiency", 0), reverse=True)
+            
+            # Tomar las mejores configuraciones (top 3)
+            top_entries = sorted_entries[:3] if len(sorted_entries) >= 3 else sorted_entries
+            
+            # Calcular la media de workers de las mejores configuraciones
+            optimal_workers = int(sum(entry.get("worker_count", 1) for entry in top_entries) / len(top_entries))
+            
+            # Aplicar ajuste basado en presión actual
+            if current_pressure > 0.8:  # Alta presión, reducir workers
+                optimal_workers = max(1, int(optimal_workers * 0.8))
+            elif current_pressure < 0.3:  # Baja presión, posible incremento
+                optimal_workers = int(optimal_workers * 1.2)
+                
+            return optimal_workers
+        
+        return None
+
+    def should_recalculate(self, current_metrics: Dict[str, float]) -> Tuple[bool, str]:
+        """
+        Determina si se debe recalcular el número de workers basado en:
+        - Tiempo desde la última recalculación (periodo de enfriamiento)
+        - Cambios significativos en las métricas del sistema
+        - Historial de rendimiento
+        
+        Args:
+            current_metrics (Dict[str, float]): Métricas actuales del sistema
+            
+        Returns:
+            Tuple[bool, str]: (Recalcular?, Razón)
+        """
         current_time = time.time()
-        elapsed_since_last = current_time - self.last_recalculation_time
         
-        if elapsed_since_last < self.adaptive_config["recalculation_interval"]:
+        # 1. Verificar periodo de enfriamiento
+        time_since_last_recalc = current_time - self.last_recalculation_time
+        if time_since_last_recalc < self.cooling_period_sec:
+            return False, f"Periodo de enfriamiento activo ({time_since_last_recalc:.1f}s < {self.cooling_period_sec}s)"
+            
+        # 2. Verificar cambios significativos en métricas del sistema
+        if self.current_metrics["system_pressure"] > 0:
+            # Calcular presión actual
+            cpu_pressure = current_metrics.get("cpu_percent", 0) / 100
+            memory_pressure = current_metrics.get("memory_percent", 0) / 100
+            current_pressure = (cpu_pressure * 0.6) + (memory_pressure * 0.4)
+            
+            # Calcular cambio en presión
+            pressure_delta = abs(current_pressure - self.current_metrics["system_pressure"])
+            
+            # Si cambio significativo, recalcular
+            if pressure_delta > 0.25:  # 25% de cambio en presión total
+                return True, f"Cambio significativo en presión del sistema: {pressure_delta:.2f}"
+                
+        # 3. Verificar si estamos en warmup (siempre recalcular)
+        if self.warmup_count < self.warmup_threshold:
+            return True, f"Periodo de calentamiento activo ({self.warmup_count}/{self.warmup_threshold})"
+            
+        # 4. Recalculación periódica (cada 10 minutos si nada más lo provoca)
+        if time_since_last_recalc > 600:  # 10 minutos
+            return True, "Recalculación periódica (10 minutos)"
+            
+        return False, "No se requiere recálculo"
+        
+    def record_recalculation(self) -> None:
+        """Registra que se ha realizado una recalculación."""
+        self.last_recalculation_time = time.time()
+
+class ConcurrencyManager:
+    """
+    Gestiona la concurrencia y paralelismo en el sistema RAG.
+
+    Se encarga de:
+    - Proporcionar pools de hilos y procesos optimizados para diferentes tipos de tareas
+    - Ajustar dinámicamente el número de workers según la carga del sistema
+    - Ejecutar tareas en paralelo/concurrencia con manejo automático de recursos
+    - Hibernar y despertar pools según sea necesario para optimizar recursos
+
+    Atributos:
+        resource_manager (ResourceManager): Instancia del gestor de recursos
+        thread_pool (ThreadPoolExecutor): Pool de hilos para operaciones I/O bound
+        process_pool (ProcessPoolExecutor): Pool de procesos para operaciones CPU bound
+        logger (logging.Logger): Logger para esta clase
+        cpu_workers (int): Número de workers para tareas intensivas en CPU
+        io_workers (int): Número de workers para tareas I/O bound
+        default_timeout (float): Tiempo máximo de espera para tareas (segundos)
+        task_types (Dict[str, Dict]): Configuraciones para diferentes tipos de tareas
+        disable_process_pool (bool): Indica si se debe desactivar el ProcessPoolExecutor
+        performance_tracker (WorkerPerformanceTracker): Tracker de rendimiento histórico
+        pools_status (Dict): Estado de los pools (active, hibernated, shutdown)
+        recalculation_frequency_sec (float): Frecuencia de recálculo de workers
+    """
+
+    def __init__(self, resource_manager_instance: 'ResourceManager'):
+        """
+        Inicializa el gestor de concurrencia.
+        
+        Args:
+            resource_manager_instance (ResourceManager): Instancia del gestor de recursos
+        """
+        # Inicializar atributos básicos
+        self.resource_manager = resource_manager_instance
+        self.logger = logging.getLogger(self.__class__.__name__)
+        
+        # Para seguimiento de rendimiento histórico y decisiones inteligentes
+        self.performance_tracker = WorkerPerformanceTracker()
+        
+        # Configurar la frecuencia de recálculo desde ResourceManager
+        self.recalculation_frequency_sec = getattr(
+            resource_manager_instance, 
+            'worker_recalculation_frequency', 
+            300.0  # 5 minutos por defecto
+        )
+        self.performance_tracker.cooling_period_sec = self.recalculation_frequency_sec
+        
+        # Estado de los pools
+        self.pools_status = {
+            "thread_pool": {
+                "status": "inactive",  # inactive, active, hibernated, shutdown
+                "created_at": 0.0,
+                "last_used": 0.0,
+                "task_count": 0,
+                "hibernated_at": 0.0,
+                "workers": 0,
+                "stored_state": None,  # Para almacenar estado durante hibernación
+                "last_status_change": 0.0  # Para cooldown entre cambios de estado
+            },
+            "process_pool": {
+                "status": "inactive",
+                "created_at": 0.0,
+                "last_used": 0.0,
+                "task_count": 0,
+                "hibernated_at": 0.0,
+                "workers": 0,
+                "stored_state": None,  # Para almacenar estado durante hibernación
+                "last_status_change": 0.0  # Para cooldown entre cambios de estado
+            }
+        }
+        
+        # Umbrales para reinicialización de pools
+        self.worker_change_threshold_pct = 20.0  # Porcentaje mínimo de cambio de workers para reiniciar
+        self.pool_cooldown_period_sec = 60.0  # Segundos mínimos entre cambios significativos de estado
+        
+        # Configuración de recálculo
+        self.last_worker_calculation_time = 0.0
+        self.worker_calculation_interval_sec = 120.0
+        self.worker_recalc_count = 0
+        self.dynamic_recalc_interval = True  # Ajustar intervalo dinámicamente
+        
+        # Inicializar número de workers
+        self.cpu_workers = self._calculate_optimal_workers("cpu")
+        self.io_workers = self._calculate_optimal_workers("io")
+        
+        # Inicializar atributos adicionales
+        self.thread_pool = None
+        self.process_pool = None
+        self.disable_process_pool = getattr(resource_manager_instance, 'disable_process_pool', False)
+        self.max_total_workers = getattr(resource_manager_instance, 'max_total_workers', None)
+        self.default_timeout = getattr(resource_manager_instance, 'default_timeout_sec', 120)
+        
+        # Configuración de tipos de tareas
+        self.task_types = {
+            "default": {"prefer_process": False},
+            "cpu_intensive": {"prefer_process": True},
+            "io_intensive": {"prefer_process": False}
+        }
+        
+        # Actualizar estado inicial de pools
+        self.pools_status["process_pool"]["workers"] = self.cpu_workers
+        self.pools_status["thread_pool"]["workers"] = self.io_workers
+        
+    def hibernate_pool(self, pool_type: str) -> bool:
+        """
+        Pone un pool en estado de hibernación sin destruirlo completamente.
+        Guarda su configuración para futura restauración pero libera recursos.
+        
+        Args:
+            pool_type (str): Tipo de pool ("thread_pool" o "process_pool")
+            
+        Returns:
+            bool: True si el pool fue hibernado, False en caso contrario
+        """
+        # Verificar si el pool existe y está activo
+        if pool_type not in self.pools_status:
+            return False
+            
+        pool_info = self.pools_status[pool_type]
+        current_time = time.time()
+        
+        # Si no está activo, no hay nada que hibernar
+        if pool_info["status"] != "active":
+            return False
+            
+        # Verificar periodo de enfriamiento
+        time_since_last_change = current_time - pool_info.get("last_status_change", 0)
+        if time_since_last_change < self.pool_cooldown_period_sec:
+            self.logger.debug(f"Pool {pool_type} en período de enfriamiento ({time_since_last_change:.1f}s < {self.pool_cooldown_period_sec}s)")
+            return False
+            
+        try:
+            # Hibernar el pool según su tipo
+            if pool_type == "thread_pool" and self.thread_pool is not None:
+                # Guardar estado para restauración futura
+                pool_info["stored_state"] = {
+                    "workers": self.thread_pool._max_workers,
+                    "tasks_pending": sum(1 for _ in self.thread_pool._work_queue.unfinished_tasks) 
+                                    if hasattr(self.thread_pool._work_queue, "unfinished_tasks") else 0
+                }
+                
+                # Hibernar thread pool - no iniciar nuevas tareas pero permitir que terminen las actuales
+                self.thread_pool._shutdown = True  # Marcar como shutdown pero sin afectar tareas en curso
+                
+                # Actualizar estado
+                pool_info["status"] = "hibernated"
+                pool_info["hibernated_at"] = current_time
+                pool_info["last_status_change"] = current_time
+                
+                self.logger.info(f"Pool de hilos hibernado con {pool_info['stored_state']['workers']} workers")
+                return True
+                
+            elif pool_type == "process_pool" and self.process_pool is not None:
+                # Guardar estado para restauración futura
+                pool_info["stored_state"] = {
+                    "workers": self.process_pool._max_workers,
+                    "tasks_pending": sum(1 for _ in self.process_pool._pending_work_items.values()) 
+                                   if hasattr(self.process_pool, "_pending_work_items") else 0
+                }
+                
+                # Hibernar process pool - no iniciar nuevas tareas pero permitir que terminen las actuales
+                self.process_pool._shutdown = True
+                
+                # Actualizar estado
+                pool_info["status"] = "hibernated"  
+                pool_info["hibernated_at"] = current_time
+                pool_info["last_status_change"] = current_time
+                
+                self.logger.info(f"Pool de procesos hibernado con {pool_info['stored_state']['workers']} workers")
+                return True
+                
+        except Exception as e:
+            self.logger.error(f"Error al hibernar pool {pool_type}: {e}")
+        
+        return False
+        
+    def wake_pool(self, pool_type: str) -> bool:
+        """
+        Restaura un pool hibernado a su estado activo.
+        Crea un nuevo pool con la configuración almacenada durante la hibernación.
+        
+        Args:
+            pool_type (str): Tipo de pool ("thread_pool" o "process_pool")
+            
+        Returns:
+            bool: True si el pool fue restaurado, False en caso contrario
+        """
+        # Verificar si el pool está hibernado
+        if pool_type not in self.pools_status:
+            return False
+            
+        pool_info = self.pools_status[pool_type]
+        current_time = time.time()
+        
+        # Solo despertar pools hibernados
+        if pool_info["status"] != "hibernated":
+            return False
+            
+        # Verificar periodo de enfriamiento
+        time_since_last_change = current_time - pool_info.get("last_status_change", 0)
+        if time_since_last_change < self.pool_cooldown_period_sec:
+            self.logger.debug(f"Pool {pool_type} en período de enfriamiento ({time_since_last_change:.1f}s < {self.pool_cooldown_period_sec}s)")
             return False
         
-        # Obtener las métricas actuales del sistema
-        metrics = self.resource_manager.metrics
-        cpu_percent = metrics.get("cpu_percent_system", 0)
-        memory_percent = metrics.get("system_memory_percent", 0)
-        
-        # Determinar si necesitamos ajustar
-        need_adjustment = self._check_if_adjustment_needed(cpu_percent, memory_percent)
-        
-        if need_adjustment:
-            self.logger.info(f"Recalculando workers (CPU: {cpu_percent:.1f}%, MEM: {memory_percent:.1f}%)")
-            new_cpu, new_io = self._adjust_workers_based_on_metrics(cpu_percent, memory_percent)
+        try:
+            # Obtener número correcto de workers (desde estado almacenado o valores actuales)
+            stored_state = pool_info.get("stored_state", {})
+            workers = stored_state.get("workers", 0) if stored_state else 0
             
-            # Registrar y aplicar los cambios
-            self.last_recalculation_time = current_time
+            # Si no hay información guardada, usar valores actuales
+            if workers <= 0:
+                workers = self.io_workers if pool_type == "thread_pool" else self.cpu_workers
             
-            # Si realmente hay cambios, re-inicializar los pools
-            if new_cpu != self.cpu_workers or new_io != self.io_workers:
-                old_cpu, old_io = self.cpu_workers, self.io_workers
-                self.cpu_workers, self.io_workers = new_cpu, new_io
-                self.logger.info(f"Ajuste de workers: CPU {old_cpu}->{new_cpu}, IO {old_io}->{new_io}")
+            # Despertar el pool según su tipo
+            if pool_type == "thread_pool":
+                # Crear nuevo pool de hilos con la configuración almacenada
+                self.thread_pool = ThreadPoolExecutor(max_workers=workers)
                 
-                # Reinicializar los pools con los nuevos valores
-                self._reinitialize_pools_with_new_workers()
+                # Actualizar estado
+                pool_info["status"] = "active"
+                pool_info["created_at"] = current_time
+                pool_info["last_used"] = current_time
+                pool_info["last_status_change"] = current_time
+                pool_info["workers"] = workers
+                
+                self.logger.info(f"Pool de hilos restaurado de hibernación con {workers} workers")
                 return True
+                
+            elif pool_type == "process_pool" and not self.disable_process_pool:
+                # Crear nuevo pool de procesos con la configuración almacenada
+                self.process_pool = ProcessPoolExecutor(max_workers=workers)
+                
+                # Actualizar estado
+                pool_info["status"] = "active"
+                pool_info["created_at"] = current_time
+                pool_info["last_used"] = current_time
+                pool_info["last_status_change"] = current_time
+                pool_info["workers"] = workers
+                
+                self.logger.info(f"Pool de procesos restaurado de hibernación con {workers} workers")
+                return True
+                
+        except Exception as e:
+            self.logger.error(f"Error al despertar pool {pool_type}: {e}")
+            # Marcar como inactivo en caso de error
+            pool_info["status"] = "inactive"
         
-        # No se hicieron cambios
         return False
-    
-    def _check_if_adjustment_needed(self, cpu_percent: float, memory_percent: float) -> bool:
-        """
-        Determina si es necesario un ajuste de workers basado en métricas.
         
-        Args:
-            cpu_percent (float): Porcentaje de uso de CPU del sistema.
-            memory_percent (float): Porcentaje de uso de memoria del sistema.
-            
-        Returns:
-            bool: True si se necesita ajuste, False en caso contrario.
-        """
-        # Verificar si alguno de los umbrales se ha superado
-        high_cpu = cpu_percent >= self.adaptive_config["high_cpu_threshold"]
-        high_memory = memory_percent >= self.adaptive_config["high_memory_threshold"]
-        
-        low_cpu = cpu_percent <= self.adaptive_config["low_cpu_threshold"]
-        low_memory = memory_percent <= self.adaptive_config["low_memory_threshold"]
-        
-        # Necesitamos ajuste si estamos en condición de alta carga o baja carga
-        return (high_cpu or high_memory) or (low_cpu and low_memory)
-    
-    def _adjust_workers_based_on_metrics(self, cpu_percent: float, memory_percent: float) -> Tuple[int, int]:
-        """
-        Calcula nuevos valores de workers basados en las métricas del sistema.
-        
-        Ajusta dinámicamente el número de workers considerando la carga del sistema
-        y respetando los límites mínimos configurados.
-        
-        Args:
-            cpu_percent (float): Porcentaje de uso de CPU del sistema.
-            memory_percent (float): Porcentaje de uso de memoria del sistema.
-            
-        Returns:
-            Tuple[int, int]: Nuevo número de workers (CPU, IO).
-        """
-        # Por defecto, mantener los valores actuales
-        new_cpu_workers = self.cpu_workers
-        new_io_workers = self.io_workers
-        
-        # Obtener umbrales de configuración adaptativa
-        high_cpu = cpu_percent >= self.adaptive_config["high_cpu_threshold"]
-        high_memory = memory_percent >= self.adaptive_config["high_memory_threshold"]
-        low_cpu = cpu_percent <= self.adaptive_config["low_cpu_threshold"]
-        low_memory = memory_percent <= self.adaptive_config["low_memory_threshold"]
-        
-        # Obtener los valores mínimos configurados
-        min_cpu_workers = self.adaptive_config.get("min_cpu_workers", 1)
-        min_io_workers = self.adaptive_config.get("min_io_workers", 2)
-        
-        # Verificar condición de alta carga (reducir workers)
-        if high_cpu or high_memory:
-            # Aplicar factor de reducción
-            reduction = self.adaptive_config["reduction_factor"]
-            
-            # Reducir workers respetando los mínimos configurados
-            new_cpu_workers = max(min_cpu_workers, math.floor(self.cpu_workers * reduction))
-            new_io_workers = max(min_io_workers, math.floor(self.io_workers * reduction))
-            
-            self.logger.info(f"Alta carga detectada (CPU:{cpu_percent:.1f}%, MEM:{memory_percent:.1f}%). "
-                            f"Reduciendo workers CPU:{self.cpu_workers}->{new_cpu_workers}, "
-                            f"IO:{self.io_workers}->{new_io_workers}, factor:{reduction}")
-        
-        # Verificar condición de baja carga (aumentar workers si ambos están bajos)
-        elif low_cpu and low_memory:
-            # Solo aumentar si estamos por debajo del valor base
-            if self.cpu_workers < self.base_cpu_workers or self.io_workers < self.base_io_workers:
-                # Aplicar factor de aumento
-                increase = self.adaptive_config["increase_factor"]
-                
-                # Aumentar workers sin exceder los valores base
-                new_cpu_workers = min(self.base_cpu_workers, math.ceil(self.cpu_workers * increase))
-                new_io_workers = min(self.base_io_workers, math.ceil(self.io_workers * increase))
-                
-                self.logger.info(f"Baja carga detectada (CPU:{cpu_percent:.1f}%, MEM:{memory_percent:.1f}%). "
-                                f"Aumentando workers CPU:{self.cpu_workers}->{new_cpu_workers}, "
-                                f"IO:{self.io_workers}->{new_io_workers}, factor:{increase}")
-        
-        # Verificar límites máximos de workers
-        max_total_workers = getattr(self.resource_manager, 'max_total_workers', None)
-        if isinstance(max_total_workers, int) and max_total_workers > 0:
-            if (new_cpu_workers + new_io_workers) > max_total_workers:
-                # Calcular la proporción ideal CPU:IO
-                total_new = new_cpu_workers + new_io_workers
-                cpu_ratio = new_cpu_workers / total_new
-                io_ratio = new_io_workers / total_new
-                
-                # Distribuir el máximo respetando la proporción y los mínimos
-                new_cpu_workers = max(min_cpu_workers, math.floor(max_total_workers * cpu_ratio))
-                new_io_workers = max(min_io_workers, math.floor(max_total_workers * io_ratio))
-                
-                # Asegurar que no excedemos el límite total
-                while (new_cpu_workers + new_io_workers) > max_total_workers:
-                    if new_cpu_workers > min_cpu_workers:
-                        new_cpu_workers -= 1
-                    elif new_io_workers > min_io_workers:
-                        new_io_workers -= 1
-                    else:
-                        # No podemos reducir más respetando los mínimos, ajustar el límite
-                        self.logger.warning(f"Los valores mínimos requeridos (CPU:{min_cpu_workers}, IO:{min_io_workers}) "
-                                          f"exceden el límite total ({max_total_workers}). Ajustando límite.")
-                        break
-                
-                self.logger.info(f"Ajuste por límite máximo ({max_total_workers}): "
-                               f"CPU workers={new_cpu_workers}, IO workers={new_io_workers}")
-        
-        return new_cpu_workers, new_io_workers
-
     def _is_executor_shutdown(self, executor) -> bool:
         """
-        Verifica de forma segura si un executor está cerrado.
+        Verifica si un executor está apagado o hibernado.
+        Esta función soporta tanto ThreadPoolExecutor como ProcessPoolExecutor.
         
         Args:
-            executor: El executor a verificar (ThreadPoolExecutor o ProcessPoolExecutor)
+            executor: El executor a verificar
             
         Returns:
-            bool: True si el executor está cerrado o no es válido, False en caso contrario
+            bool: True si está apagado o hibernado, False en caso contrario
         """
         if executor is None:
             return True
-        # Verificar atributo _shutdown directamente si existe
-        if hasattr(executor, '_shutdown'):
-            return executor._shutdown
-        # En versiones más recientes puede ser shutdown 
-        if hasattr(executor, 'shutdown'):
-            # Esto no es perfecto, pero es mejor que acceder a un atributo privado
-            # que puede cambiar entre versiones
-            try:
-                # Intentar verificar si ya fue cerrado de alguna forma
-                return executor._thread is None if hasattr(executor, '_thread') else False
-            except:
-                # Si no podemos verificar, asumimos que sigue activo
-                return False
-        # Si no podemos determinar el estado, asumimos que necesita ser reinicializado
-        return True
-        
-    def _reinitialize_pools_with_new_workers(self) -> None:
-        """
-        Reinicializa los pools de ejecutores con los nuevos valores de workers.
-        
-        Cierra los pools existentes de manera controlada y crea nuevos con
-        el número actualizado de workers.
-        """
-        # Shutdown de los pools actuales si existen
-        self.shutdown_executors(wait=True)
-        
+            
+        # Verificar si el executor está apagado
         try:
-            # Crear nuevo ThreadPoolExecutor
-            self.thread_pool_executor = ThreadPoolExecutor(
-                max_workers=self.io_workers, 
-                thread_name_prefix='RM_Thread'
-            )
-            self.logger.info(f"ThreadPoolExecutor reinicializado con {self.io_workers} workers.")
-        except Exception as e:
-            self.logger.error(f"Error al reinicializar ThreadPoolExecutor: {e}", exc_info=True)
-            self.thread_pool_executor = None
-
-        try:
-            # Crear nuevo ProcessPoolExecutor
-            self.process_pool_executor = ProcessPoolExecutor(
-                max_workers=self.cpu_workers
-            )
-            self.logger.info(f"ProcessPoolExecutor reinicializado con {self.cpu_workers} workers.")
-        except Exception as e:
-            self.logger.error(f"Error al reinicializar ProcessPoolExecutor: {e}", exc_info=True)
-            self.process_pool_executor = None
-
-    def get_thread_pool_executor(self) -> Optional[ThreadPoolExecutor]:
+            return getattr(executor, '_shutdown', False)
+        except (AttributeError, TypeError):
+            # Si no podemos acceder a _shutdown, asumir que está apagado por seguridad
+            return True
+            
+    def get_thread_pool_executor(self) -> ThreadPoolExecutor:
         """
-        Obtiene la instancia del ThreadPoolExecutor para tareas I/O bound.
-
-        Si el pool no está inicializado o fue cerrado, intenta reinicializarlo.
+        Obtiene o inicializa un ThreadPoolExecutor para tareas I/O-bound.
+        Implementación mejorada con soporte para hibernación y restauración.
         
-        También realiza una verificación de recalculación de workers si es necesario.
-
         Returns:
-            Optional[ThreadPoolExecutor]: La instancia del ThreadPoolExecutor o None si falla.
+            ThreadPoolExecutor: El pool de hilos
         """
-        # Verificar si es momento de recalcular workers
-        self.recalculate_workers_if_needed()
+        # Si el pool es None, crearlo
+        if self.thread_pool is None:
+            # Verificar si está hibernado y despertarlo
+            if self.pools_status["thread_pool"]["status"] == "hibernated":
+                if not self.wake_pool("thread_pool"):
+                    # Si falló la restauración, crear un nuevo pool
+                    self.thread_pool = ThreadPoolExecutor(max_workers=self.io_workers)
+                    self.pools_status["thread_pool"]["status"] = "active"
+                    self.pools_status["thread_pool"]["created_at"] = time.time()
+                    self.pools_status["thread_pool"]["last_used"] = time.time()
+                    self.pools_status["thread_pool"]["workers"] = self.io_workers
+            else:
+                # Crear un nuevo pool desde cero
+                self.thread_pool = ThreadPoolExecutor(max_workers=self.io_workers)
+                self.pools_status["thread_pool"]["status"] = "active"
+                self.pools_status["thread_pool"]["created_at"] = time.time()
+                self.pools_status["thread_pool"]["last_used"] = time.time()
+                self.pools_status["thread_pool"]["workers"] = self.io_workers
         
-        # Verificar si el pool necesita ser inicializado
-        if self._is_executor_shutdown(self.thread_pool_executor):
-            self.logger.warning("ThreadPoolExecutor no está inicializado o fue apagado. Intentando reinicializar.")
-            self._initialize_pools() # O una subrutina para recrear solo este pool
-        return self.thread_pool_executor
-
+        # Si el pool está apagado pero no hibernado, recrearlo
+        elif self._is_executor_shutdown(self.thread_pool) and self.pools_status["thread_pool"]["status"] != "hibernated":
+            self.thread_pool = ThreadPoolExecutor(max_workers=self.io_workers)
+            self.pools_status["thread_pool"]["status"] = "active"
+            self.pools_status["thread_pool"]["created_at"] = time.time()
+            self.pools_status["thread_pool"]["last_used"] = time.time()
+            self.pools_status["thread_pool"]["workers"] = self.io_workers
+        
+        # Actualizar último uso
+        self.pools_status["thread_pool"]["last_used"] = time.time()
+        
+        return self.thread_pool
+    
     def get_process_pool_executor(self) -> Optional[ProcessPoolExecutor]:
         """
-        Obtiene la instancia del ProcessPoolExecutor para tareas CPU bound.
-
-        Si el pool no está inicializado o fue cerrado, intenta reinicializarlo.
+        Obtiene o inicializa un ProcessPoolExecutor para tareas CPU-bound.
+        Implementación mejorada con soporte para hibernación y restauración.
         
-        También realiza una verificación de recalculación de workers si es necesario.
-
         Returns:
-            Optional[ProcessPoolExecutor]: La instancia del ProcessPoolExecutor o None si falla.
+            Optional[ProcessPoolExecutor]: El pool de procesos, o None si está desactivado
         """
-        # Verificar si es momento de recalcular workers
-        self.recalculate_workers_if_needed()
+        # Si los process pools están deshabilitados, devolver None
+        if self.disable_process_pool:
+            return None
         
-        # Verificar si el pool necesita ser inicializado
-        if self._is_executor_shutdown(self.process_pool_executor):
-            self.logger.warning("ProcessPoolExecutor no está inicializado o fue apagado. Intentando reinicializar.")
-            self._initialize_pools() # O una subrutina para recrear solo este pool
-        return self.process_pool_executor
+        # Si el pool es None, crearlo
+        if self.process_pool is None:
+            # Verificar si está hibernado y despertarlo
+            if self.pools_status["process_pool"]["status"] == "hibernated":
+                if not self.wake_pool("process_pool"):
+                    # Si falló la restauración, crear un nuevo pool
+                    self.process_pool = ProcessPoolExecutor(max_workers=self.cpu_workers)
+                    self.pools_status["process_pool"]["status"] = "active"
+                    self.pools_status["process_pool"]["created_at"] = time.time()
+                    self.pools_status["process_pool"]["last_used"] = time.time()
+                    self.pools_status["process_pool"]["workers"] = self.cpu_workers
+            else:
+                # Crear un nuevo pool desde cero
+                self.process_pool = ProcessPoolExecutor(max_workers=self.cpu_workers)
+                self.pools_status["process_pool"]["status"] = "active"
+                self.pools_status["process_pool"]["created_at"] = time.time()
+                self.pools_status["process_pool"]["last_used"] = time.time()
+                self.pools_status["process_pool"]["workers"] = self.cpu_workers
+        
+        # Si el pool está apagado pero no hibernado, recrearlo
+        elif self._is_executor_shutdown(self.process_pool) and self.pools_status["process_pool"]["status"] != "hibernated":
+            self.process_pool = ProcessPoolExecutor(max_workers=self.cpu_workers)
+            self.pools_status["process_pool"]["status"] = "active"
+            self.pools_status["process_pool"]["created_at"] = time.time()
+            self.pools_status["process_pool"]["last_used"] = time.time()
+            self.pools_status["process_pool"]["workers"] = self.cpu_workers
+        
+        # Actualizar último uso
+        self.pools_status["process_pool"]["last_used"] = time.time()
+        
+        return self.process_pool
+        
+    def shutdown_executors(self, wait: bool = True) -> None:
+        """
+        Cierra ordenadamente todos los pools de executors.
+        
+        Args:
+            wait (bool): Si es True, espera a que terminen las tareas pendientes
+        """
+        # Cerrar thread pool
+        if self.thread_pool is not None:
+            try:
+                # Si estaba hibernado, actualizar estado directamente
+                if self.pools_status["thread_pool"]["status"] == "hibernated":
+                    self.pools_status["thread_pool"]["status"] = "shutdown"
+                else:
+                    self.thread_pool.shutdown(wait=wait)
+                    self.pools_status["thread_pool"]["status"] = "shutdown"
+                
+                # Liberar referencia
+                self.thread_pool = None
+                self.logger.debug("Pool de hilos cerrado correctamente")
+            except Exception as e:
+                self.logger.error(f"Error al cerrar thread pool: {e}")
+        
+        # Cerrar process pool
+        if self.process_pool is not None:
+            try:
+                # Si estaba hibernado, actualizar estado directamente
+                if self.pools_status["process_pool"]["status"] == "hibernated":
+                    self.pools_status["process_pool"]["status"] = "shutdown"
+                else:
+                    self.process_pool.shutdown(wait=wait)
+                    self.pools_status["process_pool"]["status"] = "shutdown"
+                
+                # Liberar referencia
+                self.process_pool = None
+                self.logger.debug("Pool de procesos cerrado correctamente")
+            except Exception as e:
+                self.logger.error(f"Error al cerrar process pool: {e}")
+        
+        # Forzar GC para liberar recursos
+        try:
+            import gc
+            gc.collect()
+        except ImportError:
+            pass
+
+    def _reinitialize_pools_with_new_workers(self) -> None:
+        """
+        Reinicializa los pools de executors con el número actualizado de workers.
+        Versión mejorada que preserva pools existentes cuando es posible.
+        """
+        # Verificar si realmente necesitamos reinicializar los pools
+        need_thread_reinit = False
+        need_process_reinit = False
+        
+        # Para thread pool
+        if self.thread_pool is not None and not self._is_executor_shutdown(self.thread_pool):
+            # Obtener el número actual de workers
+            current_io_workers = getattr(self.thread_pool, "_max_workers", 0)
+            
+            # Solo reinicializar si el cambio es significativo (> threshold%)
+            if current_io_workers > 0:
+                change_percent = abs(self.io_workers - current_io_workers) / current_io_workers * 100
+                need_thread_reinit = change_percent > self.worker_change_threshold_pct
+                
+                if need_thread_reinit:
+                    self.logger.info(f"Reinicializando thread pool: {current_io_workers} -> {self.io_workers} workers (cambio {change_percent:.1f}%)")
+            else:
+                need_thread_reinit = True
+        else:
+            # Si no hay pool activo, necesitamos inicializar
+            need_thread_reinit = True
+        
+        # Para process pool
+        if self.process_pool is not None and not self._is_executor_shutdown(self.process_pool):
+            # Obtener el número actual de workers
+            current_cpu_workers = getattr(self.process_pool, "_max_workers", 0)
+            
+            # Solo reinicializar si el cambio es significativo (> threshold%)
+            if current_cpu_workers > 0:
+                change_percent = abs(self.cpu_workers - current_cpu_workers) / current_cpu_workers * 100
+                need_process_reinit = change_percent > self.worker_change_threshold_pct
+                
+                if need_process_reinit:
+                    self.logger.info(f"Reinicializando process pool: {current_cpu_workers} -> {self.cpu_workers} workers (cambio {change_percent:.1f}%)")
+            else:
+                need_process_reinit = True
+        else:
+            # Si no hay pool activo, necesitamos inicializar (excepto si process pool está deshabilitado)
+            need_process_reinit = not self.disable_process_pool
+        
+        # Reinicializar solo los pools que realmente lo necesitan
+        if need_thread_reinit:
+            try:
+                # Cerrar el pool anterior si existe
+                if self.thread_pool is not None:
+                    self.thread_pool.shutdown(wait=False)
+                    
+                # Crear nuevo pool
+                self.thread_pool = ThreadPoolExecutor(max_workers=self.io_workers)
+                
+                # Actualizar estado
+                self.pools_status["thread_pool"]["status"] = "active"
+                self.pools_status["thread_pool"]["created_at"] = time.time()
+                self.pools_status["thread_pool"]["workers"] = self.io_workers
+                self.pools_status["thread_pool"]["last_status_change"] = time.time()
+            except Exception as e:
+                self.logger.error(f"Error al reinicializar thread pool: {e}")
+        
+        if need_process_reinit and not self.disable_process_pool:
+            try:
+                # Cerrar el pool anterior si existe
+                if self.process_pool is not None:
+                    self.process_pool.shutdown(wait=False)
+                    
+                # Crear nuevo pool
+                self.process_pool = ProcessPoolExecutor(max_workers=self.cpu_workers)
+                
+                # Actualizar estado
+                self.pools_status["process_pool"]["status"] = "active"
+                self.pools_status["process_pool"]["created_at"] = time.time()
+                self.pools_status["process_pool"]["workers"] = self.cpu_workers
+                self.pools_status["process_pool"]["last_status_change"] = time.time()
+            except Exception as e:
+                self.logger.error(f"Error al reinicializar process pool: {e}")
+
+    def recalculate_workers_if_needed(self) -> bool:
+        """
+        Verifica si es necesario recalcular el número de workers y lo hace si aplica.
+        
+        Mejora con sistema de histéresis y tracking de rendimiento para evitar recálculos
+        innecesarios y adaptar dinámicamente basado en rendimiento histórico.
+        
+        Returns:
+            bool: True si se recalcularon los workers, False en caso contrario
+        """
+        # Obtener métricas actuales del sistema
+        current_metrics = {
+            "cpu_percent": self.resource_manager.metrics.get("cpu_percent_system", 0),
+            "memory_percent": self.resource_manager.metrics.get("system_memory_percent", 0),
+            "cpu_count": os.cpu_count() or 1
+        }
+        
+        # Registrar métricas actuales en tracker de rendimiento
+        self.performance_tracker.record_system_metrics(current_metrics)
+        
+        # Verificar si debemos recalcular según el tracker de rendimiento
+        should_recalc, reason = self.performance_tracker.should_recalculate(current_metrics)
+        
+        # Si estamos usando intervalo dinámico, ajustarlo basado en recálculos anteriores
+        if self.dynamic_recalc_interval:
+            # Después de varios recálculos, aumentar el intervalo gradualmente
+            if self.worker_recalc_count > 5:
+                # Máximo 3 veces la configuración base
+                max_interval = self.recalculation_frequency_sec * 3
+                # Incremento logarítmico que crece más lentamente con el tiempo
+                new_interval = min(
+                    max_interval,
+                    self.recalculation_frequency_sec * (1 + (math.log(self.worker_recalc_count - 4) / 2))
+                )
+                self.worker_calculation_interval_sec = new_interval
+                
+                # También actualizar el período de enfriamiento del tracker
+                self.performance_tracker.cooling_period_sec = new_interval
+        
+        if not should_recalc:
+            # Usar un nivel DEBUG para reducir verbosidad de logs
+            self.logger.debug(f"Recálculo de workers omitido: {reason}")
+            return False
+            
+        # Si llegamos aquí, procedemos con el recálculo
+        # Verificar si hay predicciones disponibles desde el tracker
+        predicted_cpu_workers = self.performance_tracker.predict_optimal_worker_count(
+            "process_pool", "default", current_metrics
+        )
+        
+        predicted_io_workers = self.performance_tracker.predict_optimal_worker_count(
+            "thread_pool", "default", current_metrics
+        )
+        
+        # Calcular la configuración óptima usando predicción si está disponible
+        old_cpu_workers = self.cpu_workers
+        old_io_workers = self.io_workers
+        
+        # Recalcular CPU workers
+        if predicted_cpu_workers is not None:
+            # Usar predicción con pequeño ajuste basado en presión actual
+            new_cpu_workers = predicted_cpu_workers
+            # Limitar por configuración mínima y máxima
+            cpu_min = 1
+            cpu_max = os.cpu_count() or 4  # Mínimo 4 si no se puede determinar
+            tentative_cpu_workers = max(cpu_min, min(new_cpu_workers, cpu_max))
+        else:
+            # Si no hay predicción, usar el método tradicional
+            tentative_cpu_workers = self._calculate_optimal_workers("cpu")
+            
+        # Recalcular IO workers
+        if predicted_io_workers is not None:
+            new_io_workers = predicted_io_workers
+            # IO puede tener más workers ya que son tareas bloqueantes
+            io_min = 2
+            io_max = (os.cpu_count() or 4) * 2
+            tentative_io_workers = max(io_min, min(new_io_workers, io_max))
+        else:
+            tentative_io_workers = self._calculate_optimal_workers("io")
+        
+        # Obtener umbral de cambio (porcentaje) desde el ResourceManager
+        change_threshold_pct = getattr(self.resource_manager, 'worker_change_threshold_pct', 15)
+        
+        # Aplicar histéresis para evitar cambios pequeños y oscilaciones
+        apply_cpu_change = False
+        apply_io_change = False
+        
+        # Solo aplicar cambios si superan el umbral de variación
+        if old_cpu_workers > 0:
+            cpu_change_pct = abs(tentative_cpu_workers - old_cpu_workers) / old_cpu_workers * 100
+            apply_cpu_change = cpu_change_pct >= change_threshold_pct
+        else:
+            apply_cpu_change = True  # Siempre aplicar si no hay configuración previa
+            
+        if old_io_workers > 0:
+            io_change_pct = abs(tentative_io_workers - old_io_workers) / old_io_workers * 100
+            apply_io_change = io_change_pct >= change_threshold_pct
+        else:
+            apply_io_change = True  # Siempre aplicar si no hay configuración previa
+            
+        # Aplicar cambios solo si superan el umbral o son los primeros
+        if apply_cpu_change:
+            self.cpu_workers = tentative_cpu_workers
+        if apply_io_change:
+            self.io_workers = tentative_io_workers
+            
+        # Verificar límite global de workers si está configurado
+        if self.max_total_workers:
+            total_workers = self.cpu_workers + self.io_workers
+            if total_workers > self.max_total_workers:
+                # Reducir proporcionalmente
+                reduction_factor = self.max_total_workers / total_workers
+                self.cpu_workers = max(1, int(self.cpu_workers * reduction_factor))
+                self.io_workers = max(2, int(self.io_workers * reduction_factor))
+        
+        # Registrar recálculo y actualizar contadores
+        self.performance_tracker.record_recalculation()
+        self.last_worker_calculation_time = time.time()
+        self.worker_recalc_count += 1
+        
+        # Verificar si realmente cambiaron los valores
+        if old_cpu_workers != self.cpu_workers or old_io_workers != self.io_workers:
+            changes = []
+            if old_cpu_workers != self.cpu_workers:
+                cpu_change_pct = abs(self.cpu_workers - old_cpu_workers) / max(1, old_cpu_workers) * 100
+                changes.append(f"CPU: {old_cpu_workers} → {self.cpu_workers} ({cpu_change_pct:.1f}%)")
+            if old_io_workers != self.io_workers:
+                io_change_pct = abs(self.io_workers - old_io_workers) / max(1, old_io_workers) * 100
+                changes.append(f"IO: {old_io_workers} → {self.io_workers} ({io_change_pct:.1f}%)")
+                
+            changes_str = ", ".join(changes)
+            self.logger.info(f"Workers recalculados - {changes_str} (Razón: {reason}, Umbral: {change_threshold_pct}%)")
+            
+            # Actualizar estado de pools
+            self.pools_status["process_pool"]["workers"] = self.cpu_workers
+            self.pools_status["thread_pool"]["workers"] = self.io_workers
+            
+            return True
+        else:
+            self.logger.debug(f"Recálculo completado sin cambios. Razón: {reason}")
+            return False
+
+    def map_tasks(self, func: Callable[[Any], R], iterable: Iterable[Any], 
+                 chunksize: Optional[int] = None, task_type: str = "default",
+                 timeout: Optional[float] = None, prefer_process: bool = False) -> List[R]:
+        """
+        Ejecuta la función para cada elemento del iterable en paralelo, seleccionando
+        automáticamente el mejor executor según el tipo de tarea.
+        
+        Versión optimizada que reduce la sobrecarga y mejora el rendimiento:
+        1. Evita conversiones innecesarias a listas cuando es posible
+        2. Realiza un tracking de rendimiento mínimo
+        3. Utiliza procesamiento por lotes eficiente
+        
+        Args:
+            func: La función a ejecutar para cada elemento
+            iterable: Los elementos a procesar
+            chunksize: Tamaño de los lotes para procesamiento
+            task_type: Tipo de tarea para seleccionar configuración apropiada
+            timeout: Tiempo máximo de espera en segundos
+            prefer_process: Si se debe usar ProcessPool incluso para tareas I/O bound
+            
+        Returns:
+            Lista con los resultados de aplicar la función a cada elemento
+        """
+        # Heurística para verificar el tamaño del iterable sin convertirlo a lista
+        # cuando es posible para evitar sobrecarga de memoria
+        try:
+            # Intentar obtener la longitud directamente
+            n_items = len(iterable)
+            items = iterable  # Mantener el iterable original
+        except (TypeError, AttributeError):
+            # Si no tiene método len(), convertir a lista
+            items = list(iterable)
+            n_items = len(items)
+        
+        if n_items == 0:
+            return []
+            
+        # Seleccionar el pool apropiado sin operaciones costosas
+        start_time = time.time()
+        pool_type = "process_pool" if prefer_process or self._is_cpu_bound_task(task_type) else "thread_pool"
+        
+        # Obtener el pool y el número actual de workers
+        if pool_type == "process_pool":
+            use_pool = self.get_process_pool_executor()
+            workers = self.cpu_workers
+        else:
+            use_pool = self.get_thread_pool_executor()
+            workers = self.io_workers
+        
+        # Obtener chunksize óptimo pero solo si no fue especificado
+        if chunksize is None:
+            # Cálculo simplificado para evitar overhead
+            if n_items < workers * 2:
+                chunksize = 1  # Para pocos elementos
+            elif n_items < 1000:  
+                chunksize = max(1, n_items // (workers * 2))  # Granularidad media
+            else:
+                chunksize = max(1, n_items // workers)  # Chunks grandes
+        
+        # Métricas del sistema - Minimizar acceso para reducir overhead
+        system_metrics = {
+            "cpu_percent": self.resource_manager.metrics.get("cpu_percent_system", 0),
+            "memory_percent": self.resource_manager.metrics.get("system_memory_percent", 0)
+        }
+        
+        # Ejecutar las tareas
+        try:
+            if pool_type == "process_pool" and self.disable_process_pool:
+                # Si los process pools están deshabilitados, usar ejecución secuencial
+                results = [func(item) for item in items]
+            else:
+                results = list(use_pool.map(func, items, chunksize=chunksize or 1))
+            
+            # Calcular tiempo de ejecución
+            execution_time = time.time() - start_time
+            
+            # Actualizar estado de pool - solo métricas esenciales
+            self.pools_status[pool_type]["last_used"] = time.time()
+            self.pools_status[pool_type]["task_count"] += n_items
+            
+            # Registrar rendimiento pero solo si la tarea es significativa
+            if n_items > 10 or execution_time > 1.0:
+                self.performance_tracker.record_pool_performance(
+                    pool_type=pool_type,
+                    worker_count=workers,
+                    tasks_completed=n_items,
+                    execution_time=execution_time,
+                    task_type=task_type,
+                    system_metrics=system_metrics
+                )
+            
+            return results
+            
+        except Exception as e:
+            self.logger.error(f"Error en map_tasks ({pool_type}): {e}")
+            # Intentar proceso secuencial como fallback
+            self.logger.info("Intentando procesamiento secuencial como fallback")
+            return [func(item) for item in items]
+            
+    def get_optimal_chunksize(self, task_type: str, iterable_length: int, pool_type: Optional[str] = None) -> int:
+        """
+        Calcula el tamaño de lote óptimo para una operación map basado en
+        características de la tarea y tamaño del iterable.
+        
+        Versión optimizada para maximizar rendimiento y minimizar overhead.
+        
+        Args:
+            task_type: El tipo de tarea ("default", "cpu_intensive", "io_intensive")
+            iterable_length: La longitud del iterable a procesar
+            pool_type: Tipo de pool que se usará (si se conoce)
+            
+        Returns:
+            int: Tamaño de lote óptimo
+        """
+        # Si no se especificó pool_type, determinarlo basado en tipo de tarea
+        if pool_type is None:
+            pool_type = "process_pool" if self._is_cpu_bound_task(task_type) else "thread_pool"
+        
+        # Obtener número de workers según pool_type
+        workers = self.cpu_workers if pool_type == "process_pool" else self.io_workers
+        
+        # Asegurar mínimo 1 worker
+        workers = max(1, workers)
+        
+        # Cálculo simplificado de chunksize basado en tipo de tarea y longitud del iterable
+        if iterable_length <= workers * 2:
+            # Si hay pocas tareas, usar un chunksize pequeño
+            return 1
+        
+        if task_type == "io_intensive":
+            # Para IO-bound, usar chunks más pequeños para aprovechar paralelismo de IO
+            base_chunksize = max(1, iterable_length // (workers * 4))
+        elif task_type == "cpu_intensive":
+            # Para CPU-bound, chunks más grandes reducen overhead
+            base_chunksize = max(1, iterable_length // workers)
+        else:  # default
+            # Para tareas generales, equilibrio
+            base_chunksize = max(1, iterable_length // (workers * 2))
+        
+        # Ajustes adicionales basados en tamaño del iterable
+        if iterable_length > 10000:
+            # Para iterables muy grandes, aumentar chunksize para reducir overhead
+            base_chunksize = max(base_chunksize, iterable_length // 500)
+        elif iterable_length < 100:
+            # Para iterables pequeños, limitar chunksize
+            base_chunksize = min(base_chunksize, 5)
+        
+        return base_chunksize
 
     def get_worker_counts(self) -> Dict[str, int]:
         """
-        Obtiene información sobre el número actual de workers en uso.
+        Obtiene el conteo actual de workers para los diferentes pools.
         
         Returns:
-            Dict[str, int]: Diccionario con información de workers.
+            Dict[str, int]: Diccionario con conteo de workers por tipo
         """
         return {
             "cpu_workers": self.cpu_workers,
             "io_workers": self.io_workers,
-            "base_cpu_workers": self.base_cpu_workers,
-            "base_io_workers": self.base_io_workers
+            "max_total": self.max_total_workers,
+            "cpu_pool_status": self.pools_status["process_pool"]["status"],
+            "io_pool_status": self.pools_status["thread_pool"]["status"],
+            "recalc_interval": self.worker_calculation_interval_sec,
+            "recalc_count": self.worker_recalc_count
         }
 
-    def run_in_thread_pool(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Optional[Future]:
+    def hibernate_pool_if_unused(self, pool_type: str, idle_seconds: float = 600) -> bool:
         """
-        Ejecuta una función de forma asíncrona en el ThreadPoolExecutor.
-
-        Args:
-            func (Callable[..., Any]): La función a ejecutar.
-            *args (Any): Argumentos posicionales para la función.
-            **kwargs (Any): Argumentos de palabra clave para la función.
-
-        Returns:
-            Optional[Future]: Un objeto Future que representa la ejecución de la función,
-                              o None si el executor no está disponible.
-        """
-        executor = self.get_thread_pool_executor()
-        if executor:
-            return executor.submit(func, *args, **kwargs)
-        self.logger.error("No se pudo ejecutar en ThreadPool: Executor no disponible.")
-        return None
-
-    def run_in_process_pool(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Optional[Future]:
-        """
-        Ejecuta una función de forma asíncrona en el ProcessPoolExecutor.
-
-        Asegurarse de que la función y sus argumentos/keywords sean "picklables".
-        Si ocurre un error de serialización (como con AuthenticationString), automáticamente
-        cae al ThreadPoolExecutor.
-
-        Args:
-            func (Callable[..., Any]): La función a ejecutar.
-            *args (Any): Argumentos posicionales para la función.
-            **kwargs (Any): Argumentos de palabra clave para la función.
-
-        Returns:
-            Optional[Future]: Un objeto Future que representa la ejecución de la función,
-                              o None si el executor no está disponible.
-        """
-        # Verificar si el proceso de serialización está deshabilitado a nivel de config
-        disable_process_pool = getattr(self.resource_manager, 'disable_process_pool', False)
-        
-        # Si está deshabilitado, usar directamente thread pool
-        if disable_process_pool:
-            self.logger.info(f"ProcessPool desactivado por configuración, usando ThreadPool para {func.__name__}")
-            return self.run_in_thread_pool(func, *args, **kwargs)
-        
-        # Intentar usar ProcessPoolExecutor
-        executor = self.get_process_pool_executor()
-        if executor:
-            try:
-                # Intentar verificar si la función es pickleable
-                import pickle
-                try:
-                    # Verificar si la función y args son serializables
-                    pickle.dumps(func)
-                    if args:
-                        pickle.dumps(args)
-                    if kwargs:
-                        pickle.dumps(kwargs)
-                except Exception as e:
-                    # Si hay error de serialización, loguear y usar alternativa
-                    self.logger.error(f"Error de serialización para ProcessPoolExecutor: {e}")
-                    self.logger.warning(f"Ejecutando función {func.__name__} en ThreadPoolExecutor como alternativa")
-                    
-                    # Caer con gracia a ThreadPool como alternativa
-                    return self.run_in_thread_pool(func, *args, **kwargs)
-                
-                try:
-                    # Si la verificación de pickle pasa, intentar usar el ProcessPoolExecutor
-                    return executor.submit(func, *args, **kwargs)
-                except TypeError as e:
-                    # Capturar específicamente el error de AuthenticationString
-                    if "Pickling an AuthenticationString object is disallowed" in str(e):
-                        self.logger.warning(f"Detectado AuthenticationString no serializable. Usando ThreadPool para {func.__name__}")
-                        # Marcar para evitar intentar usar ProcessPool en el futuro
-                        setattr(self.resource_manager, 'disable_process_pool', True)
-                        return self.run_in_thread_pool(func, *args, **kwargs)
-                    else:
-                        raise
-                except Exception as e:
-                    self.logger.error(f"Error al ejecutar {func.__name__} en ProcessPoolExecutor: {e}", exc_info=True)
-                    self.logger.warning(f"Fallback: intentando ejecutar en ThreadPoolExecutor")
-                    return self.run_in_thread_pool(func, *args, **kwargs)
-                
-            except Exception as e:
-                self.logger.error(f"Error general al intentar ejecutar {func.__name__}: {e}", exc_info=True)
-                # Intentar con ThreadPoolExecutor como último recurso
-                self.logger.warning(f"Último recurso: intentando ejecutar en ThreadPoolExecutor")
-                return self.run_in_thread_pool(func, *args, **kwargs)
-        
-        self.logger.error("No se pudo ejecutar en ProcessPool: Executor no disponible. Intentando ThreadPool.")
-        return self.run_in_thread_pool(func, *args, **kwargs)
-
-    def map_tasks_in_thread_pool(self, func: Callable[..., Any], iterables: Iterable[Any], 
-                                timeout: Optional[float] = None, 
-                                chunksize: Optional[int] = None,
-                                task_type: str = "default") -> Optional[Iterator]:
-        """
-        Aplica una función a cada ítem de un iterable de forma concurrente usando ThreadPoolExecutor.
-
-        Similar a `map()` incorporado, pero ejecutado en hilos, con tamaño de chunk optimizado.
-
-        Args:
-            func (Callable[..., Any]): La función a aplicar.
-            iterables (Iterable[Any]): Un iterable (o varios) cuyos ítems se pasarán a `func`.
-            timeout (Optional[float]): Tiempo máximo de espera para cada tarea. Defaults to None.
-            chunksize (Optional[int]): Tamaño de los lotes de tareas. Si es None, se calcula automáticamente.
-            task_type (str): Tipo de tarea para calcular chunksize óptimo si no se especifica.
-
-        Returns:
-            Optional[Iterator]: Un iterador que produce los resultados en el orden de los ítems
-                                del iterable, o None si el executor no está disponible.
-        """
-        executor = self.get_thread_pool_executor()
-        if executor:
-            # Calcular el tamaño de chunk óptimo si no se proporcionó uno
-            if chunksize is None:
-                # Intentar determinar la longitud del iterable sin consumirlo
-                try:
-                    # Esto funciona para listas, tuplas, conjuntos, etc.
-                    iterable_length = len(iterables)
-                except (TypeError, AttributeError):
-                    # Si no podemos obtener la longitud, usar None
-                    iterable_length = None
-                
-                # Calcular el chunksize óptimo
-                chunksize = self.get_optimal_chunksize(
-                    task_type=task_type if task_type == "io_operations" else "default",
-                    iterable_length=iterable_length
-                )
-                self.logger.debug(f"Chunksize calculado para ThreadPool ({task_type}): {chunksize}")
-            
-            # Si después de todo, el chunksize sigue siendo None, usar 1 como valor seguro
-            if chunksize is None:
-                chunksize = 1
-            
-            return executor.map(func, iterables, timeout=timeout, chunksize=chunksize)
-        
-        self.logger.error("No se pudo mapear tareas en ThreadPool: Executor no disponible.")
-        return None
-
-    def map_tasks_in_process_pool(self, func: Callable[..., Any], iterables: Iterable[Any], 
-                                 timeout: Optional[float] = None, 
-                                 chunksize: Optional[int] = None,
-                                 task_type: str = "default") -> Optional[Iterator]:
-        """
-        Aplica una función a cada ítem de un iterable de forma concurrente usando ProcessPoolExecutor.
-
-        Similar a `map()` incorporado, pero ejecutado en procesos, con tamaño de chunk optimizado.
-        Si hay problemas de serialización, cae automáticamente a ThreadPoolExecutor.
+        Pone en modo hibernación un pool sin destruirlo si no se ha usado 
+        por cierto tiempo. Esto libera recursos manteniendo la estructura.
         
         Args:
-            func (Callable[..., Any]): La función a aplicar.
-            iterables (Iterable[Any]): Un iterable cuyos ítems se pasarán a `func`.
-            timeout (Optional[float]): Tiempo máximo de espera para cada tarea. Defaults to None.
-            chunksize (Optional[int]): Tamaño de los lotes de tareas. Si es None, se calcula automáticamente.
-            task_type (str): Tipo de tarea para calcular chunksize óptimo si no se especifica.
-
-        Returns:
-            Optional[Iterator]: Un iterador que produce los resultados en el orden de los ítems
-                                del iterable, o None si el executor no está disponible.
-        """
-        # Verificar si el proceso de serialización está deshabilitado
-        disable_process_pool = getattr(self.resource_manager, 'disable_process_pool', False)
-        
-        # Si está deshabilitado, usar directamente thread pool
-        if disable_process_pool:
-            self.logger.info(f"ProcessPool desactivado por configuración, usando ThreadPool para map_tasks")
-            return self.map_tasks_in_thread_pool(func, iterables, timeout, chunksize, task_type)
-        
-        # Calcular el tamaño de chunk óptimo si no se proporcionó uno
-        if chunksize is None:
-            # Intentar determinar la longitud del iterable sin consumirlo
-            try:
-                # Esto funciona para listas, tuplas, conjuntos, etc.
-                iterable_length = len(iterables)
-            except (TypeError, AttributeError):
-                # Si no podemos obtener la longitud, usar None
-                iterable_length = None
-            
-            # Calcular el chunksize óptimo
-            chunksize = self.get_optimal_chunksize(
-                task_type=task_type,
-                iterable_length=iterable_length
-            )
-            self.logger.debug(f"Chunksize calculado para ProcessPool ({task_type}): {chunksize}")
-        
-        # Si después de todo, el chunksize sigue siendo None, usar 1 como valor seguro
-        if chunksize is None:
-            chunksize = 1
-        
-        executor = self.get_process_pool_executor()
-        if executor:
-            try:
-                # Intentar verificar si la función es pickleable
-                import pickle
-                pickle.dumps(func)
-                # No podemos verificar todos los items en iterables sin consumirlo
-                
-                # Intentar usar ProcessPoolExecutor
-                try:
-                    return executor.map(func, iterables, timeout=timeout, chunksize=chunksize)
-                except TypeError as e:
-                    # Capturar específicamente el error de AuthenticationString
-                    if "Pickling an AuthenticationString object is disallowed" in str(e):
-                        self.logger.warning("Detectado AuthenticationString no serializable. Usando ThreadPool para map_tasks")
-                        # Marcar para evitar intentar usar ProcessPool en el futuro
-                        setattr(self.resource_manager, 'disable_process_pool', True)
-                        return self.map_tasks_in_thread_pool(func, iterables, timeout, chunksize, task_type)
-                    else:
-                        raise
-                except Exception as e:
-                    self.logger.error(f"Error en map_tasks_in_process_pool: {e}", exc_info=True)
-                    self.logger.warning("Fallback: intentando map_tasks en ThreadPoolExecutor")
-                    return self.map_tasks_in_thread_pool(func, iterables, timeout, chunksize, task_type)
-                
-            except Exception as e:
-                self.logger.error(f"Error de serialización en map_tasks_in_process_pool: {e}")
-                self.logger.warning("Fallback: usando ThreadPoolExecutor para map_tasks")
-                return self.map_tasks_in_thread_pool(func, iterables, timeout, chunksize, task_type)
-        
-        self.logger.error("No se pudo mapear tareas en ProcessPool: Executor no disponible. Intentando ThreadPool.")
-        return self.map_tasks_in_thread_pool(func, iterables, timeout, chunksize, task_type)
-
-    def shutdown_executors(self, wait: bool = True) -> None:
-        """
-        Cierra de forma controlada los pools de ThreadPoolExecutor y ProcessPoolExecutor.
-
-        Args:
-            wait (bool): Si True, espera a que todas las tareas pendientes completen antes
-                         de cerrar los pools. Si False, cierra inmediatamente. 
-                         Defaults to True.
-        """
-        self.logger.info(f"Solicitando shutdown de ejecutores (wait={wait})...")
-        if self.thread_pool_executor:
-            try:
-                self.logger.debug("Cerrando ThreadPoolExecutor...")
-                self.thread_pool_executor.shutdown(wait=wait)
-                self.logger.info("ThreadPoolExecutor cerrado.")
-            except Exception as e:
-                self.logger.error(f"Error al cerrar ThreadPoolExecutor: {e}", exc_info=True)
-            finally:
-                self.thread_pool_executor = None
-
-        if self.process_pool_executor:
-            try:
-                self.logger.debug("Cerrando ProcessPoolExecutor...")
-                self.process_pool_executor.shutdown(wait=wait)
-                self.logger.info("ProcessPoolExecutor cerrado.")
-            except Exception as e:
-                self.logger.error(f"Error al cerrar ProcessPoolExecutor: {e}", exc_info=True)
-            finally:
-                self.process_pool_executor = None
-        self.logger.info("Shutdown de ejecutores completado.")
-
-    def get_optimal_chunksize(self, task_type: str = "default", iterable_length: Optional[int] = None) -> int:
-        """
-        Calcula el tamaño de chunk óptimo para procesamiento por lotes.
-        
-        Ajusta el tamaño de chunk según el tipo de tarea y la longitud del iterable
-        para balancear la sobrecarga de comunicación con el paralelismo efectivo.
-        
-        Args:
-            task_type (str): Tipo de tarea ("default", "io_operations", "embeddings")
-            iterable_length (Optional[int]): Longitud del iterable a procesar, si se conoce
+            pool_type (str): "thread_pool" o "process_pool"
+            idle_seconds (float): Segundos de inactividad para hibernar
             
         Returns:
-            int: Tamaño de chunk óptimo
+            bool: True si el pool fue hibernado, False en caso contrario
         """
-        # Intentar obtener configuración desde config
+        # Verificar si el pool existe y está activo
+        if pool_type not in self.pools_status:
+            return False
+            
+        pool_info = self.pools_status[pool_type]
+        current_time = time.time()
+        
+        # Si el pool no está activo, no hay nada que hacer
+        if pool_info["status"] != "active":
+            return False
+            
+        # Si no ha pasado suficiente tiempo, no hibernar
+        time_since_last_use = current_time - pool_info["last_used"]
+        if time_since_last_use < idle_seconds:
+            return False
+            
+        # Hibernar el pool adecuado
         try:
-            if hasattr(self.resource_manager, 'config') and self.resource_manager.config:
-                config = self.resource_manager.config
-                if hasattr(config, 'get_resource_management_config'):
-                    resource_config = config.get_resource_management_config() or {}
-                    concurrency_config = resource_config.get("concurrency", {})
-                    chunk_sizes = concurrency_config.get("chunk_sizes", {})
-                    
-                    # Obtener el valor específico para este tipo de tarea
-                    if task_type in chunk_sizes:
-                        configured_size = chunk_sizes.get(task_type)
-                        if isinstance(configured_size, int) and configured_size > 0:
-                            # Si tenemos un tamaño en la configuración, usarlo como base
-                            base_size = configured_size
-                            self.logger.debug(f"Usando chunk_size configurado para {task_type}: {base_size}")
-                            
-                            # Si conocemos la longitud del iterable, ajustar dinámicamente
-                            if iterable_length is not None:
-                                worker_count = max(self.cpu_workers, self.io_workers)
-                                if worker_count == 0:  # Prevenir división por cero
-                                    worker_count = os.cpu_count() or 4
-                                
-                                # Calcular un tamaño que distribuya el trabajo eficientemente
-                                # entre los workers disponibles
-                                dynamic_size = max(1, iterable_length // (worker_count * 2))
-                                
-                                # Elegir entre el tamaño base y el calculado dinámicamente
-                                # privilegiando un valor que mantenga los workers ocupados
-                                return max(base_size, min(dynamic_size, 32))
-                            
-                            return base_size
+            if pool_type == "thread_pool" and hasattr(self, "thread_pool"):
+                # Guardar el número de workers antes de hibernar
+                workers = self.thread_pool._max_workers
+                self.thread_pool.shutdown(wait=False)
+                self.thread_pool = None
+                pool_info["workers"] = workers
+                pool_info["status"] = "hibernated"
+                pool_info["hibernated_at"] = current_time
+                self.logger.info(f"Pool de hilos hibernado tras {time_since_last_use:.1f}s de inactividad")
+                return True
+                
+            elif pool_type == "process_pool" and hasattr(self, "process_pool"):
+                # Guardar el número de workers antes de hibernar
+                workers = self.process_pool._max_workers
+                self.process_pool.shutdown(wait=False)
+                self.process_pool = None
+                pool_info["workers"] = workers
+                pool_info["status"] = "hibernated"
+                pool_info["hibernated_at"] = current_time
+                self.logger.info(f"Pool de procesos hibernado tras {time_since_last_use:.1f}s de inactividad")
+                return True
+                
         except Exception as e:
-            self.logger.warning(f"Error al calcular optimal_chunksize: {e}")
-        
-        # Valores por defecto si no hay configuración o hay error
-        if task_type == "embeddings":
-            return 16  # Batch size mayor para embeddings (proceso costoso)
-        elif task_type == "io_operations":
-            return 8   # Para operaciones I/O (que pueden tener latencia)
-        else:
-            # Para tareas CPU-bound regulares
-            # Si conocemos la longitud, calcular dinámicamente
-            if iterable_length is not None:
-                worker_count = self.cpu_workers if self.cpu_workers > 0 else (os.cpu_count() or 4)
-                return max(1, min(iterable_length // (worker_count * 2), 8))
-            return 4   # Valor por defecto 
+            self.logger.error(f"Error al hibernar pool {pool_type}: {e}")
+            
+        return False
 
-    def map_tasks(self, func: Callable[..., Any], iterables: Iterable[Any], 
-                 timeout: Optional[float] = None, 
-                 chunksize: Optional[int] = None,
-                 task_type: str = "default",
-                 prefer_process: Optional[bool] = None) -> Optional[Iterator]:
+    def restore_pool_from_hibernation(self, pool_type: str) -> bool:
         """
-        Aplica una función a cada ítem de un iterable de forma concurrente, 
-        seleccionando automáticamente entre thread y process pools según la tarea.
-        
-        Esta función centralizada elige inteligentemente el executor más adecuado
-        basándose en el tipo de tarea, características del sistema, y configuración,
-        maximizando así el uso de recursos disponibles.
+        Restaura un pool previamente hibernado a su estado activo.
         
         Args:
-            func (Callable[..., Any]): La función a aplicar.
-            iterables (Iterable[Any]): Un iterable cuyos ítems se pasarán a `func`.
-            timeout (Optional[float]): Tiempo máximo de espera para cada tarea. Defaults to None.
-            chunksize (Optional[int]): Tamaño de los lotes de tareas. Si es None, se calcula automáticamente.
-            task_type (str): Tipo de tarea ("default", "io_operations", "embeddings").
-            prefer_process (Optional[bool]): Preferencia explícita por process pool (True) o thread pool (False).
-                                           Si es None, se decide automáticamente.
-                                           
+            pool_type (str): "thread_pool" o "process_pool"
+            
         Returns:
-            Optional[Iterator]: Un iterador que produce los resultados en el orden de los ítems
-                              del iterable, o None si ningún executor está disponible.
+            bool: True si el pool fue restaurado, False en caso contrario
         """
-        # Verificar si process pool está deshabilitado globalmente
-        disable_process_pool = getattr(self.resource_manager, 'disable_process_pool', False)
+        if pool_type not in self.pools_status:
+            return False
+            
+        pool_info = self.pools_status[pool_type]
         
-        # Determinar el tipo de executor a usar
-        use_process_pool = False
-        if not disable_process_pool:
-            if prefer_process is not None:
-                # Usar preferencia explícita si se proporciona
-                use_process_pool = prefer_process
-            else:
-                # Decisión automática basada en tipo de tarea
-                if task_type in ["io_operations", "network"]:
-                    # Tareas I/O-bound se benefician más de ThreadPool
-                    use_process_pool = False
-                elif task_type in ["cpu_intensive", "embeddings"]:
-                    # Tareas CPU-intensive se benefician más de ProcessPool
-                    use_process_pool = True
-                else:
-                    # Para tareas por defecto, usar ProcessPool si hay muchos items
-                    try:
-                        # Intentar determinar longitud del iterable sin consumirlo
-                        iterable_length = len(iterables)
-                        # Usar ProcessPool para lotes grandes de trabajo
-                        use_process_pool = iterable_length > 10
-                    except (TypeError, AttributeError):
-                        # Si no podemos determinar la longitud, default a ThreadPool
-                        use_process_pool = False
+        # Solo restaurar si está hibernado
+        if pool_info["status"] != "hibernated":
+            return False
+            
+        try:
+            if pool_type == "thread_pool":
+                # Restaurar con el mismo número de workers de antes
+                workers = pool_info["workers"] if pool_info["workers"] > 0 else self.io_workers
+                self.thread_pool = ThreadPoolExecutor(max_workers=workers)
+                pool_info["status"] = "active"
+                pool_info["last_used"] = time.time()
+                pool_info["created_at"] = time.time()
+                self.logger.info(f"Pool de hilos restaurado de hibernación con {workers} workers")
+                return True
+                
+            elif pool_type == "process_pool" and not self.disable_process_pool:
+                # Restaurar con el mismo número de workers de antes
+                workers = pool_info["workers"] if pool_info["workers"] > 0 else self.cpu_workers
+                self.process_pool = ProcessPoolExecutor(max_workers=workers)
+                pool_info["status"] = "active"
+                pool_info["last_used"] = time.time()
+                pool_info["created_at"] = time.time()
+                self.logger.info(f"Pool de procesos restaurado de hibernación con {workers} workers")
+                return True
+                
+        except Exception as e:
+            self.logger.error(f"Error al restaurar pool {pool_type} de hibernación: {e}")
+            pool_info["status"] = "inactive"  # Marcar como inactivo en caso de error
+            
+        return False
+
+    def _calculate_optimal_workers(self, worker_type: str) -> int:
+        """
+        Calcula el número óptimo de workers según el tipo y las condiciones del sistema.
         
-        # Usar el pool seleccionado
-        if use_process_pool:
-            self.logger.debug(f"Usando ProcessPool para map_tasks ({task_type})")
-            return self.map_tasks_in_process_pool(func, iterables, timeout, chunksize, task_type)
+        Esta función considera:
+        - Configuración explícita desde ResourceManager
+        - Número de cores disponibles
+        - Uso actual de CPU y memoria
+        - Tipo de entorno (desarrollo, producción, etc.)
+        
+        Args:
+            worker_type (str): Tipo de workers a calcular ("cpu" o "io")
+            
+        Returns:
+            int: Número óptimo de workers
+        """
+        # Obtener la configuración desde ResourceManager
+        if worker_type == "cpu":
+            config_value = getattr(self.resource_manager, 'default_cpu_workers', "auto")
+        else:  # io
+            config_value = getattr(self.resource_manager, 'default_io_workers', "auto")
+            
+        # Si hay una configuración explícita que no sea "auto", usarla
+        if isinstance(config_value, int) and config_value > 0:
+            return config_value
+            
+        # Obtener número de cores disponibles
+        cpu_count = os.cpu_count() or 4  # Fallback a 4 si no se puede determinar
+        
+        # Obtener métricas actuales del sistema
+        cpu_percent = self.resource_manager.metrics.get("cpu_percent_system", 0)
+        memory_percent = self.resource_manager.metrics.get("system_memory_percent", 0)
+        
+        # Calcular factor de ajuste basado en uso de recursos
+        # A mayor uso, menor cantidad de workers para no sobrecargar
+        resource_factor = 1.0
+        if cpu_percent > 80:
+            resource_factor *= 0.7  # Reducir 30% si CPU está muy cargada
+        elif cpu_percent > 60:
+            resource_factor *= 0.85  # Reducir 15% si CPU está moderadamente cargada
+            
+        if memory_percent > 85:
+            resource_factor *= 0.7  # Reducir 30% si memoria está muy cargada
+        elif memory_percent > 70:
+            resource_factor *= 0.85  # Reducir 15% si memoria está moderadamente cargada
+            
+        # Ajustar según tipo de entorno
+        environment_type = getattr(self.resource_manager, 'environment_type', "development")
+        
+        # Entornos de desarrollo suelen tener más recursos disponibles para el proceso
+        if "development" in environment_type:
+            env_factor = 1.0
+        # Entornos de producción suelen ser más conservadores
+        elif "production" in environment_type or "server" in environment_type:
+            env_factor = 0.9
+        # Entornos cloud suelen tener recursos compartidos
+        elif any(env in environment_type for env in ["cloud", "aws", "gcp", "azure"]):
+            env_factor = 0.8
+        # Contenedores suelen tener recursos muy limitados
+        elif any(env in environment_type for env in ["container", "kubernetes"]):
+            env_factor = 0.7
         else:
-            self.logger.debug(f"Usando ThreadPool para map_tasks ({task_type})")
-            return self.map_tasks_in_thread_pool(func, iterables, timeout, chunksize, task_type) 
+            env_factor = 0.9  # Valor por defecto
+            
+        # Calcular el número base de workers según el tipo
+        if worker_type == "cpu":
+            # Para CPU-bound, usar número de cores físicos
+            # Intentar obtener cores físicos, fallback a lógicos
+            physical_cores = psutil.cpu_count(logical=False) or cpu_count
+            base_workers = max(1, int(physical_cores * resource_factor * env_factor))
+            
+            # Asegurar al menos 1 worker y no más que cores lógicos
+            return max(1, min(base_workers, cpu_count))
+        else:  # io
+            # Para IO-bound, se pueden usar más workers ya que están bloqueados
+            # Típicamente 2x o más que el número de cores
+            io_multiplier = 2.0  # Multiplicador para IO vs CPU
+            base_workers = max(2, int(cpu_count * io_multiplier * resource_factor * env_factor))
+            
+            # Asegurar al menos 2 workers para IO y no más que 4x cores
+            return max(2, min(base_workers, cpu_count * 4))
+
+    # ... resto del código ...

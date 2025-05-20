@@ -163,7 +163,8 @@ class EmbeddingManager:
     
     def batch_encode(self, texts: List[str]) -> List[List[float]]:
         """
-        Genera embeddings para múltiples textos en batch.
+        Genera embeddings para múltiples textos procesando uno por uno.
+        Esta implementación evita el procesamiento por lotes real para prevenir problemas de memoria.
         
         Args:
             texts: Lista de textos a codificar
@@ -171,14 +172,37 @@ class EmbeddingManager:
         Returns:
             Lista de embeddings (cada uno como lista de floats)
         """
-        # Determinar batch_size de configuración
-        batch_size = self.model_config.get("batch_size", 32)
+        # Procesar uno por uno en vez de por lotes para evitar problemas de memoria
+        embeddings = []
+        for text in texts:
+            # Usar encode con un solo texto
+            embedding = self.model.encode(text)
+            
+            # Convertir a lista si es un array numpy
+            if isinstance(embedding, np.ndarray):
+                embedding = embedding.tolist()
+            
+            embeddings.append(embedding)
+            
+        return embeddings
+
+    def get_batch_embeddings(self, headers: List[Optional[str]], texts: List[str]) -> List[List[float]]:
+        """
+        Genera embeddings para múltiples pares de encabezado-texto.
+        Esta implementación evita el procesamiento por lotes real y usa get_document_embedding
+        uno por uno para evitar problemas de memoria.
         
-        # Generar embeddings en batch
-        embeddings = self.model.encode(texts, batch_size=batch_size)
-        
-        # Convertir a lista si es un array numpy
-        if isinstance(embeddings, np.ndarray):
-            return embeddings.tolist()
-        
+        Args:
+            headers: Lista de encabezados (puede contener None o strings vacíos)
+            texts: Lista de textos principales
+            
+        Returns:
+            Lista de embeddings (cada uno como lista de floats)
+        """
+        # Procesamos uno por uno para evitar problemas de memoria
+        embeddings = []
+        for header, text in zip(headers, texts):
+            embedding = self.get_document_embedding(header, text)
+            embeddings.append(embedding)
+                
         return embeddings
