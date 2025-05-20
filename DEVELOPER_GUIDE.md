@@ -1,139 +1,333 @@
-# Guía del Desarrollador: Sistema de Gestión de Recursos Centralizado
+# Guía del Desarrollador: Sistema RAG Modular
 
-Esta guía describe cómo interactuar con el sistema de gestión de recursos (`ResourceManager`, `MemoryManager`, `ConcurrencyManager`) y cómo desarrollar nuevos módulos que se integren correctamente con él.
+## Introducción
 
-## 1. Uso del `ResourceManager`
+Esta guía proporciona información detallada para desarrolladores que deseen extender, modificar o contribuir al Sistema RAG Modular. Se explican los patrones de diseño utilizados, la estructura del código, las interfaces principales y cómo implementar nuevas funcionalidades.
 
-El `ResourceManager` es el punto central para interactuar con el sistema de gestión de recursos. Es un Singleton, por lo que siempre obtendrás la misma instancia.
+## Patrones de Diseño Utilizados
 
-### 1.1 Obtener la Instancia
+El sistema utiliza varios patrones de diseño para proporcionar flexibilidad y extensibilidad:
+
+- **Clases Abstractas**: Definen interfaces comunes para componentes sustituibles.
+- **Factories**: Crean instancias concretas basadas en la configuración.
+- **Singleton**: Utilizado para gestores centrales como `Config`, `SessionManager` y `ResourceManager`.
+- **Strategy**: Los diferentes chunkers, modelos de embeddings, etc. son estrategias intercambiables.
+- **Dependency Injection**: La configuración y las dependencias se inyectan en los componentes.
+
+## Estructura del Proyecto
+
+La estructura modular está organizada en directorios específicos:
+
+```
+project/
+├── run.py              # Punto de entrada con modos de ingestión y consulta.
+├── main.py             # Orquesta la lógica principal de ejecución.
+├── config.py           # Configuración central, carga del config.yaml.
+├── config.yaml         # Archivo de configuración.
+├── chatbot_server.py   # Servidor web para la API REST.
+├── pyproject.toml      # Definición de dependencias del proyecto.
+├── run_tests.py        # Orquestador de pruebas unitarias.
+└── modulos/
+    ├── databases/      # Gestión de bases de datos vectoriales
+    ├── chunks/         # Estrategias de chunking
+    ├── embeddings/     # Gestión y generación de embeddings
+    ├── clientes/       # Clientes para proveedores de IA
+    ├── resource_management/ # Gestión centralizada de recursos
+    ├── session_manager/ # Gestión de sesiones
+    ├── rag/            # Sistema RAG y API
+    ├── view_chunks/    # Visualización de chunks
+    └── utils/          # Utilidades comunes
+```
+
+## Interfaces y Clases Principales
+
+### Clases Abstractas
+
+Las principales clases abstractas que definen las interfaces del sistema:
+
+- `ChunkAbstract`: Define la interfaz para estrategias de chunking.
+- `VectorialDatabase`: Define operaciones para bases de datos vectoriales.
+- `IAClient`: Define métodos para interactuar con modelos de lenguaje.
+- `EmbeddingManager`: Gestiona la generación de vectores de embedding.
+
+### Factories
+
+Factories principales para instanciar componentes:
+
+- `ChunkerFactory`: Crea instancias de chunkers según configuración.
+- `DatabaseFactory`: Crea instancias de bases de datos vectoriales.
+- `ClientFactory`: Crea instancias de clientes de IA.
+- `EmbeddingFactory`: Gestiona y crea instancias de gestores de embeddings.
+
+### Gestores Principales
+
+Componentes principales que orquestan operaciones:
+
+- `Config`: Singleton para gestionar configuración centralizada.
+- `SessionManager`: Gestión de sesiones de usuario y persistencia.
+- `ResourceManager`: Gestión centralizada de recursos del sistema.
+- `RagApp`: Clase principal para operaciones RAG.
+
+## Sistema de Gestión de Recursos Centralizado
+
+El sistema de gestión de recursos (`modulos/resource_management/`) proporciona una infraestructura centralizada para optimizar y controlar el uso de recursos del sistema. Está compuesto por tres componentes principales que trabajan juntos:
+
+### ResourceManager
+
+Actúa como el punto central de coordinación y monitoreo:
+
+```python
+# Obtener la instancia del ResourceManager (singleton)
+from modulos.resource_management.resource_manager import ResourceManager
+resource_manager = ResourceManager()
+
+# Verificar el estado actual de los recursos
+metrics = resource_manager.metrics
+print(f"Memoria usada: {metrics['system_memory_percent']}%")
+
+# Solicitar limpieza de recursos cuando sea necesario
+resource_manager.request_cleanup(aggressive=False, reason="manual_request")
+```
+
+### MemoryManager
+
+Gestiona la optimización de memoria y proporciona métodos útiles:
+
+```python
+# El MemoryManager se obtiene a través del ResourceManager
+memory_manager = resource_manager.memory_manager
+
+# Verificar uso de memoria
+memory_status = memory_manager.check_memory_usage()
+print(f"Memoria disponible: {memory_status['available_mb']} MB")
+
+# Optimizar tamaño de lote dinámicamente
+base_batch_size = 50
+optimized_batch_size = memory_manager.optimize_batch_size(
+    base_batch_size=base_batch_size,
+    min_batch_size=10,
+    max_batch_size=200
+)
+```
+
+### ConcurrencyManager
+
+Gestiona la ejecución paralela de tareas con pools optimizados:
+
+```python
+# El ConcurrencyManager se obtiene a través del ResourceManager
+concurrency_manager = resource_manager.concurrency_manager
+
+# Ejecutar tarea en pool de hilos (para operaciones I/O bound)
+def io_task(file_path):
+    # leer archivo, acceder a API, etc.
+    return result
+
+results = concurrency_manager.map_tasks(
+    io_task, 
+    file_paths_list,
+    task_type="io"  # Especificar el tipo de tarea ayuda a optimizar
+)
+
+# O con procesos para tareas CPU-intensivas
+def cpu_task(data):
+    # procesamiento intensivo...
+    return processed_data
+
+results = concurrency_manager.map_tasks(
+    cpu_task,
+    data_chunks,
+    task_type="cpu",
+    prefer_process=True  # Forzar uso de ProcessPool
+)
+```
+
+### Integración con Componentes Existentes
+
+Los componentes existentes del sistema RAG están integrados con el sistema de gestión de recursos:
+
+1. **SessionManager**: Se comunica con ResourceManager para limpiar sesiones cuando los recursos están bajo presión.
+2. **EmbeddingFactory**: Registra modelos activos y responde a solicitudes de liberación del MemoryManager.
+3. **main.py**: Utiliza optimize_batch_size para ajustar dinámicamente el procesamiento de chunks durante la ingesta.
+4. **chatbot_server.py**: Proporciona endpoints para supervisar y gestionar recursos.
+
+### Configuración del Sistema de Recursos
+
+El comportamiento del sistema de gestión de recursos se configura en la sección `resource_management` de `config.yaml`:
+
+```yaml
+resource_management:
+  # Nivel de verbosidad en los logs (minimal, normal, detailed)
+  log_verbosity: "normal"
+  
+  # Configuración de monitoreo
+  monitoring:
+    interval_sec: 120  # Intervalo de monitoreo en segundos
+    aggressive_threshold_mem_pct: 85  # Umbral para limpieza agresiva
+    warning_threshold_mem_pct: 75  # Umbral para advertencias
+```
+
+### Mejores Prácticas para Desarrolladores
+
+Al extender el sistema, considera estas prácticas para una gestión óptima de recursos:
+
+1. **Accede a ResourceManager como Singleton**: Siempre obtén la instancia existente.
+2. **Evita Gestión Manual de Recursos**: Para GC, liberación de modelos o gestión de pools, usa los métodos del ResourceManager.
+3. **Registra Uso de Recursos**: Si tu componente consume recursos significativos, considera registrarlo con ResourceManager.
+4. **Optimiza Tamaños de Lote**: Usa MemoryManager.optimize_batch_size() para procesos intensivos.
+5. **Utiliza ConcurrencyManager**: Para tareas paralelas, utiliza map_tasks o run_in_executor en lugar de crear threads/procesos directamente.
+
+## Implementación de Nuevos Componentes
+
+### Crear un Nuevo Método de Chunking
+
+1. Crea una nueva clase que herede de `ChunkAbstract`:
+
+```python
+from modulos.chunks.ChunkAbstract import ChunkAbstract
+from typing import List, Dict, Optional
+
+class MyCustomChunker(ChunkAbstract):
+    def __init__(self, config_dict=None):
+        super().__init__(config_dict)
+        # Inicializar parámetros específicos
+        
+    def process(self, text: str, **kwargs) -> List[Dict]:
+        """
+        Implementar la lógica de chunking personalizada
+        """
+        chunks = []
+        # Tu lógica de chunking aquí
+        return chunks
+```
+
+2. Registra tu chunker en `ChunkerFactory.py`:
+
+```python
+def get_chunker(name=None):
+    if name == "my_custom":
+        from modulos.chunks.implementaciones.my_custom_chunker import MyCustomChunker
+        return MyCustomChunker(config.get_chunker_method_config("my_custom"))
+    # ... resto del código existente ...
+```
+
+3. Añade configuración en `config.yaml`:
+
+```yaml
+chunks:
+  my_custom:
+    param1: value1
+    param2: value2
+```
+
+### Crear un Nuevo Cliente de IA
+
+1. Crea una nueva clase que implemente la interfaz `IAClient`:
+
+```python
+from modulos.clientes.IAClient import IAClient
+from typing import List, Dict, Optional
+
+class MyCustomAIClient(IAClient):
+    def __init__(self, config=None):
+        super().__init__(config)
+        # Inicializar cliente específico
+        
+    def generate_response(self, prompt: str, context: List[Dict], streaming=False) -> str:
+        """
+        Implementar generación de respuesta
+        """
+        # Tu lógica específica
+        return response
+```
+
+2. Registra tu cliente en `ClientFactory.py`.
+3. Añade configuración en `config.yaml`.
+
+## Convenciones de Código
+
+Para mantener un código consistente y de alta calidad:
+
+- **Tipado**: Usar anotaciones de tipo en todos los métodos públicos.
+- **Docstrings**: Documentar todas las clases y métodos siguiendo formato [Google style](https://google.github.io/styleguide/pyguide.html).
+- **Manejo de Errores**: Utilizar excepciones específicas con mensajes descriptivos.
+- **Logging**: Usar el sistema de logging en lugar de print().
+- **Tests**: Escribir pruebas unitarias para nuevas funcionalidades.
+
+## Pruebas
+
+El proyecto utiliza un sistema de pruebas unificado:
+
+- Pruebas unitarias organizadas en `test/` por componente.
+- Ejecución con `python test/run_tests.py`.
+- Resultados guardados en `test/results/`.
+
+Para crear nuevas pruebas:
+
+1. Añade un archivo de prueba en el directorio correspondiente.
+2. Registra la prueba en `run_tests.py`.
+
+## Integración con ResourceManager
+
+Si estás creando un nuevo componente que necesita integrarse con el sistema de gestión de recursos:
+
+1. Obtén la instancia del ResourceManager:
 
 ```python
 from modulos.resource_management.resource_manager import ResourceManager
 
-# Obtener la instancia única
-resource_manager = ResourceManager() 
+class MyComponent:
+    def __init__(self):
+        self.resource_manager = ResourceManager()
+        
+    def process_large_data(self, data):
+        # Verificar estado de recursos antes de operación intensiva
+        metrics = self.resource_manager.metrics
+        
+        if metrics["system_memory_percent"] > 90:
+            # Implementar estrategia de degradación elegante
+            return self._process_with_reduced_batch(data)
+            
+        # Uso del ConcurrencyManager para procesamiento paralelo
+        return self.resource_manager.concurrency_manager.map_tasks(
+            self._process_chunk, 
+            self._split_data(data),
+            task_type="cpu"
+        )
 ```
-Asegúrate de que `ResourceManager` ya haya sido inicializado en algún punto de la aplicación (normalmente al inicio, p.ej., en `main.py` o `run.py`) para que la configuración y los sub-gestores estén listos.
 
-### 1.2 Acceder a Métricas Actuales
-
-El `ResourceManager` mantiene un diccionario actualizado con métricas del sistema, del proceso y de componentes específicos del RAG.
+2. Registra limpiadores de recursos si es necesario:
 
 ```python
-# Acceder al diccionario completo de métricas
-current_metrics = resource_manager.metrics
-
-# Ejemplos de acceso a métricas específicas:
-memory_usage_percent = current_metrics.get("system_memory_percent", 0.0)
-active_sessions = current_metrics.get("active_sessions_rag", 0)
-last_update_timestamp = current_metrics.get("last_metrics_update_ts", 0.0)
-
-print(f"Uso de memoria actual: {memory_usage_percent}%")
+def cleanup_resources(self, aggressive=False):
+    """Método que puede ser llamado por ResourceManager para liberar recursos."""
+    # Liberar caché, cerrar conexiones, etc.
+    pass
+    
+# Registrar el limpiador con ResourceManager
+resource_manager.register_cleanup_handler(self.cleanup_resources)
 ```
-Las métricas se actualizan periódicamente si el hilo de monitoreo está habilitado (`monitoring_enabled: true` en `config.yaml`), o puedes forzar una actualización (aunque no es lo común) llamando a `resource_manager.update_metrics()`.
 
-### 1.3 Solicitar Limpieza Manual
-
-Aunque la limpieza automática basada en umbrales es la norma, puedes solicitar una limpieza manual si es necesario (p.ej., después de una operación muy intensiva).
+3. Notifica sobre cambios significativos en el uso de recursos:
 
 ```python
-# Solicitar limpieza normal
-resource_manager.request_cleanup(aggressive=False, reason="manual_request_after_large_op")
-
-# Solicitar limpieza agresiva (usar con precaución)
-resource_manager.request_cleanup(aggressive=True, reason="critical_manual_request") 
-```
-Esto activará las rutinas de limpieza en `MemoryManager` y notificará a `SessionManager`.
-
-### 1.4 Usar `ConcurrencyManager` para Tareas
-
-Para ejecutar tareas de forma concurrente, obtén el `ConcurrencyManager` a través del `ResourceManager` y solicita el ejecutor adecuado (`ThreadPoolExecutor` para I/O, `ProcessPoolExecutor` para CPU).
-
-**Ejemplo: Ejecutar una tarea I/O bound (e.g., llamada API):**
-```python
-def my_io_task(arg1, arg2):
-    # ... lógica I/O ...
-    return result
-
-if resource_manager.concurrency_manager:
-    future = resource_manager.concurrency_manager.run_in_thread_pool(my_io_task, "valor1", arg2="valor2")
-    if future:
-        try:
-            result = future.result(timeout=60) # Esperar resultado con timeout
-            print(f"Resultado tarea I/O: {result}")
-        except Exception as e:
-            print(f"Error en tarea I/O: {e}")
-else:
-    print("ConcurrencyManager no disponible.")
+def allocate_large_resource(self):
+    # Notificar sobre cambio significativo en uso de recursos
+    self.resource_manager.notify_significant_allocation("large_model_loaded", size_mb=1500)
 ```
 
-**Ejemplo: Mapear una tarea CPU bound sobre un iterable:**
-```python
-def my_cpu_task(item):
-    # ... lógica CPU intensiva ...
-    return processed_item
+## Contribuciones
 
-items_to_process = [1, 2, 3, 4, 5]
+Para contribuir:
 
-if resource_manager.concurrency_manager:
-    results_iterator = resource_manager.concurrency_manager.map_tasks_in_process_pool(my_cpu_task, items_to_process)
-    if results_iterator:
-        processed_results = list(results_iterator) # Recoger resultados
-        print(f"Resultados procesados: {processed_results}")
-else:
-    print("ConcurrencyManager no disponible.")
-```
-**Importante:** Para `ProcessPoolExecutor`, asegúrate de que la función y sus argumentos sean "picklables".
+1. Crea un fork del repositorio.
+2. Crea una rama para tu funcionalidad.
+3. Implementa tus cambios siguiendo las convenciones.
+4. Asegúrate de que las pruebas pasen.
+5. Envía un pull request con una descripción clara.
 
-### 1.5 Consultar `MemoryManager` (Ej: Optimizar Batch Size)
+## Solución de Problemas
 
-Puedes acceder a funcionalidades del `MemoryManager` a través de la instancia en `ResourceManager`.
-
-```python
-base_batch = 64
-if resource_manager.memory_manager:
-    optimized_batch = resource_manager.memory_manager.optimize_batch_size(
-        base_batch_size=base_batch, 
-        min_batch_size=16 
-    )
-    print(f"Tamaño de lote optimizado: {optimized_batch}")
-else:
-    optimized_batch = base_batch
-    print("MemoryManager no disponible, usando tamaño de lote base.")
-```
-
-## 2. Integración de Nuevos Módulos
-
-Si desarrollas un nuevo módulo que maneja recursos significativos (memoria, conexiones, etc.), considera lo siguiente para integrarlo con el `ResourceManager`:
-
--   **Informar Estado:** Si tu módulo mantiene un estado relevante para las métricas globales (e.g., número de conexiones activas, tamaño de caché interna), modifica `ResourceManager.update_metrics()` para que llame a un método de tu módulo y recolecte esa información, añadiéndola al diccionario `resource_manager.metrics`.
--   **Participar en Limpieza Coordinada:** Si tu módulo necesita liberar recursos durante una limpieza (normal o agresiva), modifica `ResourceManager.request_cleanup()` para que, además de llamar a `MemoryManager` y `SessionManager`, llame a un método `cleanup(aggressive=...)` en tu módulo.
--   **Utilizar Concurrencia Centralizada:** En lugar de crear tus propios hilos o procesos, utiliza los pools gestionados por `ConcurrencyManager` (accedido vía `ResourceManager`) para beneficiarte de la gestión adaptativa de workers.
--   **Configuración Centralizada:** Si tu módulo necesita parámetros relacionados con la gestión de recursos (e.g., tamaño máximo de caché), considera añadirlos a la sección `resource_management` en `config.yaml` y léelos a través de la instancia `Config` en `ResourceManager` o directamente.
-
-## 3. Configuración y Ajuste
-
-La configuración del sistema de gestión de recursos se encuentra en la sección `resource_management` del archivo `config.yaml`.
-
-```yaml
-resource_management:
-  monitoring_interval: 30         # Intervalo (s) para comprobar recursos. Más bajo = más reactivo, más overhead.
-  aggressive_threshold_memory: 85 # % memoria sistema para limpieza agresiva.
-  warning_threshold_memory: 75  # % memoria sistema para limpieza normal/advertencia.
-  warning_threshold_cpu: 80     # % CPU sistema para advertencia (actualmente solo log).
-  monitoring_enabled: true      # Habilita/deshabilita el monitoreo automático.
-  
-  concurrency:
-    default_cpu_workers: "auto"   # Workers para CPU bound: "auto" (cores), o número fijo.
-    default_io_workers: "auto"    # Workers para I/O bound: "auto" (heurística), o número fijo.
-    max_total_workers: null     # Límite global opcional para workers (null = sin límite).
-```
-
-**Consejos de Ajuste:**
-
--   **`monitoring_interval`:** Valores más bajos (e.g., 15-30s) aumentan la reactividad pero también el overhead. Valores más altos (e.g., 60-120s) reducen el overhead pero reaccionan más lento a picos.
--   **Umbrales de Memoria:** Ajusta `warning_threshold_memory` y `aggressive_threshold_memory` según la estabilidad observada bajo carga. Si ocurren OOMs, baja los umbrales. Si la limpieza es demasiado frecuente y elimina cachés útiles, súbelos con precaución.
--   **`concurrency`:** "auto" suele ser un buen punto de partida. Si observas subutilización o sobrecarga en tareas específicas, puedes probar con valores fijos para `default_cpu_workers` o `default_io_workers`. `max_total_workers` es útil en entornos con recursos muy limitados.
-
-Consulta los informes generados en `performance_test/results/` (si ejecutaste las pruebas de carga y benchmarks) para obtener datos que ayuden a guiar estos ajustes. 
+- **Errores de Memoria**: Verifica la sección `resource_management` en config.yaml, puede necesitar ajustes.
+- **Problemas de Concurrencia**: Revisa si estás creando pools/threads manualmente en lugar de usar ConcurrencyManager.
+- **Liberación de Recursos**: Si encuentras fugas de memoria, verifica que tu componente se integre correctamente con ResourceManager. 
