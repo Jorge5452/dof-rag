@@ -7,39 +7,39 @@ from datetime import datetime
 from config import config
 from modulos.embeddings.embeddings_factory import EmbeddingFactory
 
-# Configurar logging
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class ChunkAbstract(ABC):
     """
-    Clase abstracta para la creación de chunks a partir de texto.
+    Abstract class for creating chunks from text.
     
-    Principios:
-      - El chunking se realiza sobre el contenido ya proporcionado, eliminando la responsabilidad
-        de leer archivos.
-      - Se extraen de forma inteligente los encabezados con expresiones regulares respetando la jerarquía,
-        lo que permite asignar un contexto completo a cada chunk.
-      - Cada chunk contendrá:
-            • text: El contenido del chunk.
-            • header: El encabezado asociado (o jerarquía de encabezados) obtenido mediante la extracción.
-            • page: Un valor numérico o etiquetado que indique la "página" del chunk, obtenido de forma inteligente.
-      - Todas las configuraciones (tamaños, solapamientos, extracción de headers, etc.) se pasan mediante un diccionario
-        cargado en la inicialización (idealmente desde config.py).
+    Principles:
+      - Chunking is performed on the content already provided, removing the responsibility
+        of reading files.
+      - Headers are intelligently extracted using regular expressions respecting the hierarchy,
+        which allows assigning a complete context to each chunk.
+      - Each chunk will contain:
+            • text: The content of the chunk.
+            • header: The associated header (or hierarchy of headers) obtained through extraction.
+            • page: A numerical or labeled value indicating the chunk's "page", intelligently obtained.
+      - All configurations (sizes, overlaps, header extraction, etc.) are passed through a dictionary
+        loaded during initialization (ideally from config.py).
     """
 
     def __init__(self, embedding_model=None) -> None:
         """
-        Constructor que inicializa el chunker con un modelo de embeddings y la configuración.
+        Constructor that initializes the chunker with an embedding model and configuration.
         
-        Parámetros:
-            embedding_model: Modelo de embeddings inicializado. Si es None, se asigna posteriormente.
+        Args:
+            embedding_model: Initialized embedding model. If None, it's assigned later.
         """
         self.chunks_config = config.get_chunks_config()
         self.method = self.chunks_config.get("method", "context")
         self.model = embedding_model
         
-        # Configuración para el formato de los encabezados
+        # Configuration for header format
         self.header_format = self.chunks_config.get("header_format", "standard")
         
     def set_embedding_model(self, model):
@@ -230,11 +230,11 @@ class ChunkAbstract(ABC):
             raw_chunks = self.chunk(content, headers, **kwargs)
             
             # 3. Devolver los chunks generados
-            logger.info(f"Generados {len(raw_chunks)} chunks")
+            logger.info(f"Generated {len(raw_chunks)} chunks")
             return raw_chunks
             
         except Exception as e:
-            logger.error(f"Error en el procesamiento del contenido: {e}")
+            logger.error(f"Error in content processing: {e}")
             raise
 
     def find_header_for_position(self, position: int, headers: List[Dict[str, Any]]) -> str:
@@ -294,20 +294,20 @@ class ChunkAbstract(ABC):
             raw_chunks = self.chunk(content, headers, **kwargs)
             
             # 3. Devolver los chunks generados uno por uno
-            logger.info("Iniciando generación streaming de chunks")
+            logger.info("Starting streaming chunk generation")
             total_chunks = len(raw_chunks)
             
             for i, chunk in enumerate(raw_chunks):
                 if i % 10 == 0:  # Log cada 10 chunks para no saturar logs
-                    logger.debug(f"Procesando chunk {i+1}/{total_chunks}")
+                    logger.debug(f"Processing chunk {i+1}/{total_chunks}")
                 
                 yield chunk
                 
                 # Liberar la referencia para ayudar al recolector de basura
                 raw_chunks[i] = None
                 
-            logger.info(f"Completada generación streaming de {total_chunks} chunks")
+            logger.info(f"Completed streaming generation of {total_chunks} chunks")
             
         except Exception as e:
-            logger.error(f"Error en el procesamiento streaming del contenido: {e}")
+            logger.error(f"Error in streaming content processing: {e}")
             raise

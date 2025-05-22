@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """
-Script para ejecutar el servidor de chatbot RAG.
+Script to run the RAG chatbot server.
 
-Este script inicia un servidor web que proporciona una API REST para interactuar
-con el sistema RAG a través de un chatbot con soporte para respuestas en streaming.
+This script starts a web server that provides a REST API to interact
+with the RAG system through a chatbot with support for streaming responses.
 
-Uso:
-    python chatbot_server.py [--port PUERTO] [--host HOST] [--debug]
+Usage:
+    python chatbot_server.py [--port PORT] [--host HOST] [--debug]
 """
 
 import argparse
@@ -20,92 +20,92 @@ from config import Config
 config = Config()
 
 def main():
-    """Función principal que procesa los argumentos e inicia el servidor."""
-    # Configurar el parser de argumentos
+    """Main function that processes arguments and starts the server."""
+    # Configure argument parser
     parser = argparse.ArgumentParser(
-        description="Servidor de chatbot RAG con respuestas en tiempo real",
+        description="RAG chatbot server with real-time responses",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
-    # Argumentos para la configuración del servidor
+    # Arguments for server configuration
     parser.add_argument("--port", type=int, default=5000, 
-                        help="Puerto en el que escuchará el servidor")
+                        help="Port on which the server will listen")
     parser.add_argument("--host", type=str, default="0.0.0.0", 
-                        help="Host en el que escuchará el servidor")
+                        help="Host on which the server will listen")
     parser.add_argument("--debug", action="store_true", 
-                        help="Activar modo de depuración")
+                        help="Enable debug mode")
     parser.add_argument("--no-streaming", action="store_true",
-                        help="Desactivar streaming (respuestas en tiempo real)")
+                        help="Disable streaming (real-time responses)")
     
-    # Procesar argumentos
+    # Process arguments
     args = parser.parse_args()
     
-    # Configurar logging
+    # Configure logging
     log_level = logging.DEBUG if args.debug else logging.INFO
     setup_logging(level=log_level)
     
-    # Silenciar loggers ruidosos si no estamos en modo debug
+    # Silence verbose loggers if not in debug mode
     if not args.debug:
         silence_verbose_loggers()
     
-    # Forzar modo streaming en la configuración
+    # Force streaming mode in configuration
     ai_config = config.get_ai_client_config()
     
-    # Sobrescribir la configuración para siempre usar streaming a menos que se especifique --no-streaming
+    # Override configuration to always use streaming unless --no-streaming is specified
     if not args.no_streaming:
-        # Activar streaming si no se especifica lo contrario
+        # Enable streaming if not specified otherwise
         if isinstance(ai_config, dict) and "parameters" in ai_config:
             ai_config["parameters"]["stream"] = True
             config.update_config(["ai_client", "parameters", "stream"], True)
-            logging.info("Modo streaming activado para el chatbot")
+            logging.info("Streaming mode enabled for chatbot")
     
-    # Obtener la ruta del directorio base del proyecto
+    # Get project base directory path
     project_dir = os.path.dirname(os.path.abspath(__file__))
     static_dir = os.path.join(project_dir, "modulos", "rag", "static")
     
-    # Verificar que existen los archivos necesarios
+    # Verify necessary files exist
     if os.path.exists(static_dir):
         required_files = ["index.html", "app.js", "style.css"]
         missing_files = [f for f in required_files if not os.path.exists(os.path.join(static_dir, f))]
         
         if missing_files:
-            print(f"ADVERTENCIA: Faltan archivos en el directorio estático: {', '.join(missing_files)}")
+            print(f"WARNING: Missing files in static directory: {', '.join(missing_files)}")
             for f in missing_files:
-                print(f"  - No se encuentra: {os.path.join(static_dir, f)}")
+                print(f"  - Not found: {os.path.join(static_dir, f)}")
     else:
-        print(f"ADVERTENCIA: No se encuentra el directorio estático en {static_dir}")
-        print("Esto puede causar problemas al servir la interfaz web.")
+        print(f"WARNING: Static directory not found at {static_dir}")
+        print("This may cause issues when serving the web interface.")
     
-    # Verificar disponibilidad de bases de datos
+    # Check database availability
     try:
         from modulos.rag.app import RagApp
         databases = RagApp.list_available_databases()
         if databases:
-            print(f"Bases de datos disponibles: {len(databases)}")
-            for i, db in enumerate(databases[:5]):  # Mostrar solo las primeras 5 para no saturar la consola
+            print(f"Available databases: {len(databases)}")
+            for i, db in enumerate(databases[:5]):  # Show only first 5 to avoid console clutter
                 print(f"  - {db['name']} ({db['type']}, {os.path.getsize(db['path']) / 1024 / 1024:.2f} MB)")
             if len(databases) > 5:
-                print(f"  ... y {len(databases) - 5} más")
+                print(f"  ... and {len(databases) - 5} more")
         else:
-            print("ADVERTENCIA: No se encontraron bases de datos disponibles.")
-            print("Primero debe ingestar documentos usando el comando de ingesta.")
+            print("WARNING: No available databases found.")
+            print("You must first ingest documents using the ingest command.")
     except Exception as e:
-        print(f"Error al verificar bases de datos: {e}")
+        print(f"Error checking databases: {e}")
     
-    # Imprimir información de arranque
-    print(f"Iniciando servidor de chatbot RAG en {args.host}:{args.port}")
-    print(f"Modo debug: {'activado' if args.debug else 'desactivado'}")
-    print(f"Modo streaming: {'desactivado' if args.no_streaming else 'activado'}")
-    print(f"Interfaz web disponible en: http://localhost:{args.port}/")
-    print("Presiona Ctrl+C para detener el servidor")
+    # Print startup information
+    print(f"Starting RAG chatbot server on {args.host}:{args.port}")
+    print(f"Debug mode: {'enabled' if args.debug else 'disabled'}")
+    print(f"Streaming mode: {'disabled' if args.no_streaming else 'enabled'}")
+    print(f"Web interface available at: http://localhost:{args.port}/")
+    print("Press Ctrl+C to stop the server")
     
-    # Iniciar el servidor
+    # Start the server
     try:
         run_api(host=args.host, port=args.port, debug=args.debug)
     except KeyboardInterrupt:
-        print("\nServidor detenido")
+        print("\nServer stopped")
     except Exception as e:
-        print(f"Error al iniciar el servidor: {e}")
+        print(f"Error starting server: {e}")
         return 1
     
     return 0

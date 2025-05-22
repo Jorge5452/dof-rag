@@ -1,18 +1,18 @@
 """
-Utilidades para formateo de salidas en consola.
+Console output formatting utilities.
 
-Este módulo contiene funciones para formatear y colorear las salidas
-del sistema RAG en la terminal.
+This module contains functions to format and colorize the
+RAG system outputs in the terminal.
 """
 
 import logging
 from typing import List, Dict, Any
 from colorama import init, Fore, Style, Back
 
-# Inicializar colorama para que funcione en todas las plataformas
+# Initialize colorama to work across all platforms
 init(autoreset=True)
 
-# Colores y estilos para mejorar la experiencia visual
+# Colors and styles to improve visual experience
 C_TITLE = Back.BLUE + Fore.WHITE + Style.BRIGHT
 C_SUBTITLE = Fore.BLUE + Style.BRIGHT
 C_SUCCESS = Fore.GREEN + Style.BRIGHT
@@ -27,7 +27,7 @@ C_PROMPT = Style.BRIGHT + Fore.GREEN
 C_RESET = Style.RESET_ALL
 C_SEPARATOR = Style.DIM + Fore.BLUE
 
-# Exportar las constantes para uso en otros módulos
+# Export constants for use in other modules
 __all__ = [
     'C_TITLE', 'C_SUBTITLE', 'C_SUCCESS', 'C_ERROR', 'C_WARNING',
     'C_HIGHLIGHT', 'C_COMMAND', 'C_PARAM', 'C_INFO', 'C_VALUE',
@@ -38,10 +38,10 @@ __all__ = [
 
 def print_header(title: str) -> None:
     """
-    Imprime un encabezado formateado.
+    Prints a formatted header.
     
     Args:
-        title: Título del encabezado
+        title: Header title
     """
     print("\n" + Style.BRIGHT + "="*80)
     print(C_TITLE + title)
@@ -49,21 +49,21 @@ def print_header(title: str) -> None:
 
 def print_separator(char="─", width=80):
     """
-    Imprime un separador visual en la consola
+    Prints a visual separator in the console
     
     Args:
-        char: Carácter a usar para el separador
-        width: Ancho del separador
+        char: Character to use for the separator
+        width: Width of the separator
     """
     print(C_SEPARATOR + char * width)
 
 def print_status(status: str, message: str):
     """
-    Imprime un mensaje de estado con formato adecuado
+    Prints a status message with appropriate formatting
     
     Args:
-        status: Tipo de estado ("success", "error", "warning", "info")
-        message: Mensaje a mostrar
+        status: Status type ("success", "error", "warning", "info")
+        message: Message to display
     """
     if status == "success":
         icon = f"{C_SUCCESS}✓{C_RESET}"
@@ -85,49 +85,49 @@ def print_status(status: str, message: str):
 
 def print_formatted_response(title: str, response: str) -> None:
     """
-    Imprime una respuesta formateada con un título.
+    Prints a formatted response with a title.
     
     Args:
-        title: Título de la respuesta
-        response: Texto de la respuesta
+        title: Response title
+        response: Response text
     """
-    # Formatear la respuesta para mostrar respuesta y contexto separados
+    # Format the response to display response and context separately
     if "=======================  RESPUESTA  =======================" in response:
         parts = response.split("=======================  RESPUESTA  =======================")
         if len(parts) > 1:
-            # Extraer la parte de respuesta (sin encabezado)
+            # Extract the response part (without header)
             response_text = parts[1].split("=======================  CONTEXTO  =======================")[0].strip()
             context_text = response.split("=======================  CONTEXTO  =======================")
             
-            # Imprimir solo la respuesta primero
-            print("\n" + C_TITLE + " RESPUESTA " + C_RESET)
+            # Print only the response first
+            print("\n" + C_TITLE + " RESPONSE " + C_RESET)
             print_separator()
             print(response_text)
             print_separator()
             
-            # Imprimir contexto si existe y no está vacío
+            # Print context if it exists and isn't empty
             if len(context_text) > 1 and context_text[1].strip():
-                print("\n" + C_TITLE + " CONTEXTO UTILIZADO " + C_RESET)
+                print("\n" + C_TITLE + " CONTEXT USED " + C_RESET)
                 print_separator()
                 context_content = context_text[1].strip()
                 
-                # Limitar la longitud del contexto si es muy largo
+                # Limit context length if very long
                 if len(context_content) > 1500:
                     context_lines = context_content.split('\n')
-                    # Mostrar solo las primeras líneas significativas
+                    # Show only the first significant lines
                     shortened = '\n'.join(context_lines[:20])
-                    print(f"{shortened}\n\n{C_VALUE}[...contexto adicional omitido...]{C_RESET}")
+                    print(f"{shortened}\n\n{C_VALUE}[...additional context omitted...]{C_RESET}")
                 else:
                     print(context_content)
                 print_separator()
         else:
-            # Fallback al formato original
+            # Fallback to original format
             print("\n" + C_TITLE + f" {title} " + C_RESET)
             print_separator()
             print(response)
             print_separator()
     else:
-        # Fallback al formato original
+        # Fallback to original format
         print("\n" + C_TITLE + f" {title} " + C_RESET)
         print_separator()
         print(response)
@@ -135,10 +135,10 @@ def print_formatted_response(title: str, response: str) -> None:
 
 def print_command_help(commands: List[str]) -> None:
     """
-    Imprime la ayuda de comandos.
+    Prints command help.
     
     Args:
-        commands: Lista de comandos con formato
+        commands: List of formatted commands
     """
     for command in commands:
         print(command)
@@ -146,24 +146,24 @@ def print_command_help(commands: List[str]) -> None:
 
 def print_useful_commands() -> None:
     """
-    Imprime una lista de comandos útiles.
+    Prints a list of useful commands.
     """
     print(Style.BRIGHT + "="*80)
-    print(f"{C_SUBTITLE}COMANDOS ÚTILES:")
-    print("  • Para consultar usando la base de datos más reciente:")
-    print(f"    {C_COMMAND}python run.py --query {C_PARAM}\"tu pregunta\"")
-    print("  • Para consultar usando una base de datos específica por índice:")
-    print(f"    {C_COMMAND}python run.py --query {C_PARAM}\"tu pregunta\" --db-index {C_PARAM}<número>")
-    print("  • Para ver esta lista de nuevo:")
+    print(f"{C_SUBTITLE}USEFUL COMMANDS:")
+    print("  • To query using the most recent database:")
+    print(f"    {C_COMMAND}python run.py --query {C_PARAM}\"your question\"")
+    print("  • To query using a specific database by index:")
+    print(f"    {C_COMMAND}python run.py --query {C_PARAM}\"your question\" --db-index {C_PARAM}<number>")
+    print("  • To see this list again:")
     print(f"    {C_COMMAND}python run.py --list-dbs")
-    print("  • Para mostrar las bases de datos antes de preguntar:")
-    print(f"    {C_COMMAND}python run.py --query {C_PARAM}\"tu pregunta\" --show-dbs")
-    print("  • Para optimizar una base de datos específica:")
-    print(f"    {C_COMMAND}python run.py --optimize-db {C_PARAM}<número>")
-    print("  • Para optimizar todas las bases de datos:")
+    print("  • To show databases before asking:")
+    print(f"    {C_COMMAND}python run.py --query {C_PARAM}\"your question\" --show-dbs")
+    print("  • To optimize a specific database:")
+    print(f"    {C_COMMAND}python run.py --optimize-db {C_PARAM}<number>")
+    print("  • To optimize all databases:")
     print(f"    {C_COMMAND}python run.py --optimize-all")
-    print("  • Para ver estadísticas de las bases de datos:")
+    print("  • To view database statistics:")
     print(f"    {C_COMMAND}python run.py --db-stats")
-    print("  • Para modo interactivo:")
+    print("  • For interactive mode:")
     print(f"    {C_COMMAND}python run.py --query")
     print(Style.BRIGHT + "="*80 + "\n") 

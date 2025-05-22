@@ -1,8 +1,8 @@
 """
-Módulo de utilidades para el sistema RAG.
+Utilities module for the RAG system.
 
-Este paquete contiene utilidades comunes usadas por varios componentes del sistema,
-como formateo de salidas, manejo de logs, y funciones auxiliares.
+This package contains common utilities used by various components of the system,
+such as output formatting, log handling, and auxiliary functions.
 """
 
 from modulos.utils.formatting import *

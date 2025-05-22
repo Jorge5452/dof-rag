@@ -3,35 +3,35 @@ import logging
 from typing import List, Dict, Any, Tuple
 
 from modulos.chunks.ChunkAbstract import ChunkAbstract
-# Configurar logging
+# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class PageChunker(ChunkAbstract):
     """
-    Implementación de chunker basado en páginas.
-    Divide el texto en chunks basados en marcadores de página específicos,
-    como {número} seguido de varios guiones.
+    Page-based chunker implementation.
+    Divides text into chunks based on specific page markers,
+    such as {number} followed by several dashes.
     """
     
     def __init__(self, embedding_model=None) -> None:
         """
-        Constructor que inicializa el chunker con la configuración específica para chunking por páginas.
+        Constructor initializing the chunker with page-specific configuration.
         
-        Parámetros:
-            embedding_model: Modelo de embeddings inicializado. Si es None, se debe asignar posteriormente.
+        Args:
+            embedding_model: Initialized embedding model. If None, it must be assigned later.
         """
         super().__init__(embedding_model)
         
-        # Obtener configuración específica para chunking por páginas
+        # Get specific configuration for page chunking
         self.page_config = self.chunks_config.get("page", {})
         
-        # Parámetros de configuración con valores por defecto
+        # Configuration parameters with default values
         self.use_headers = self.page_config.get("use_headers", True)
         self.max_header_level = self.page_config.get("max_header_level", 6)
         self.page_pattern = self.page_config.get("page_pattern", r'\{(\d+)\}\s*-{5,}')
         
-        logger.info(f"PageChunker inicializado con max_header_level={self.max_header_level}")
+        logger.info(f"PageChunker initialized with max_header_level={self.max_header_level}")
     
     def extract_headers(self, content: str, **kwargs) -> List[Dict[str, Any]]:
         """

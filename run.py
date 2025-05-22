@@ -1,14 +1,14 @@
 """
-Punto de entrada para el sistema RAG.
+Entry point for the RAG system.
 
-Este script maneja los argumentos de línea de comandos y ejecuta las funciones principales del sistema,
-ya sea para ingestión de documentos o para consultas.
+This script handles command-line arguments and executes the main system functions,
+either for document ingestion or for queries.
 
-Uso:
-    Ingestión: python run.py --ingest --files [directorio]
-    Consulta: python run.py --query "¿Tu pregunta aquí?"
-    Listar sesiones: python run.py --list-sessions
-    Listar bases de datos: python run.py --list-dbs
+Usage:
+    Ingestion: python run.py --ingest --files [directory]
+    Query: python run.py --query "Your question here?"
+    List sessions: python run.py --list-sessions
+    List databases: python run.py --list-dbs
 """
 
 import argparse
@@ -43,61 +43,61 @@ logger = logging.getLogger(__name__)
 
 def main() -> int:
     """
-    Función principal que procesa los argumentos y ejecuta la lógica correspondiente.
+    Main function that processes arguments and executes the corresponding logic.
     
     Returns:
-        int: Código de salida (0 para éxito, 1 para error)
+        int: Exit code (0 for success, 1 for error)
     """
-    # Configurar el parser de argumentos
+    # Configure argument parser
     parser = argparse.ArgumentParser(
-        description="Sistema RAG para ingestión de documentos y consultas",
+        description="RAG system for document ingestion and queries",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
     )
     
-    # Grupo para el modo de operación (mutuamente exclusivos)
+    # Group for operation mode (mutually exclusive)
     mode_group = parser.add_mutually_exclusive_group(required=True)
-    mode_group.add_argument("--ingest", action="store_true", help="Modo de ingestión de documentos")
-    mode_group.add_argument("--query", type=str, nargs='?', const='', help="Consulta para el sistema RAG. Sin argumento inicia modo interactivo.")
-    mode_group.add_argument("--list-sessions", action="store_true", help="Lista las sesiones disponibles")
-    mode_group.add_argument("--list-dbs", action="store_true", help="Lista las bases de datos disponibles")
-    mode_group.add_argument("--optimize-db", type=int, help="Optimiza una base de datos específica por índice")
-    mode_group.add_argument("--optimize-all", action="store_true", help="Optimiza todas las bases de datos")
-    mode_group.add_argument("--db-stats", action="store_true", help="Muestra estadísticas de bases de datos")
-    mode_group.add_argument("--resource-status", action="store_true", help="Muestra el estado actual del gestor de recursos")
+    mode_group.add_argument("--ingest", action="store_true", help="Document ingestion mode")
+    mode_group.add_argument("--query", type=str, nargs='?', const='', help="Query for the RAG system. Without argument starts interactive mode.")
+    mode_group.add_argument("--list-sessions", action="store_true", help="List available sessions")
+    mode_group.add_argument("--list-dbs", action="store_true", help="List available databases")
+    mode_group.add_argument("--optimize-db", type=int, help="Optimize a specific database by index")
+    mode_group.add_argument("--optimize-all", action="store_true", help="Optimize all databases")
+    mode_group.add_argument("--db-stats", action="store_true", help="Show database statistics")
+    mode_group.add_argument("--resource-status", action="store_true", help="Show current status of resource manager")
     
-    # Argumentos para el modo de ingestión
-    parser.add_argument("--files", type=str, help="Directorio o archivo Markdown a procesar")
-    parser.add_argument("--session-name", type=str, help="Nombre personalizado para la sesión")
+    # Arguments for ingestion mode
+    parser.add_argument("--files", type=str, help="Directory or Markdown file to process")
+    parser.add_argument("--session-name", type=str, help="Custom name for the session")
     
-    # Argumentos de procesamiento y análisis
-    parser.add_argument("--export-chunks", action="store_true", help="Exporta chunks a archivos TXT en las mismas ubicaciones que los Markdown")
+    # Arguments for processing and analysis
+    parser.add_argument("--export-chunks", action="store_true", help="Export chunks to TXT files in the same locations as Markdown files")
     
-    # Argumentos para el modo de consulta
+    # Arguments for query mode
     processing_config = config.get_processing_config()
     default_chunks = processing_config.get("max_chunks_to_retrieve", 5)
     
     parser.add_argument("--chunks", type=int, default=default_chunks, 
-                      help=f"Número de chunks a recuperar para la consulta (default: {default_chunks})")
-    parser.add_argument("--model", type=str, help="Modelo de IA a utilizar para la consulta")
-    parser.add_argument("--session", type=str, help="ID de sesión específica a utilizar")
-    parser.add_argument("--db-index", type=int, help="Índice de la base de datos a utilizar (0 es la más reciente)")
-    parser.add_argument("--show-dbs", action="store_true", help="Mostrar bases de datos disponibles antes de la consulta")
+                      help=f"Number of chunks to retrieve for the query (default: {default_chunks})")
+    parser.add_argument("--model", type=str, help="AI model to use for the query")
+    parser.add_argument("--session", type=str, help="Specific session ID to use")
+    parser.add_argument("--db-index", type=int, help="Database index to use (0 is the most recent)")
+    parser.add_argument("--show-dbs", action="store_true", help="Show available databases before the query")
     
-    # Argumentos generales
-    parser.add_argument("--debug", action="store_true", help="Activar modo de depuración (logs verbose)")
+    # General arguments
+    parser.add_argument("--debug", action="store_true", help="Enable debug mode (verbose logs)")
     
     args = parser.parse_args()
     
-    # Configurar nivel de logging
+    # Configure logging level
     if args.debug or config.get_general_config().get("debug", False):
         logging.getLogger().setLevel(logging.DEBUG)
-        logger.debug(C_SUCCESS + "Modo de depuración activado")
+        logger.debug(C_SUCCESS + "Debug mode enabled")
     
     try:
-        # Ejecutar el modo correspondiente
+        # Execute corresponding mode
         if args.ingest:
             result = handle_ingest_mode(args)
-            # Exportar chunks si se solicitó y la ingestión fue exitosa (result = 0)
+            # Export chunks if requested and ingestion was successful (result = 0)
             if args.export_chunks and result == 0:
                 handle_export_chunks_mode(args)
             return result
@@ -124,107 +124,107 @@ def main() -> int:
         
         return 0
     except Exception as e:
-        logger.error(f"{C_ERROR}Error inesperado: {e}")
+        logger.error(f"{C_ERROR}Unexpected error: {e}")
         return 1
 
 def handle_ingest_mode(args: argparse.Namespace) -> int:
     """
-    Maneja el modo de ingestión de documentos.
+    Handles document ingestion mode.
     
     Args:
-        args: Argumentos de línea de comandos
+        args: Command line arguments
         
     Returns:
-        int: Código de salida (0 para éxito, 1 para error)
+        int: Exit code (0 for success, 1 for error)
     """
-    # Cargar módulos solo cuando se necesiten para ingestión
+    # Load modules only when needed for ingestion
     from main import process_documents
     
     if not args.files:
-        logger.error(f"{C_ERROR}El argumento --files es requerido para el modo --ingest")
+        logger.error(f"{C_ERROR}The --files argument is required for --ingest mode")
         return 1
         
-    # Verificar que el directorio o archivo existe
+    # Verify directory or file exists
     if not os.path.exists(args.files):
-        logger.error(f"{C_ERROR}El directorio o archivo {args.files} no existe")
+        logger.error(f"{C_ERROR}The directory or file {args.files} does not exist")
         return 1
         
-    # Procesar documentos
-    logger.info(f"{C_HIGHLIGHT}Iniciando ingestión de documentos desde: {C_VALUE}{args.files}")
+    # Process documents
+    logger.info(f"{C_HIGHLIGHT}Starting document ingestion from: {C_VALUE}{args.files}")
     process_documents(args.files, session_name=args.session_name)
     return 0
 
 def handle_query_mode(args: argparse.Namespace) -> int:
     """
-    Maneja el modo de consulta.
+    Handles query mode.
     
     Args:
-        args: Argumentos de línea de comandos
+        args: Command line arguments
         
     Returns:
-        int: Código de salida (0 para éxito, 1 para error)
+        int: Exit code (0 for success, 1 for error)
     """
-    # Cargar módulos solo cuando se necesiten para consulta
+    # Load modules only when needed for query
     from main import process_query
     
-    # Configurar nivel de logging basado en el modo de depuración
+    # Configure logging level based on debug mode
     if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
     else:
-        # Reducir verbosidad de logging en modo normal
+        # Reduce logging verbosity in normal mode
         logging.getLogger().setLevel(logging.WARNING)
         silence_verbose_loggers()
     
-    # Verificar si estamos en modo interactivo (consulta vacía)
+    # Check if we're in interactive mode (empty query)
     interactive_mode = args.query == ''
     
-    # En modo consulta, verificar si se solicita mostrar las bases de datos
+    # In query mode, check if we need to show the databases
     if args.show_dbs or args.db_index is None:
-        # Mostrar un resumen simple de las bases de datos
-        print("\n" + C_TITLE + " BASES DE DATOS DISPONIBLES " + C_RESET)
+        # Show a simple summary of databases
+        print("\n" + C_TITLE + " AVAILABLE DATABASES " + C_RESET)
         print_separator()
         
         sorted_dbs = show_available_databases(show_output=False)
         
-        # Mostrar lista simplificada de bases de datos (solo las más recientes)
-        for i, (name, db) in enumerate(sorted_dbs[:5]):  # Limitar a 5 bases de datos
+        # Show simplified list of databases (only the most recent ones)
+        for i, (name, db) in enumerate(sorted_dbs[:5]):  # Limit to 5 databases
             created_date = datetime.fromtimestamp(db.get('created_at', 0)).strftime('%Y-%m-%d')
-            model = db.get('embedding_model', 'desconocido')
+            model = db.get('embedding_model', 'unknown')
             
-            if i == 0:  # Resaltar la más reciente
-                print(f"{C_SUCCESS}[{i}] {C_HIGHLIGHT}{name}{C_RESET} - {created_date} - Modelo: {C_VALUE}{model}{C_RESET}")
+            if i == 0:  # Highlight the most recent
+                print(f"{C_SUCCESS}[{i}] {C_HIGHLIGHT}{name}{C_RESET} - {created_date} - Model: {C_VALUE}{model}{C_RESET}")
             else:
-                print(f"[{i}] {C_HIGHLIGHT}{name}{C_RESET} - {created_date} - Modelo: {model}")
+                print(f"[{i}] {C_HIGHLIGHT}{name}{C_RESET} - {created_date} - Model: {model}")
         
         print_separator()
         
-        # Si solo se pidió mostrar las bases de datos y no se proporcionó índice, preguntar
+        # If we only wanted to show the databases and no index was provided, ask
         if args.db_index is None:
             try:
-                db_index = input(f"\n{C_PROMPT}Seleccione índice de base de datos (Enter para usar la más reciente): ")
+                db_index = input(f"\n{C_PROMPT}Select database index (Enter to use the most recent): ")
                 if db_index.strip():
                     args.db_index = int(db_index)
             except ValueError:
-                print_status("warning", "Entrada inválida. Usando la base de datos más reciente.")
+                print_status("warning", "Invalid input. Using the most recent database.")
     
-    # Mostrar un mensaje de inicio
+    # Show start message
     if interactive_mode:
-        # Modo interactivo
+        # Interactive mode
         run_interactive_mode(args.chunks, args.model, args.session, args.db_index)
     else:
-        # Modo de consulta única - Interfaz simplificada
-        print("\n" + C_SUBTITLE + " CONSULTA: " + C_VALUE + f"{args.query}" + C_RESET)
+        # Single query mode - Simplified interface
+        print("\n" + C_SUBTITLE + " QUERY: " + C_VALUE + f"{args.query}" + C_RESET)
         
-        # Timer para medir tiempo de respuesta
+        # Timer to measure response time
         start_time = time.time()
         
-        # Reducir temporalmente el nivel de log durante la consulta si no estamos en modo debug
+        # Temporarily reduce log level during query if not in debug mode
         original_log_level = logging.getLogger().level
         if not args.debug:
             logging.getLogger().setLevel(logging.WARNING)
             
         try:
-            # Procesar la consulta
+            # Process the query
             response = process_query(
                 args.query, 
                 n_chunks=args.chunks, 
@@ -233,110 +233,110 @@ def handle_query_mode(args: argparse.Namespace) -> int:
                 db_index=args.db_index
             )
         except Exception as e:
-            # En caso de error, mostrar mensaje claro
-            response = f"Error al procesar consulta: {str(e)}"
+            # In case of error, show clear message
+            response = f"Error processing query: {str(e)}"
         finally:
-            # Restaurar nivel de log original
+            # Restore original log level
             logging.getLogger().setLevel(original_log_level)
         
-        # Mostrar la respuesta con mejor formato
-        print("\n" + C_TITLE + " RESPUESTA " + C_RESET)
+        # Show response with better formatting
+        print("\n" + C_TITLE + " RESPONSE " + C_RESET)
         print_separator()
         
-        # Extraer solo la sección de respuesta si contiene separadores de formato
+        # Extract only the response section if it contains format separators
         if "=======================  RESPUESTA  =======================" in response:
             parts = response.split("=======================  RESPUESTA  =======================")
             if len(parts) > 1:
-                # Extraer la parte de respuesta (sin encabezado)
+                # Extract the response part (without header)
                 response_text = parts[1].split("=======================  CONTEXTO  =======================")[0].strip()
                 context_text = response.split("=======================  CONTEXTO  =======================")
                 
-                # Imprimir solo la respuesta primero
+                # Print only the response first
                 print(response_text)
                 
-                # Mostrar tiempo de respuesta después de la respuesta principal
+                # Show response time after the main response
                 elapsed_time = time.time() - start_time
                 print_separator()
-                print_status("info", f"Tiempo de respuesta: {elapsed_time:.2f} segundos")
+                print_status("info", f"Response time: {elapsed_time:.2f} seconds")
                 
-                # Imprimir contexto si existe - Ahora siempre mostramos el contexto
+                # Print context if it exists - Now we always show the context
                 if len(context_text) > 1:
-                    print("\n" + C_TITLE + " CONTEXTO UTILIZADO " + C_RESET)
+                    print("\n" + C_TITLE + " CONTEXT USED " + C_RESET)
                     print_separator()
                     print(context_text[1].strip())
             else:
                 print(response)
                 
-                # Mostrar tiempo de respuesta
+                # Show response time
                 elapsed_time = time.time() - start_time
                 print_separator()
-                print_status("info", f"Tiempo de respuesta: {elapsed_time:.2f} segundos")
+                print_status("info", f"Response time: {elapsed_time:.2f} seconds")
         else:
             print(response)
             
-            # Mostrar tiempo de respuesta
+            # Show response time
             elapsed_time = time.time() - start_time
             print_separator()
-            print_status("info", f"Tiempo de respuesta: {elapsed_time:.2f} segundos")
+            print_status("info", f"Response time: {elapsed_time:.2f} seconds")
     
     return 0
 
 def list_sessions() -> int:
     """
-    Lista las sesiones disponibles.
+    Lists available sessions.
     
     Returns:
-        int: Código de resultado (0=éxito, 1=error).
+        int: Result code (0=success, 1=error).
     """
-    # Importar el gestor de sesiones
+    # Import session manager
     from modulos.session_manager.session_manager import SessionManager
     
-    # Usar el gestor de sesiones para listar sesiones
+    # Use session manager to list sessions
     session_manager = SessionManager()
     sessions = session_manager.list_sessions()
     
-    # Mostrar título
-    print("\n" + C_TITLE + " SESIONES DISPONIBLES " + C_RESET)
+    # Show title
+    print("\n" + C_TITLE + " AVAILABLE SESSIONS " + C_RESET)
     print_separator()
     
     if not sessions:
-        print_status("warning", "No hay sesiones disponibles")
+        print_status("warning", "No available sessions")
         print()
         return 0
         
-    # Ordenar las sesiones por actividad más reciente
+    # Sort sessions by most recent activity
     sessions.sort(key=lambda s: s.get('last_activity', 0), reverse=True)
     
     for i, session in enumerate(sessions):
-        # Simplificar tiempos para mostrar
+        # Simplify times for display
         created_readable = datetime.fromtimestamp(session.get('created_at', 0)).strftime('%Y-%m-%d %H:%M')
         last_activity_readable = datetime.fromtimestamp(session.get('last_activity', 0)).strftime('%Y-%m-%d %H:%M')
         
-        # Obtener BD asociadas
+        # Get associated databases
         databases = session.get('databases', [])
         
-        # Obtener archivos procesados
+        # Get processed files
         files = session.get('files', [])
         
-        print(f"{C_HIGHLIGHT}{i}. ID: {session['id']} - Creado: {created_readable} - Última actividad: {last_activity_readable}")
+        print(f"{C_HIGHLIGHT}{i}. ID: {session['id']} - Created: {created_readable} - Last activity: {last_activity_readable}")
         
-        # Mostrar detalles de bases de datos
+        # Show database details
         if databases:
-            print(f"{C_INFO}   Bases de datos ({len(databases)}):")
-            for j, db in enumerate(databases[:3]):  # Limitar a 3 bases de datos para evitar spam
-                print(f"{C_INFO}     {j+1}. {db.get('name', 'Sin nombre')} - Modelo: {db.get('model', 'desconocido')} - Chunking: {db.get('chunking', 'desconocido')}")
+            print(f"{C_INFO}   Databases ({len(databases)}):")
+            for j, db in enumerate(databases[:3]):  # Limit to 3 databases to avoid spam
+                print(f"{C_INFO}     {j+1}. {db.get('name', 'No name')} - Model: {db.get('model', 'unknown')} - Chunking: {db.get('chunking', 'unknown')}")
             if len(databases) > 3:
-                print(f"{C_INFO}     ...y {len(databases) - 3} más")
+                print(f"{C_INFO}     ...and {len(databases) - 3} more")
         
-        # Mostrar archivos procesados
+        # Show processed files
         if files:
-            print(f"{C_INFO}   Archivos procesados ({len(files)}):")
-            # Mostrar máximo 3 archivos y resumir el resto
+            print(f"{C_INFO}   Processed files ({len(files)}):")
+            # Show maximum 3 files and summarize the rest
             for j, file_path in enumerate(files[:3]):
                 file_name = os.path.basename(file_path)
                 print(f"{C_INFO}     {j+1}. {file_name}")
             if len(files) > 3:
-                print(f"{C_INFO}     ...y {len(files) - 3} más")
+                print(f"{C_INFO}     ...and {len(files) - 3} more")
         
         print()
     
@@ -346,87 +346,87 @@ def list_sessions() -> int:
 def run_interactive_mode(n_chunks: int = 5, model: Optional[str] = None, 
                         session_id: Optional[str] = None, db_index: Optional[int] = None) -> None:
     """
-    Ejecuta el sistema RAG en modo interactivo, permitiendo consultas consecutivas.
+    Runs RAG system in interactive mode, allowing consecutive queries.
     
     Args:
-        n_chunks: Número de chunks a recuperar para cada consulta
-        model: Modelo de IA a utilizar (opcional)
-        session_id: ID de sesión específica a utilizar (opcional)
-        db_index: Índice de la base de datos a utilizar (opcional)
+        n_chunks: Number of chunks to retrieve for each query
+        model: AI model to use (optional)
+        session_id: Specific session ID to use (optional)
+        db_index: Index of database to use (optional)
     """
-    # Importar solo cuando sea necesario para el modo interactivo
+    # Import only when needed for interactive mode
     from main import process_query
-    from colorama import Style  # Asegurar que Style está disponible
+    from colorama import Style  # Ensure Style is available
     
-    # Configurar nivel de logging para el modo interactivo
+    # Configure logging level for interactive mode
     logging.getLogger().setLevel(logging.WARNING)
     silence_verbose_loggers()
     
-    print("\n" + C_TITLE + " MODO INTERACTIVO " + C_RESET)
+    print("\n" + C_TITLE + " INTERACTIVE MODE " + C_RESET)
     print_separator()
     
-    # Mostrar instrucciones simplificadas
-    print_status("info", "Escribe tus preguntas y presiona Enter para obtener respuestas.")
-    print_status("info", f"Para salir: {C_COMMAND}salir{C_RESET}, {C_COMMAND}exit{C_RESET} o {C_COMMAND}q{C_RESET}")
-    print_status("info", f"Para ver bases de datos: {C_COMMAND}dbs{C_RESET}")
-    print_status("info", f"Para cambiar base de datos: {C_COMMAND}cambiar <n>{C_RESET}")
-    print_status("info", f"Para ver ayuda: {C_COMMAND}ayuda{C_RESET} o {C_COMMAND}help{C_RESET}")
+    # Show simplified instructions
+    print_status("info", "Type your questions and press Enter to get answers.")
+    print_status("info", f"To exit: {C_COMMAND}exit{C_RESET}, {C_COMMAND}quit{C_RESET} or {C_COMMAND}q{C_RESET}")
+    print_status("info", f"To view databases: {C_COMMAND}dbs{C_RESET}")
+    print_status("info", f"To change database: {C_COMMAND}change <n>{C_RESET}")
+    print_status("info", f"For help: {C_COMMAND}help{C_RESET} or {C_COMMAND}?{C_RESET}")
     print_separator()
     
-    # Variables para mantener estado
+    # Variables to maintain state
     current_db_index = db_index
     current_session_id = session_id
     current_model = model
     history = []
     
-    # Bucle principal del modo interactivo
+    # Main loop for interactive mode
     while True:
         try:
-            # Obtener la consulta del usuario
+            # Get query from user
             query = input(f"\n{C_PROMPT}> ")
             
-            # Verificar comandos especiales
-            if query.lower() in ["salir", "exit", "q", "quit"]:
-                print_status("success", "Sesión finalizada.")
+            # Check special commands
+            if query.lower() in ["exit", "quit", "q"]:
+                print_status("success", "Session ended.")
                 break
                 
             elif query.lower() == "dbs":
-                # Mostrar bases de datos disponibles
+                # Show available databases
                 sorted_dbs = show_available_databases()
                 continue
                 
-            elif query.lower().startswith("cambiar "):
-                # Cambiar la base de datos activa
+            elif query.lower().startswith("change "):
+                # Change active database
                 try:
                     new_index = int(query.split()[1])
                     current_db_index = new_index
-                    print_status("success", f"Base de datos cambiada a índice {C_VALUE}{new_index}")
+                    print_status("success", f"Database changed to index {C_VALUE}{new_index}")
                 except (IndexError, ValueError):
-                    print_status("error", "Formato inválido. Uso: cambiar <número>")
+                    print_status("error", "Invalid format. Usage: change <number>")
                 continue
                 
-            elif query.lower() in ["ayuda", "help", "?"]:
-                # Mostrar comandos de ayuda
-                print("\n" + C_TITLE + " COMANDOS DISPONIBLES " + C_RESET)
+            elif query.lower() in ["help", "?"]:
+                # Show help commands
+                print("\n" + C_TITLE + " AVAILABLE COMMANDS " + C_RESET)
                 print_separator()
-                print(f"{C_INFO}• {C_COMMAND}salir{C_RESET}, {C_COMMAND}exit{C_RESET}, {C_COMMAND}q{C_RESET} - Salir del modo interactivo")
-                print(f"{C_INFO}• {C_COMMAND}dbs{C_RESET} - Mostrar bases de datos disponibles")
-                print(f"{C_INFO}• {C_COMMAND}cambiar <n>{C_RESET} - Cambiar a la base de datos con índice <n>")
-                print(f"{C_INFO}• {C_COMMAND}ayuda{C_RESET}, {C_COMMAND}help{C_RESET}, {C_COMMAND}?{C_RESET} - Mostrar esta ayuda")
+                print(f"{C_INFO}• {C_COMMAND}exit{C_RESET}, {C_COMMAND}quit{C_RESET}, {C_COMMAND}q{C_RESET} - Exit interactive mode")
+                print(f"{C_INFO}• {C_COMMAND}dbs{C_RESET} - Show available databases")
+                print(f"{C_INFO}• {C_COMMAND}change <n>{C_RESET} - Change to database with index <n>")
+                print(f"{C_INFO}• {C_COMMAND}help{C_RESET}, {C_COMMAND}?{C_RESET} - Show this help")
                 print_separator()
                 continue
                 
             elif not query.strip():
-                # Ignorar consultas vacías
+                # Ignore empty queries
                 continue
             
-            # Procesar consulta normal - Reducir verbosidad
-            # No mostramos mensaje de procesamiento para una experiencia más limpia
+            # Process normal query - Reduce verbosity
+            # Don't show processing message for cleaner experience
             
-            # Medir tiempo de respuesta
+            # Measure response time
             start_time = time.time()
             
-            # Procesar la consulta con manejo de errores
+            # Process query with error handling
             try:
                 response = process_query(
                     query, 
@@ -436,120 +436,120 @@ def run_interactive_mode(n_chunks: int = 5, model: Optional[str] = None,
                     db_index=current_db_index
                 )
                 
-                # Agregar a historial
+                # Add to history
                 history.append((query, response))
                 
-                # Mostrar respuesta con formato mejorado
-                # Extraer solo la sección de respuesta si contiene separadores de formato
+                # Show response with improved formatting
+                # Extract only response section if it contains format separators
                 if "=======================  RESPUESTA  =======================" in response:
                     parts = response.split("=======================  RESPUESTA  =======================")
                     if len(parts) > 1:
-                        # Extraer la parte de respuesta (sin encabezado)
+                        # Extract response part (without header)
                         response_text = parts[1].split("=======================  CONTEXTO  =======================")[0].strip()
                         context_text = response.split("=======================  CONTEXTO  =======================")
                         
-                        # Imprimir solo la respuesta
-                        print("\n" + C_TITLE + " RESPUESTA " + C_RESET)
+                        # Print only the response
+                        print("\n" + C_TITLE + " RESPONSE " + C_RESET)
                         print_separator()
                         print(response_text)
                         
-                        # Mostrar tiempo de respuesta de forma discreta
+                        # Show response time discreetly
                         elapsed_time = time.time() - start_time
                         print_separator()
-                        print_status("info", f"Tiempo: {elapsed_time:.2f} segundos")
+                        print_status("info", f"Time: {elapsed_time:.2f} seconds")
                         
-                        # Imprimir contexto si existe
+                        # Print context if it exists
                         if len(context_text) > 1:
-                            print("\n" + C_TITLE + " CONTEXTO UTILIZADO " + C_RESET)
+                            print("\n" + C_TITLE + " CONTEXT USED " + C_RESET)
                             print_separator()
                             print(context_text[1].strip())
                     else:
-                        # Si no podemos separar la respuesta, mostrar todo
-                        print("\n" + C_TITLE + " RESPUESTA " + C_RESET)
+                        # If we can't separate the response, show everything
+                        print("\n" + C_TITLE + " RESPONSE " + C_RESET)
                         print_separator()
                         print(response)
                         
-                        # Mostrar tiempo de respuesta
+                        # Show response time
                         elapsed_time = time.time() - start_time
                         print_separator()
-                        print_status("info", f"Tiempo: {elapsed_time:.2f} segundos")
+                        print_status("info", f"Time: {elapsed_time:.2f} seconds")
                 else:
-                    # Si no está formateada, mostrar la respuesta completa
-                    print("\n" + C_TITLE + " RESPUESTA " + C_RESET)
+                    # If not formatted, show complete response
+                    print("\n" + C_TITLE + " RESPONSE " + C_RESET)
                     print_separator()
                     print(response)
                     
-                    # Mostrar tiempo de respuesta
+                    # Show response time
                     elapsed_time = time.time() - start_time
                     print_separator()
-                    print_status("info", f"Tiempo: {elapsed_time:.2f} segundos")
+                    print_status("info", f"Time: {elapsed_time:.2f} seconds")
                 
             except Exception as e:
-                print_status("error", f"Error al procesar consulta: {str(e)}")
+                print_status("error", f"Error processing query: {str(e)}")
             
         except KeyboardInterrupt:
-            print_status("info", "\nSesión interrumpida por el usuario.")
+            print_status("info", "\nSession interrupted by user.")
             break
             
         except Exception as e:
             print_status("error", f"Error: {str(e)}")
             
-    print_status("info", "¡Gracias por usar el sistema RAG!")
+    print_status("info", "Thank you for using the RAG system!")
     print()
 
 def show_available_databases(show_output: bool = True) -> List[Tuple[str, Dict[str, Any]]]:
     """
-    Lista las bases de datos disponibles.
+    Lists available databases.
     
     Args:
-        show_output: Si se debe mostrar la salida en pantalla
+        show_output: Whether to display output on screen
         
     Returns:
-        Lista ordenada de bases de datos (nombre, metadatos)
+        Sorted list of databases (name, metadata)
     """
-    # Importar el gestor de sesiones
+    # Import session manager
     from modulos.session_manager.session_manager import SessionManager
-    from colorama import Style  # Asegurar que Style está disponible
+    from colorama import Style  # Ensure Style is available
     import os
     
-    # Usar el gestor de sesiones para listar bases de datos
+    # Use session manager to list databases
     session_manager = SessionManager()
     databases = session_manager.list_available_databases()
     
-    # Convertir el diccionario a una lista ordenada por último uso (más reciente primero)
+    # Convert dictionary to sorted list by last use (most recent first)
     sorted_dbs = []
     for name, metadata in databases.items():
         sorted_dbs.append((name, metadata))
     
     sorted_dbs.sort(key=lambda x: x[1].get('last_used', 0), reverse=True)
     
-    # Si se solicita mostrar en pantalla
+    # If requested to display output
     if show_output:
-        # Mostrar título
-        print("\n" + C_TITLE + " BASES DE DATOS DISPONIBLES " + C_RESET)
+        # Show title
+        print("\n" + C_TITLE + " AVAILABLE DATABASES " + C_RESET)
         print_separator()
         
         if not sorted_dbs:
-            print_status("warning", "No hay bases de datos disponibles")
+            print_status("warning", "No databases available")
             return sorted_dbs
             
-        # Mostrar información resumida de cada base de datos
+        # Show summarized information for each database
         for i, (name, db) in enumerate(sorted_dbs):
-            # Formatear fechas para lectura humana
+            # Format dates for human readability
             created_date = datetime.fromtimestamp(db.get('created_at', 0)).strftime('%Y-%m-%d')
             last_used_date = datetime.fromtimestamp(db.get('last_used', 0)).strftime('%Y-%m-%d')
             
-            # Obtener información básica
-            model = db.get('embedding_model', 'desconocido')
-            chunking = db.get('chunking_method', 'desconocido')
-            db_type = db.get('db_type', 'desconocido')
-            db_path = db.get('db_path', 'desconocido')
+            # Get basic information
+            model = db.get('embedding_model', 'unknown')
+            chunking = db.get('chunking_method', 'unknown')
+            db_type = db.get('db_type', 'unknown')
+            db_path = db.get('db_path', 'unknown')
             
-            # Obtener tamaño del archivo si existe
+            # Get file size if exists
             size_str = ""
             if db_path and os.path.exists(db_path):
                 size_bytes = os.path.getsize(db_path)
-                # Convertir a KB, MB, GB según sea apropiado
+                # Convert to KB, MB, GB as appropriate
                 if size_bytes < 1024:
                     size_str = f"{size_bytes} bytes"
                 elif size_bytes < 1024 * 1024:
@@ -558,37 +558,37 @@ def show_available_databases(show_output: bool = True) -> List[Tuple[str, Dict[s
                     size_str = f"{size_bytes/(1024*1024):.1f} MB"
                 else:
                     size_str = f"{size_bytes/(1024*1024*1024):.2f} GB"
-                size_str = f" - Tamaño: {size_str}"
+                size_str = f" - Size: {size_str}"
             else:
                 size_str = ""
             
-            # Obtener información de sesión asociada
+            # Get associated session information
             session_info = ""
             session_id = db.get('session_id')
             if session_id:
-                session_info = f" - Sesión: {session_id}"
+                session_info = f" - Session: {session_id}"
             
-            # Obtener nombre personalizado si existe
+            # Get custom name if exists
             custom_name = db.get('custom_name', '')
-            custom_name_info = f" - Nombre: {custom_name}" if custom_name else ""
+            custom_name_info = f" - Name: {custom_name}" if custom_name else ""
             
-            # Mostrar información con formato mejorado
+            # Show information with improved formatting
             print(f"{C_HIGHLIGHT}{i}. {name}{custom_name_info}")
-            print(f"{C_INFO}   Modelo: {C_VALUE}{model}{C_RESET} - Chunking: {C_VALUE}{chunking}{C_RESET} - Tipo: {C_VALUE}{db_type}{C_RESET}")
-            print(f"{C_INFO}   Creado: {C_VALUE}{created_date}{C_RESET} - Último uso: {C_VALUE}{last_used_date}{C_RESET}{size_str}{session_info}")
+            print(f"{C_INFO}   Model: {C_VALUE}{model}{C_RESET} - Chunking: {C_VALUE}{chunking}{C_RESET} - Type: {C_VALUE}{db_type}{C_RESET}")
+            print(f"{C_INFO}   Created: {C_VALUE}{created_date}{C_RESET} - Last use: {C_VALUE}{last_used_date}{C_RESET}{size_str}{session_info}")
             
-            # Mostrar información de archivos si está disponible
+            # Show file information if available
             files = db.get('files', [])
             if files:
-                print(f"{C_INFO}   Archivos: {C_VALUE}{len(files)}{C_RESET}")
-                # Mostrar hasta 2 archivos de ejemplo
+                print(f"{C_INFO}   Files: {C_VALUE}{len(files)}{C_RESET}")
+                # Show up to 2 example files
                 for j, file_path in enumerate(files[:2]):
                     file_name = os.path.basename(file_path)
                     print(f"{C_INFO}     - {file_name}")
                 if len(files) > 2:
-                    print(f"{C_INFO}     - ...y {len(files) - 2} más")
+                    print(f"{C_INFO}     - ...and {len(files) - 2} more")
             
-            print()  # Separación entre bases de datos
+            print()  # Separation between databases
         
         print_separator()
     
@@ -596,154 +596,154 @@ def show_available_databases(show_output: bool = True) -> List[Tuple[str, Dict[s
 
 def optimize_database(db_index: int) -> None:
     """
-    Optimiza una base de datos específica.
+    Optimizes a specific database.
     
     Args:
-        db_index: Índice de la base de datos a optimizar
+        db_index: Index of the database to optimize
     """
-    # Importar solo cuando sea necesario
+    # Import only when needed
     from modulos.session_manager.session_manager import SessionManager
     
     try:
-        # Obtener lista de bases de datos
+        # Get list of databases
         sorted_dbs = show_available_databases(show_output=False)
         
         if not sorted_dbs or db_index >= len(sorted_dbs):
-            print(f"{C_ERROR}Índice de base de datos inválido: {db_index}")
+            print(f"{C_ERROR}Invalid database index: {db_index}")
             return
         
-        # Obtener información de la base de datos
+        # Get information about the database
         name, metadata = sorted_dbs[db_index]
         db_path = metadata.get('db_path')
         
         if not db_path or not os.path.exists(db_path):
-            print(f"{C_ERROR}No se pudo localizar el archivo de base de datos en: {db_path}")
+            print(f"{C_ERROR}Could not locate the database file at: {db_path}")
             return
         
-        print(f"\n{C_INFO}Optimizando base de datos: {C_VALUE}{name}")
+        print(f"\n{C_INFO}Optimizing database: {C_VALUE}{name}")
         
-        # Obtener instancia de base de datos
+        # Get database instance
         session_manager = SessionManager()
-        # Pasamos None como session_id ya que estamos optimizando una base de datos específica por índice
+        # Pass None as session_id since we're optimizing a specific database by index
         db, metadata = session_manager.get_database_by_index(db_index, session_id=None)
         
-        # Medir tiempo de optimización
+        # Measure optimization time
         start_time = time.time()
         
-        # Ejecutar optimización
+        # Execute optimization
         success = db.optimize_database()
         
-        # Calcular tiempo
+        # Calculate time
         elapsed_time = time.time() - start_time
         
         if success:
-            print(f"{C_SUCCESS}✓ Optimización completada exitosamente en {elapsed_time:.2f} segundos")
+            print(f"{C_SUCCESS}✓ Optimization completed successfully in {elapsed_time:.2f} seconds")
         else:
-            print(f"{C_ERROR}✗ Error durante la optimización")
+            print(f"{C_ERROR}✗ Error during optimization")
         
     except Exception as e:
         print(f"{C_ERROR}Error: {str(e)}")
 
 def optimize_all_databases() -> None:
     """
-    Optimiza todas las bases de datos disponibles.
+    Optimizes all available databases.
     """
-    # Importar solo cuando sea necesario
+    # Import only when needed
     from modulos.databases.FactoryDatabase import DatabaseFactory
     
-    print_header("OPTIMIZACIÓN DE TODAS LAS BASES DE DATOS")
+    print_header("OPTIMIZATION OF ALL DATABASES")
     
-    # Obtener lista de bases de datos
+    # Get list of databases
     sorted_dbs = show_available_databases(show_output=False)
     
     if not sorted_dbs:
-        print(f"{C_WARNING}No hay bases de datos disponibles para optimizar.")
+        print(f"{C_WARNING}No databases available for optimization.")
         return
     
-    # Extraer nombres de bases de datos para optimización
+    # Extract database names for optimization
     db_names = [name for name, _ in sorted_dbs]
     
-    print(f"{C_INFO}Se optimizarán {len(db_names)} bases de datos...")
+    print(f"{C_INFO}Optimizing {len(db_names)} databases...")
     
-    # Iniciar optimización
+    # Start optimization
     start_time = time.time()
-    results = DatabaseFactory.optimize_all_databases(db_names)  # Pasar los nombres de bases de datos
+    results = DatabaseFactory.optimize_all_databases(db_names)  # Pass database names
     elapsed_time = time.time() - start_time
     
-    # Mostrar resultados
+    # Show results
     success_count = sum(1 for success in results.values() if success)
-    print(f"\n{C_SUBTITLE}RESULTADOS DE OPTIMIZACIÓN:")
-    print(f"{C_SUCCESS}✓ Bases de datos optimizadas exitosamente: {success_count}")
-    print(f"{C_ERROR}✗ Bases de datos con errores: {len(results) - success_count}")
-    print(f"{C_INFO}Tiempo total: {elapsed_time:.2f} segundos")
+    print(f"\n{C_SUBTITLE}OPTIMIZATION RESULTS:")
+    print(f"{C_SUCCESS}✓ Successfully optimized databases: {success_count}")
+    print(f"{C_ERROR}✗ Databases with errors: {len(results) - success_count}")
+    print(f"{C_INFO}Total time: {elapsed_time:.2f} seconds")
 
 def show_database_statistics() -> None:
     """
-    Muestra estadísticas detalladas de todas las bases de datos.
+    Shows detailed statistics of all databases.
     """
-    # Importar solo cuando sea necesario
+    # Import only when needed
     from modulos.databases.FactoryDatabase import DatabaseFactory
     
-    print_header("ESTADÍSTICAS DE BASES DE DATOS")
+    print_header("DATABASE STATISTICS")
     
-    # Obtener estadísticas
+    # Get statistics
     stats = DatabaseFactory.get_db_statistics()
     
-    # Mostrar estadísticas globales
-    print(f"{C_SUBTITLE}ESTADÍSTICAS GLOBALES:")
-    print(f"{C_INFO}• Total de bases de datos: {C_VALUE}{stats['total_databases']}")
-    print(f"{C_INFO}• Total de documentos: {C_VALUE}{stats['total_documents']}")
-    print(f"{C_INFO}• Total de chunks: {C_VALUE}{stats['total_chunks']}")
+    # Show global statistics
+    print(f"{C_SUBTITLE}GLOBAL STATISTICS:")
+    print(f"{C_INFO}• Total databases: {C_VALUE}{stats['total_databases']}")
+    print(f"{C_INFO}• Total documents: {C_VALUE}{stats['total_documents']}")
+    print(f"{C_INFO}• Total chunks: {C_VALUE}{stats['total_chunks']}")
     
-    # Mostrar estadísticas por base de datos
+    # Show database statistics
     if stats["databases"]:
-        print(f"\n{C_SUBTITLE}ESTADÍSTICAS POR BASE DE DATOS:")
+        print(f"\n{C_SUBTITLE}DATABASE STATISTICS:")
         
         for name, db_stats in stats["databases"].items():
             if "error" in db_stats:
-                print(f"\n{C_HIGHLIGHT}{name}: {C_ERROR}Error al obtener estadísticas: {db_stats['error']}")
+                print(f"\n{C_HIGHLIGHT}{name}: {C_ERROR}Error getting statistics: {db_stats['error']}")
                 continue
                 
             print(f"\n{C_HIGHLIGHT}{name}:")
-            print(f"{C_INFO}• Documentos: {C_VALUE}{db_stats.get('total_documents', 'N/A')}")
+            print(f"{C_INFO}• Documents: {C_VALUE}{db_stats.get('total_documents', 'N/A')}")
             print(f"{C_INFO}• Chunks: {C_VALUE}{db_stats.get('total_chunks', 'N/A')}")
             
-            # Información sobre documento más reciente
+            # Latest document information
             if "latest_document" in db_stats:
                 doc = db_stats["latest_document"]
-                print(f"{C_INFO}• Documento más reciente: {C_VALUE}{doc.get('title', 'Sin título')} (ID: {doc.get('id', 'N/A')})")
+                print(f"{C_INFO}• Latest document: {C_VALUE}{doc.get('title', 'Untitled')} (ID: {doc.get('id', 'N/A')})")
             
-            # Tamaño de la base de datos
+            # Database size
             if "db_size_mb" in db_stats:
-                print(f"{C_INFO}• Tamaño: {C_VALUE}{db_stats['db_size_mb']:.2f} MB")
+                print(f"{C_INFO}• Size: {C_VALUE}{db_stats['db_size_mb']:.2f} MB")
             
-            # Fecha de creación
+            # Creation date
             if "db_created" in db_stats and db_stats["db_created"] != "unknown":
                 try:
                     created_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(db_stats["db_created"]))
-                    print(f"{C_INFO}• Creada: {C_VALUE}{created_time}")
+                    print(f"{C_INFO}• Created: {C_VALUE}{created_time}")
                 except (TypeError, ValueError):
-                    print(f"{C_INFO}• Creada: {C_VALUE}{db_stats['db_created']}")
+                    print(f"{C_INFO}• Created: {C_VALUE}{db_stats['db_created']}")
     
     print(Style.BRIGHT + "=" * 80)
 
 def query_database(db_index: int, query: str, session_id: str = None) -> None:
     """
-    Ejecuta una consulta en una base de datos específica.
+    Executes a query on a specific database.
     
     Args:
-        db_index: Índice de la base de datos a consultar
-        query: Consulta a realizar
-        session_id: ID de sesión (opcional)
+        db_index: Index of the database to query
+        query: Query to execute
+        session_id: Session ID (optional)
     """
     from modulos.rag.main import process_query
     
     try:
-        # Si tenemos un ID de sesión, lo usamos directamente
+        # If we have a session ID, use it directly
         if session_id:
-            print(f"{C_INFO}Consultando en la sesión: {C_VALUE}{session_id}")
+            print(f"{C_INFO}Querying in session: {C_VALUE}{session_id}")
         
-        # Procesar la consulta
+        # Process the query
         response = process_query(
             query=query, 
             db_index=db_index,
@@ -751,74 +751,74 @@ def query_database(db_index: int, query: str, session_id: str = None) -> None:
             stream=True
         )
         
-        # La respuesta ya se ha mostrado al usuario a través del streaming
+        # The response has already been shown to the user through streaming
         
     except Exception as e:
-        print(f"{C_ERROR}Error al consultar: {str(e)}")
+        print(f"{C_ERROR}Error querying: {str(e)}")
 
 def handle_export_chunks_mode(args: argparse.Namespace) -> int:
     """
-    Maneja el modo de exportación de chunks a archivos TXT.
+    Handles exporting chunks to TXT files.
     
     Args:
-        args: Argumentos de línea de comandos
+        args: Command line arguments
         
     Returns:
-        int: Código de salida (0 para éxito, 1 para error)
+        int: Exit code (0 for success, 1 for error)
     """
     if not args.files:
-        logger.error(f"{C_ERROR}El argumento --files es requerido para el modo --export-chunks")
+        logger.error(f"{C_ERROR}The --files argument is required for --export-chunks mode")
         return 1
         
-    # Verificar que el directorio o archivo existe
+    # Verify that the directory or file exists
     if not os.path.exists(args.files):
-        logger.error(f"{C_ERROR}El directorio o archivo {args.files} no existe")
+        logger.error(f"{C_ERROR}The directory or file {args.files} does not exist")
         return 1
     
     try:
-        # Importar el módulo de exportación
+        # Import export module
         from modulos.view_chunks.chunk_exporter import export_chunks_for_files
         
-        # Obtener la base de datos más reciente o la especificada por índice
+        # Get most recent database or specified by index
         from modulos.session_manager.session_manager import SessionManager
         session_manager = SessionManager()
         
         if args.db_index is not None:
             db, session = session_manager.get_database_by_index(args.db_index, session_id=args.session)
         else:
-            # Usar la base de datos más reciente
+            # Use most recent database
             db, session = session_manager.get_database_by_index(0, session_id=args.session)
         
         if not db:
-            logger.error(f"{C_ERROR}No se pudo obtener una conexión a la base de datos")
+            logger.error(f"{C_ERROR}Could not get a database connection")
             return 1
         
-        print(f"\n{C_TITLE} EXPORTANDO CHUNKS {C_RESET}")
+        print(f"\n{C_TITLE} EXPORTING CHUNKS {C_RESET}")
         print_separator()
         
-        # Mostrar información sobre la base de datos que se está utilizando
-        print(f"{C_INFO}Base de datos: {C_VALUE}{session.get('id', 'unknown')}")
-        print(f"{C_INFO}Modelo: {C_VALUE}{session.get('embedding_model', 'unknown')}")
-        print(f"{C_INFO}Método de chunking: {C_VALUE}{session.get('chunking_method', 'unknown')}")
+        # Show information about the database being used
+        print(f"{C_INFO}Database: {C_VALUE}{session.get('id', 'unknown')}")
+        print(f"{C_INFO}Model: {C_VALUE}{session.get('embedding_model', 'unknown')}")
+        print(f"{C_INFO}Chunking method: {C_VALUE}{session.get('chunking_method', 'unknown')}")
         print_separator()
         
-        # Exportar chunks
+        # Export chunks
         start_time = time.time()
         results = export_chunks_for_files(args.files, db)
         elapsed_time = time.time() - start_time
         
-        # Mostrar resultados
+        # Show results
         successful = sum(1 for result in results.values() if result)
         failed = sum(1 for result in results.values() if not result)
         
         print_separator()
-        print(f"{C_SUCCESS}Exportación completada en {elapsed_time:.2f} segundos")
-        print(f"{C_SUCCESS}Archivos procesados correctamente: {successful}")
+        print(f"{C_SUCCESS}Export completed in {elapsed_time:.2f} seconds")
+        print(f"{C_SUCCESS}Successfully processed files: {successful}")
         if failed > 0:
-            print(f"{C_ERROR}Archivos con errores: {failed}")
+            print(f"{C_ERROR}Files with errors: {failed}")
         print_separator()
         
-        # Liberar recursos
+        # Release resources
         db.close()
         import gc
         gc.collect()
@@ -826,84 +826,169 @@ def handle_export_chunks_mode(args: argparse.Namespace) -> int:
         return 0
         
     except Exception as e:
-        logger.error(f"{C_ERROR}Error al exportar chunks: {e}")
+        logger.error(f"{C_ERROR}Error exporting chunks: {e}")
         return 1
 
 def show_resource_status() -> int:
     """
-    Muestra el estado actual del ResourceManager y sus métricas.
+    Shows the current status of the ResourceManager and its metrics.
     
     Returns:
-        int: Código de salida (0 para éxito, 1 para error)
+        int: Exit code (0 for success, 1 for error)
     """
     try:
         from modulos.resource_management.resource_manager import ResourceManager
         from modulos.utils.formatting import print_header, print_separator, C_HIGHLIGHT, C_VALUE, C_INFO, C_ERROR, C_RESET, C_SUCCESS
         import pprint
 
-        print_header("ESTADO DEL GESTOR DE RECURSOS")
+        print_header("RESOURCE MANAGER STATUS")
 
-        # Obtener instancia (debe estar inicializada previamente en el flujo normal)
+        # Get instance (must be initialized previously in normal flow)
         resource_manager = ResourceManager()
 
-        # Forzar actualización de métricas para obtener los valores más recientes
+        # Force update of metrics to get latest values
         resource_manager.update_metrics()
         
         metrics = resource_manager.metrics
         static_info = resource_manager.get_system_static_info()
 
-        print(f"{C_HIGHLIGHT}Información Estática del Sistema:{C_RESET}")
+        print(f"{C_HIGHLIGHT}Static System Information:{C_RESET}")
         if "error" in static_info:
-            print(f"{C_ERROR}  Error al obtener información estática: {static_info['error']}{C_RESET}")
+            print(f"{C_ERROR}  Error getting static information: {static_info['error']}{C_RESET}")
         else:
             print(f"{C_INFO}  OS: {C_VALUE}{static_info.get('os_platform', 'N/A')} {static_info.get('os_release', '')}{C_RESET}")
-            print(f"{C_INFO}  Arquitectura: {C_VALUE}{static_info.get('architecture', 'N/A')}{C_RESET}")
+            print(f"{C_INFO}  Architecture: {C_VALUE}{static_info.get('architecture', 'N/A')}{C_RESET}")
             print(f"{C_INFO}  Python: {C_VALUE}{static_info.get('python_version', 'N/A')}{C_RESET}")
             print(f"{C_INFO}  CPU Cores (L/F): {C_VALUE}{static_info.get('cpu_cores_logical', 'N/A')} / {static_info.get('cpu_cores_physical', 'N/A')}{C_RESET}")
-            print(f"{C_INFO}  RAM Total: {C_VALUE}{static_info.get('total_ram_gb', 'N/A')} GB{C_RESET}")
+            print(f"{C_INFO}  Total RAM: {C_VALUE}{static_info.get('total_ram_gb', 'N/A')} GB{C_RESET}")
         print_separator()
 
-        print(f"{C_HIGHLIGHT}Métricas Dinámicas:{C_RESET}")
-        print(f"{C_INFO}  Actualización: {C_VALUE}{datetime.fromtimestamp(metrics.get('last_metrics_update_ts', 0)).strftime('%Y-%m-%d %H:%M:%S')}{C_RESET}")
-        print(f"{C_INFO}  Monitor Activo: {C_VALUE}{metrics.get('monitoring_thread_active', 'N/A')}{C_RESET}")
+        print(f"{C_HIGHLIGHT}Dynamic Metrics:{C_RESET}")
+        print(f"{C_INFO}  Update: {C_VALUE}{datetime.fromtimestamp(metrics.get('last_metrics_update_ts', 0)).strftime('%Y-%m-%d %H:%M:%S')}{C_RESET}")
+        print(f"{C_INFO}  Active Monitoring: {C_VALUE}{metrics.get('monitoring_thread_active', 'N/A')}{C_RESET}")
         print_separator()
-        print(f"{C_INFO}  Uso Memoria Sistema:")
+        print(f"{C_INFO}  System Memory Usage:")
         print(f"{C_INFO}    Total: {C_VALUE}{metrics.get('system_memory_total_gb', 'N/A')} GB{C_RESET}")
-        print(f"{C_INFO}    Disponible: {C_VALUE}{metrics.get('system_memory_available_gb', 'N/A')} GB{C_RESET}")
-        print(f"{C_INFO}    Usada: {C_VALUE}{metrics.get('system_memory_used_gb', 'N/A')} GB ({metrics.get('system_memory_percent', 'N/A')} %){C_RESET}")
+        print(f"{C_INFO}    Available: {C_VALUE}{metrics.get('system_memory_available_gb', 'N/A')} GB{C_RESET}")
+        print(f"{C_INFO}    Used: {C_VALUE}{metrics.get('system_memory_used_gb', 'N/A')} GB ({metrics.get('system_memory_percent', 'N/A')} %){C_RESET}")
         print_separator()
-        print(f"{C_INFO}  Uso Memoria Proceso RAG:")
+        print(f"{C_INFO}  RAG Process Memory Usage:")
         print(f"{C_INFO}    RSS: {C_VALUE}{metrics.get('process_memory_rss_mb', 'N/A')} MB{C_RESET}")
         print(f"{C_INFO}    VMS: {C_VALUE}{metrics.get('process_memory_vms_mb', 'N/A')} MB{C_RESET}")
-        print(f"{C_INFO}    Porcentaje: {C_VALUE}{metrics.get('process_memory_percent', 'N/A')} %{C_RESET}")
+        print(f"{C_INFO}    Percentage: {C_VALUE}{metrics.get('process_memory_percent', 'N/A')} %{C_RESET}")
         print_separator()
-        print(f"{C_INFO}  Uso CPU:")
-        print(f"{C_INFO}    Sistema: {C_VALUE}{metrics.get('cpu_percent_system', 'N/A')} %{C_RESET}")
-        print(f"{C_INFO}    Proceso RAG: {C_VALUE}{metrics.get('cpu_percent_process', 'N/A')} %{C_RESET}")
+        print(f"{C_INFO}  CPU Usage:")
+        print(f"{C_INFO}    System: {C_VALUE}{metrics.get('cpu_percent_system', 'N/A')} %{C_RESET}")
+        print(f"{C_INFO}    RAG Process: {C_VALUE}{metrics.get('cpu_percent_process', 'N/A')} %{C_RESET}")
         print_separator()
-        print(f"{C_HIGHLIGHT}Componentes RAG:{C_RESET}")
-        print(f"{C_INFO}  Sesiones Activas: {C_VALUE}{metrics.get('active_sessions_rag', 'N/A')}{C_RESET}")
-        print(f"{C_INFO}  Modelos Embedding Activos: {C_VALUE}{metrics.get('active_embedding_models', 'N/A')}{C_RESET}")
+        print(f"{C_HIGHLIGHT}RAG Components:{C_RESET}")
+        print(f"{C_INFO}  Active Sessions: {C_VALUE}{metrics.get('active_sessions_rag', 'N/A')}{C_RESET}")
+        print(f"{C_INFO}  Active Embedding Models: {C_VALUE}{metrics.get('active_embedding_models', 'N/A')}{C_RESET}")
         
-        # Opcional: Mostrar configuración cargada por ResourceManager
+        # Optional: Show ResourceManager loaded configuration
         print_separator()
-        print(f"{C_HIGHLIGHT}Configuración de Gestión de Recursos Cargada:{C_RESET}")
-        print(f"{C_INFO}  Intervalo Monitoreo: {C_VALUE}{getattr(resource_manager, 'monitoring_interval_sec', 'N/A')}s{C_RESET}")
-        print(f"{C_INFO}  Umbral Memoria Agresivo: {C_VALUE}{getattr(resource_manager, 'aggressive_cleanup_threshold_mem_pct', 'N/A')}%{C_RESET}")
-        print(f"{C_INFO}  Umbral Memoria Advertencia: {C_VALUE}{getattr(resource_manager, 'warning_cleanup_threshold_mem_pct', 'N/A')}%{C_RESET}")
-        print(f"{C_INFO}  Umbral CPU Advertencia: {C_VALUE}{getattr(resource_manager, 'warning_threshold_cpu_pct', 'N/A')}%{C_RESET}")
-        print(f"{C_INFO}  Monitoreo Habilitado: {C_VALUE}{getattr(resource_manager, 'monitoring_enabled', 'N/A')}{C_RESET}")
-        print(f"{C_INFO}  Workers CPU: {C_VALUE}{getattr(resource_manager, 'default_cpu_workers', 'N/A')}{C_RESET}")
-        print(f"{C_INFO}  Workers IO: {C_VALUE}{getattr(resource_manager, 'default_io_workers', 'N/A')}{C_RESET}")
-        print(f"{C_INFO}  Max Workers Total: {C_VALUE}{getattr(resource_manager, 'max_total_workers', 'N/A')}{C_RESET}")
+        print(f"{C_HIGHLIGHT}Loaded Resource Management Configuration:{C_RESET}")
+        print(f"{C_INFO}  Monitoring Interval: {C_VALUE}{getattr(resource_manager, 'monitoring_interval_sec', 'N/A')}s{C_RESET}")
+        print(f"{C_INFO}  Aggressive Cleanup Threshold: {C_VALUE}{getattr(resource_manager, 'aggressive_cleanup_threshold_mem_pct', 'N/A')}%{C_RESET}")
+        print(f"{C_INFO}  Warning Cleanup Threshold: {C_VALUE}{getattr(resource_manager, 'warning_cleanup_threshold_mem_pct', 'N/A')}%{C_RESET}")
+        print(f"{C_INFO}  Warning CPU Threshold: {C_VALUE}{getattr(resource_manager, 'warning_threshold_cpu_pct', 'N/A')}%{C_RESET}")
+        print(f"{C_INFO}  Monitoring Enabled: {C_VALUE}{getattr(resource_manager, 'monitoring_enabled', 'N/A')}{C_RESET}")
+        print(f"{C_INFO}  CPU Workers: {C_VALUE}{getattr(resource_manager, 'default_cpu_workers', 'N/A')}{C_RESET}")
+        print(f"{C_INFO}  IO Workers: {C_VALUE}{getattr(resource_manager, 'default_io_workers', 'N/A')}{C_RESET}")
+        print(f"{C_INFO}  Max Total Workers: {C_VALUE}{getattr(resource_manager, 'max_total_workers', 'N/A')}{C_RESET}")
 
         print_separator()
         return 0
 
     except Exception as e:
-        print(f"{C_ERROR}Error al obtener el estado del gestor de recursos: {e}{C_RESET}")
-        logger.error("Error detallado en show_resource_status", exc_info=True)
+        print(f"{C_ERROR}Error getting resource manager status: {e}{C_RESET}")
+        logger.error("Detailed error in show_resource_status", exc_info=True)
         return 1
+
+def print_separator():
+    """Prints a separator line."""
+    print(Style.BRIGHT + "-" * 80)
+    
+def print_header(title: str):
+    """
+    Prints a formatted header with title.
+    
+    Args:
+        title: Title text to display
+    """
+    print("\n" + C_TITLE + f" {title} " + C_RESET)
+    print_separator()
+    
+def print_status(status_type: str, message: str):
+    """
+    Prints a formatted status message.
+    
+    Args:
+        status_type: Type of status ('success', 'error', 'warning', 'info')
+        message: Message to display
+    """
+    prefix = ""
+    color = C_INFO
+    
+    if status_type == "success":
+        prefix = "✓ "
+        color = C_SUCCESS
+    elif status_type == "error":
+        prefix = "✗ "
+        color = C_ERROR
+    elif status_type == "warning":
+        prefix = "! "
+        color = C_WARNING
+    elif status_type == "info":
+        prefix = "• "
+        color = C_INFO
+        
+    print(f"{color}{prefix}{message}{C_RESET}")
+    
+def print_help():
+    """Prints usage examples and tips."""
+    print(C_TITLE + "\n RAG SYSTEM - HELP " + C_RESET)
+    print_separator()
+    
+    print(C_SUBTITLE + "BASIC USAGE:" + C_RESET)
+    print(f"  {C_VALUE}Ingest documents:{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --ingest --files documents/{C_RESET}")
+    print()
+    print(f"  {C_VALUE}Query the system:{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --query \"What is the main topic of this document?\"{C_RESET}")
+    print()
+    print(f"  {C_VALUE}Start interactive mode:{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --query{C_RESET}")
+    print()
+    print(f"  {C_VALUE}List available sessions:{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --list-sessions{C_RESET}")
+    print()
+    print(f"  {C_VALUE}List available databases:{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --list-dbs{C_RESET}")
+    print()
+    print(f"  {C_VALUE}Show database statistics:{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --stats{C_RESET}")
+    
+    print_separator()
+    print(C_SUBTITLE + "ADDITIONAL OPTIONS:" + C_RESET)
+    print(f"  {C_VALUE}Use specific session/database:{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --query \"My question\" --db-index 2{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --query \"My question\" --session session_id{C_RESET}")
+    print()
+    print(f"  {C_VALUE}Export chunks to text files:{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --export-chunks --files documents/{C_RESET}")
+    print()
+    print(f"  {C_VALUE}Show resource manager status:{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --resources{C_RESET}")
+    print()
+    print(f"  {C_VALUE}Debug mode (more verbose):{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --query \"My question\" --debug{C_RESET}")
+    print()
+    print(f"  {C_VALUE}Database optimization:{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --optimize-db 0{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --optimize-all{C_RESET}")
+    
+    print_separator()
 
 if __name__ == "__main__":
     sys.exit(main())

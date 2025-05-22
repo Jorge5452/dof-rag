@@ -1,41 +1,41 @@
 """
-Gestión centralizada de la configuración.
+Centralized configuration management.
 
-Este módulo proporciona funciones para cargar y acceder a la configuración
-del sistema desde un único punto.
+This module provides functions to load and access the system
+configuration from a single point.
 """
 
 import os
 import logging
-from config import config  # Singleton global de configuración
+from config import config  # Global configuration singleton
 from typing import Dict, Any, Optional, List
 
 logger = logging.getLogger(__name__)
 
 def get_config() -> Any:
     """
-    Obtiene la instancia del singleton de configuración.
+    Gets the configuration singleton instance.
     
     Returns:
-        Instancia del singleton de configuración
+        Configuration singleton instance
     """
     return config
 
 def get_processing_config() -> Dict[str, Any]:
     """
-    Obtiene la configuración de procesamiento.
+    Gets the processing configuration.
     
     Returns:
-        Diccionario con la configuración de procesamiento
+        Dictionary with processing configuration
     """
     return config.get_processing_config()
 
 def get_embedding_config() -> Dict[str, Any]:
     """
-    Obtiene la configuración de embeddings.
+    Gets the embeddings configuration.
     
     Returns:
-        Diccionario con la configuración de embeddings
+        Dictionary with embeddings configuration
     """
     return config.get_embedding_config()
 
@@ -68,18 +68,18 @@ def get_ai_client_config() -> Dict[str, Any]:
 
 def get_general_config() -> Dict[str, Any]:
     """
-    Obtiene la configuración general.
+    Gets the general configuration.
     
     Returns:
-        Diccionario con la configuración general
+        Dictionary with general configuration
     """
     return config.get_general_config()
 
 def is_debug_enabled() -> bool:
     """
-    Verifica si el modo debug está habilitado.
+    Verifies if debug mode is enabled.
     
     Returns:
-        True si el modo debug está habilitado, False en caso contrario
+        True if debug mode is enabled, False otherwise
     """
     return config.get_general_config().get("debug", False) 

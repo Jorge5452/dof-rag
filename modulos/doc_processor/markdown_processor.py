@@ -6,87 +6,87 @@ import re
 
 from config import config
 
-# Configurar logging
+# Configure logging
 logger = logging.getLogger(__name__)
 
 class MarkdownProcessor:
     """
-    Clase para procesar archivos Markdown.
+    Class for processing Markdown files.
     
-    Esta clase se encarga de:
-    1. Leer archivos Markdown
-    2. Extraer metadatos
-    3. Preparar el documento para el chunking
+    This class is responsible for:
+    1. Reading Markdown files
+    2. Extracting metadata
+    3. Preparing the document for chunking
     """
     
     def __init__(self):
         """
-        Inicializa el procesador de archivos Markdown.
+        Initializes the Markdown file processor.
         """
         self.processing_config = config.get_processing_config()
-        # Patrón para detectar encabezados en Markdown
+        # Pattern to detect headers in Markdown
         self.HEADING_PATTERN = re.compile(r'^(#{1,6})\s+(.*)$')
     
     def read_markdown_file(self, document_path: str) -> str:
         """
-        Lee un archivo Markdown y retorna su contenido.
+        Reads a Markdown file and returns its content.
         
         Args:
-            document_path: Ruta del archivo Markdown.
+            document_path: Path to the Markdown file.
             
         Returns:
-            Contenido del archivo como string.
+            File content as a string.
             
         Raises:
-            FileNotFoundError: Si el archivo no existe.
+            FileNotFoundError: If the file doesn't exist.
         """
         try:
             path = Path(document_path)
             if not path.exists():
-                raise FileNotFoundError(f"El archivo {document_path} no existe")
+                raise FileNotFoundError(f"File {document_path} does not exist")
                 
             with open(path, 'r', encoding='utf-8') as file:
                 content = file.read()
                 
-            logger.info(f"Archivo Markdown leído correctamente: {document_path}")
+            logger.info(f"Markdown file read successfully: {document_path}")
             return content
         except Exception as e:
-            logger.error(f"Error al leer el archivo Markdown {document_path}: {e}")
+            logger.error(f"Error reading Markdown file {document_path}: {e}")
             raise
     
     def extract_metadata(self, document_path: str, content: Optional[str] = None) -> Dict[str, Any]:
         """
-        Extrae metadatos básicos de un documento Markdown.
+        Extracts basic metadata from a Markdown document.
         
         Args:
-            document_path: Ruta del archivo Markdown.
-            content: Contenido del archivo (opcional, si ya se ha leído).
+            document_path: Path to the Markdown file.
+            content: File content (optional, if already read).
         
         Returns:
-            Diccionario con metadatos del documento:
+            Dictionary with document metadata:
             {
-                'title': str,       # Título extraído o nombre del archivo
-                'url': str,         # URL construida como 'file://' + ruta absoluta
-                'file_path': str,   # Ruta completa del archivo
-                'file_name': str,   # Nombre del archivo sin extensión
-                'file_size': int,   # Tamaño en bytes
-                'created_at': str,  # Fecha de creación (ISO format)
-                'modified_at': str, # Fecha de modificación (ISO format)
+                'title': str,       # Extracted title or file name
+                'url': str,         # URL constructed as 'file://' + absolute path
+                'file_path': str,   # Complete file path
+                'file_name': str,   # File name without extension
+                'file_size': int,   # Size in bytes
+                'created_at': str,  # Creation date (ISO format)
+                'modified_at': str, # Modification date (ISO format)
             }
         """
         path = Path(document_path)
         
-        # Leer el contenido si no se proporciona
+        # Read content if not provided
         if content is None:
             content = self.read_markdown_file(document_path)
         
-        # Metadatos básicos del sistema de archivos
+        # Basic metadata from filesystem
         stat = path.stat()
         
-        # Intentar extraer un título del contenido
+        # Try to extract title from content
         title = self._extract_title_from_content(content) or path.stem
         
-        # Construir metadatos
+        # Build metadata
         metadata = {
             'title': title,
             'url': f"file://{path.absolute()}",
@@ -102,21 +102,21 @@ class MarkdownProcessor:
     
     def _extract_title_from_content(self, content: str) -> Optional[str]:
         """
-        Intenta extraer un título del contenido del archivo Markdown.
-        Busca encabezados de nivel 1 (# Título) o metadatos YAML frontmatter.
+        Attempts to extract a title from the Markdown file content.
+        Looks for level 1 headers (# Title) or YAML frontmatter metadata.
         
         Args:
-            content: Contenido del archivo Markdown.
+            content: Markdown file content.
             
         Returns:
-            Título extraído o None si no se encuentra.
+            Extracted title or None if not found.
         """
-        # Buscar encabezado H1 (# Título)
+        # Look for H1 header (# Title)
         h1_match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
         if h1_match:
             return h1_match.group(1).strip()
         
-        # Buscar título en frontmatter YAML
+        # Look for title in YAML frontmatter
         frontmatter_match = re.search(r'^---\s+(?:.|\n)+?title:\s*"?([^"\n]+)"?(?:.|\n)+?---', content)
         if frontmatter_match:
             return frontmatter_match.group(1).strip()
@@ -125,13 +125,13 @@ class MarkdownProcessor:
     
     def get_heading_level(self, line: str) -> Tuple[Optional[int], Optional[str]]:
         """
-        Obtiene el nivel y texto de un encabezado, o (None, None) si la línea no es un encabezado.
+        Gets the level and text of a header, or (None, None) if the line is not a header.
         
         Args:
-            line: Línea de texto a analizar.
+            line: Text line to analyze.
             
         Returns:
-            Tupla (nivel, texto) o (None, None) si no es un encabezado.
+            Tuple (level, text) or (None, None) if not a header.
         """
         match = self.HEADING_PATTERN.match(line)
         if match:
@@ -143,42 +143,42 @@ class MarkdownProcessor:
         
     def update_open_headings(self, open_headings: List[Tuple[int, str]], line: str) -> List[Tuple[int, str]]:
         """
-        Actualiza la lista de encabezados abiertos según la línea actual.
+        Updates the list of open headers according to the current line.
         
-        La estrategia es:
-        - Si se encuentra un H1, se reinicia la lista.
-        - Si la línea es un encabezado de nivel >1:
-            * Si la lista está vacía, se añade.
-            * Si el último encabezado abierto tiene un nivel menor o igual, 
-              se añade sin eliminar el anterior (para preservar hermanos).
-            * Si el nuevo encabezado es de nivel superior (número menor) 
-              al último, se preservan los de nivel inferior al nuevo y se añade.
+        The strategy is:
+        - If an H1 is found, the list is reset.
+        - If the line is a header of level >1:
+            * If the list is empty, it's added.
+            * If the last open header has a level less than or equal to the current,
+              it's added without removing the previous one (to preserve siblings).
+            * If the new header is of a higher level (smaller number) 
+              than the last one, those of a level lower than the new one are preserved and the new one is added.
               
         Args:
-            open_headings: Lista actual de encabezados abiertos [(nivel, texto), ...].
-            line: Línea de texto a analizar.
+            open_headings: Current list of open headers [(level, text), ...].
+            line: Text line to analyze.
             
         Returns:
-            Lista actualizada de encabezados abiertos.
+            Updated list of open headers.
         """
         lvl, txt = self.get_heading_level(line)
         if lvl is None:
-            # Línea sin encabezado, no se modifica el estado
+            # Line without header, state is not modified
             return open_headings
 
         if lvl == 1:
-            # Un H1 cierra todo el contexto anterior
+            # An H1 closes all previous context
             return [(1, txt)]
         else:
             if not open_headings:
                 return [(lvl, txt)]
             else:
-                # Si el último encabezado tiene un nivel menor o igual, se añade el actual
+                # If the last header has a level less than or equal, the current is added
                 if open_headings[-1][0] <= lvl:
                     open_headings.append((lvl, txt))
                 else:
-                    # Si el nuevo encabezado es de nivel superior (más importante)
-                    # solo se preservan los encabezados de nivel inferior (mayor) al nuevo
+                    # If the new header is of a higher level (more important)
+                    # only headers of a higher level (lower number) than the new one are preserved
                     new_chain = [item for item in open_headings if item[0] < lvl]
                     new_chain.append((lvl, txt))
                     open_headings = new_chain
@@ -186,31 +186,31 @@ class MarkdownProcessor:
     
     def process_document(self, document_path: str) -> Tuple[Dict[str, Any], str]:
         """
-        Procesa un documento Markdown completo.
+        Processes a complete Markdown document.
         
         Args:
-            document_path: Ruta del archivo Markdown.
+            document_path: Path to the Markdown file.
             
         Returns:
-            Tupla con (metadatos, contenido) del documento.
+            Tuple with (metadata, content) of the document.
         """
-        # Leer el contenido
+        # Read content
         content = self.read_markdown_file(document_path)
         
-        # Extraer metadatos
+        # Extract metadata
         metadata = self.extract_metadata(document_path, content)
         
         return metadata, content
     
     def process_batch(self, document_paths: List[str]) -> List[Tuple[Dict[str, Any], str]]:
         """
-        Procesa un lote de documentos Markdown.
+        Processes a batch of Markdown documents.
         
         Args:
-            document_paths: Lista de rutas de archivos Markdown.
+            document_paths: List of paths to Markdown files.
             
         Returns:
-            Lista de tuplas (metadatos, contenido) para cada documento.
+            List of tuples (metadata, content) for each document.
         """
         results = []
         
@@ -218,37 +218,37 @@ class MarkdownProcessor:
             try:
                 result = self.process_document(path)
                 results.append(result)
-                logger.info(f"Documento procesado correctamente: {path}")
+                logger.info(f"Document processed successfully: {path}")
             except Exception as e:
-                logger.error(f"Error al procesar el documento {path}: {e}")
-                # Continuar con el siguiente documento
+                logger.error(f"Error processing document {path}: {e}")
+                # Continue with the next document
         
         return results
     
     def find_markdown_files(self, directory_path: str) -> List[str]:
         """
-        Busca todos los archivos Markdown en un directorio.
+        Searches for all Markdown files in a directory.
         
         Args:
-            directory_path: Ruta del directorio a explorar.
+            directory_path: Path of the directory to explore.
             
         Returns:
-            Lista de rutas de archivos Markdown encontrados.
+            List of paths to found Markdown files.
         """
         markdown_files = []
         directory = Path(directory_path)
         
         if not directory.exists():
-            logger.warning(f"El directorio {directory_path} no existe")
+            logger.warning(f"Directory {directory_path} does not exist")
             return []
             
         if not directory.is_dir():
-            logger.warning(f"{directory_path} no es un directorio")
+            logger.warning(f"{directory_path} is not a directory")
             return []
         
-        # Buscar archivos .md y .markdown
+        # Search for .md and .markdown files
         for ext in ["*.md", "*.markdown"]:
             markdown_files.extend([str(f) for f in directory.glob(ext)])
         
-        logger.info(f"Encontrados {len(markdown_files)} archivos Markdown en {directory_path}")
+        logger.info(f"Found {len(markdown_files)} Markdown files in {directory_path}")
         return markdown_files

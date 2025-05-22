@@ -12,7 +12,7 @@ general:
 # Configuración para chunking de documentos
 chunks:
   # Método de chunking a utilizar (character, token, context, page)
-  method: "page" 
+  method: "token" 
   
   # Formato de encabezado por defecto (standard, simple)
   # standard: Formato detallado con encabezados Markdown
@@ -139,7 +139,7 @@ embeddings:
 # Configuración de la base de datos
 database:
   # Tipo de base de datos (sqlite, duckdb, ...)
-  type: "sqlite"
+  type: "duckdb"
   
   # Configuración para SQLite
   sqlite:

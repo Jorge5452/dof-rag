@@ -1,36 +1,36 @@
 """
-Lógica principal del sistema RAG.
+Main logic of the RAG system.
 
-Este módulo contiene las funciones para:
-1. Procesar documentos (ingestar)
-2. Procesar consultas (query)
+This module contains functions for:
+1. Processing documents (ingestion)
+2. Processing queries (search)
 
-Orquesta todos los componentes del sistema RAG para trabajar juntos.
+It orchestrates all components of the RAG system to work together.
 """
 import logging
 import time
-import os # Añadido para concurrencia
-import sys # Añadido para stderr en wrapper
+import os
+import sys
 from pathlib import Path
 from typing import Optional, Any
-import concurrent.futures # Añadido para concurrencia
-import modulos.session_manager.session_manager # Importación añadida para resolver el warning
+import concurrent.futures
+import modulos.session_manager.session_manager
 from datetime import datetime
 
-# Configurar logging
+# Configure logging
 logger = logging.getLogger(__name__)
 
-# Importación de lo necesario para colorama
+# Import colorama for terminal formatting
 from colorama import init, Fore, Style, Back
-import gc  # Añadimos importación del garbage collector
+import gc
 
-# Añadir importación de DatabaseFactory
+# Import DatabaseFactory
 from modulos.databases.FactoryDatabase import DatabaseFactory
 
-# Inicializar colorama para que funcione en todas las plataformas
+# Initialize colorama for cross-platform compatibility
 init(autoreset=True)
 
-# Definir colores y estilos para mejorar la legibilidad
+# Define colors and styles to improve readability
 C_TITLE = Back.BLUE + Fore.WHITE + Style.BRIGHT
 C_SUBTITLE = Fore.BLUE + Style.BRIGHT
 C_SUCCESS = Fore.GREEN + Style.BRIGHT
@@ -44,7 +44,7 @@ C_PROMPT = Style.BRIGHT + Fore.GREEN
 C_RESET = Style.RESET_ALL
 C_SEPARATOR = Style.DIM + Fore.BLUE
 
-# Reducir verbosidad de logging en algunos módulos
+# Reduce logging verbosity for certain modules
 logging.getLogger('sentence_transformers').setLevel(logging.WARNING)
 logging.getLogger('modulos.databases').setLevel(logging.ERROR)
 logging.getLogger('modulos.databases.implementaciones').setLevel(logging.ERROR)
@@ -57,49 +57,49 @@ logging.getLogger('huggingface_hub').setLevel(logging.ERROR)
 
 def process_documents(file_path: str, session_name: Optional[str] = None) -> None:
     """
-    Procesa documentos desde una ruta y los ingiere en la base de datos.
+    Process documents from a path and ingest them into the database.
     
     Args:
-        file_path: Ruta al archivo o directorio a procesar
-        session_name: Nombre opcional para la sesión (usado para configurar la BD)
+        file_path: Path to file or directory to process
+        session_name: Optional session name (used for database configuration)
     """
     start_time = time.time()
     
-    # Obtener el modelo de embeddings primero para conocer las dimensiones
+    # Get the embeddings model first to know dimensions
     try:
         from modulos.embeddings.embeddings_factory import EmbeddingFactory
         embedding_manager = EmbeddingFactory().get_embedding_manager()
         embedding_dim = embedding_manager.get_dimensions()
         
-        # El nombre del modelo se obtendrá directamente de la configuración más adelante
-        # cuando se importe config para las otras configuraciones
+        # Model name will be obtained directly from configuration later
+        # when importing config for the other configurations
         
-        logger.info(f"Dimensiones de embeddings: {C_VALUE}{embedding_dim}{C_RESET}")
+        logger.info(f"Embedding dimensions: {C_VALUE}{embedding_dim}{C_RESET}")
     except Exception as e:
-        logger.error(f"{C_ERROR}Error al inicializar el modelo de embeddings: {e}")
+        logger.error(f"{C_ERROR}Error initializing embeddings model: {e}")
         return
     
-    # Crear o actualizar la base de datos
+    # Create or update database
     db = None
-    db_metadata = {}  # Almacenaremos los metadatos de la base de datos aquí
+    db_metadata = {}  # Store database metadata here
     try:
-        # Obtener configuración de la base de datos
+        # Get database configuration
         from config import config
         database_config = config.get_database_config()
         db_type = database_config.get("type", "sqlite")
         
-        # Obtener configuración de chunking
+        # Get chunking configuration
         chunks_config = config.get_chunks_config()
         chunking_method = chunks_config.get("method", "character")
         
-        # Obtener nombre del modelo directamente de la configuración
+        # Get model name directly from configuration
         embedding_config = config.get_embedding_config()
         embedding_model = embedding_config.get("model", "modernbert")
         
-        # Crear instancia de la base de datos
+        # Create database instance
         db = DatabaseFactory().get_database_instance(embedding_dim=embedding_dim)
         
-        # Guardar metadatos relevantes para la sesión unificada
+        # Save relevant metadata for unified session
         db_path = getattr(db, "_db_path", "")
         db_metadata = {
             "db_type": db_type,
@@ -111,88 +111,88 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
             "last_used": time.time()
         }
     except Exception as e:
-        logger.error(f"{C_ERROR}Error al crear o conectar con la base de datos: {e}")
+        logger.error(f"{C_ERROR}Error creating or connecting to database: {e}")
         return
     
-    # Obtener chunker y procesador Markdown
+    # Get chunker and Markdown processor
     chunker = None
     try:
         from modulos.chunks.ChunkerFactory import ChunkerFactory
         chunker = ChunkerFactory().get_chunker(embedding_model=embedding_manager)
     except Exception as e:
-        logger.error(f"{C_ERROR}Error al inicializar el chunker: {e}")
+        logger.error(f"{C_ERROR}Error initializing chunker: {e}")
         return
     
     try:
         from modulos.doc_processor.markdown_processor import MarkdownProcessor
         markdown_processor = MarkdownProcessor()
     except Exception as e:
-        logger.error(f"{C_ERROR}Error al inicializar el procesador de Markdown: {e}")
+        logger.error(f"{C_ERROR}Error initializing Markdown processor: {e}")
         return
     
-    # Buscar archivos Markdown para procesamiento
+    # Find Markdown files for processing
     md_files = []
     file_path_obj = Path(file_path).resolve()
     
     if file_path_obj.is_dir():
-        # Si es un directorio, buscar todos los archivos .md recursivamente
-        logger.info(f"Buscando archivos Markdown en {file_path_obj}...")
+        # If directory, find all .md files recursively
+        logger.info(f"Finding Markdown files in {file_path_obj}...")
         md_files = list(file_path_obj.glob("**/*.md"))
     elif file_path_obj.suffix.lower() == '.md':
-        # Si es un archivo .md específico
+        # If specific .md file
         md_files = [file_path_obj]
     else:
         if not md_files:
-            logger.error(f"El archivo especificado no es un archivo Markdown válido: {file_path}")
+            logger.error(f"The specified file is not a valid Markdown file: {file_path}")
             return
     
-    # Obtener ResourceManager y ConcurrencyManager - Una sola instancia para todo el proceso
+    # Get ResourceManager and ConcurrencyManager - Single instance for entire process
     from modulos.resource_management.resource_manager import ResourceManager
     resource_manager = ResourceManager()
     concurrency_manager = resource_manager.concurrency_manager
     
-    # Actualizar ResourceManager sobre la operación en proceso
+    # Update ResourceManager on operation in progress
     resource_manager.metrics["operation_in_progress"] = "document_processing"
     resource_manager.metrics["total_documents"] = len(md_files)
-    resource_manager.update_metrics() # Forzar actualización inicial de métricas
+    resource_manager.update_metrics() # Force initial metrics update
  
-    # Procesar cada documento
+    # Process each document
     successful_docs = 0
     failed_docs = 0
     total_files = len(md_files)
-    logger.info(f"Preparando para procesar {total_files} documentos...")
+    logger.info(f"Preparing to process {total_files} documents...")
 
-    # Lista para almacenar los archivos procesados exitosamente
+    # List to store successfully processed files
     processed_files = []
-    file_metadata = {}  # Diccionario para guardar metadatos ricos para cada archivo
+    file_metadata = {}  # Dictionary to store rich metadata for each file
 
-    # Usar concurrencia solo si hay manager y más de 1 archivo
+    # Use concurrency only if manager exists and more than 1 file
     if concurrency_manager and total_files > 1:
-        logger.info(f"Utilizando ConcurrencyManager para procesamiento paralelo de {total_files} documentos.")
+        logger.info(f"Using ConcurrencyManager for parallel processing of {total_files} documents.")
         
-        # Determinar chunksize óptimo para distribuir archivos entre workers
+        # Determine optimal chunksize to distribute files among workers
         iterable_length = len(md_files)
         chunksize = concurrency_manager.get_optimal_chunksize(
             task_type="default", 
             iterable_length=iterable_length
         )
-        logger.info(f"Tamaño de lote (chunksize) calculado para procesamiento: {chunksize}")
+        logger.info(f"Calculated batch size (chunksize) for processing: {chunksize}")
         
-        # Crear el iterador de argumentos
+        # Create arguments iterator
         args_iterator = ((str(doc_path), markdown_processor, chunker, db, resource_manager) 
                         for doc_path in md_files)
         
-        # Usar el nuevo método map_tasks que selecciona automáticamente el mejor pool
+        # Use map_tasks method that automatically selects the best pool
         results = concurrency_manager.map_tasks(
             process_single_document_wrapper,
             args_iterator,
             chunksize=chunksize,
-            task_type="default",  # El tipo de tarea determinará el pool óptimo
-            # Sugerencia: usar ProcessPool para más de 10 archivos
+            task_type="default",  # Task type will determine optimal pool
+            # Tip: use ProcessPool for more than 10 files
             prefer_process=total_files >= 10
         )
         
-        # Procesar los resultados de la ejecución paralela
+        # Process results from parallel execution
         if results:
             processed_count = 0
             for doc_path, result in zip(md_files, results):
@@ -200,10 +200,10 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
                 if isinstance(result, dict) and result.get("document_id") is not None:
                     successful_docs += 1
                     doc_id = result.get("document_id")
-                    # Agregar a la lista de archivos procesados
+                    # Add to processed files list
                     processed_files.append(str(doc_path))
                     
-                    # Guardar metadatos enriquecidos (para estadísticas aunque no se usen en la sesión)
+                    # Save rich metadata (for statistics even if not used in session)
                     file_path_str = str(doc_path)
                     file_metadata[file_path_str] = {
                         "size": doc_path.stat().st_size,
@@ -211,24 +211,24 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
                         "processing_time": result.get("processing_time", 0)
                     }
                     
-                    logger.info(f"({processed_count}/{total_files}) Documento procesado OK: {doc_path} -> ID: {doc_id}")
+                    logger.info(f"({processed_count}/{total_files}) Document processed OK: {doc_path} -> ID: {doc_id}")
                 else:
                     failed_docs += 1
-                    logger.error(f"({processed_count}/{total_files}) Error procesando: {doc_path}")
+                    logger.error(f"({processed_count}/{total_files}) Error processing: {doc_path}")
         else:
-            logger.error(f"{C_ERROR}No se recibieron resultados del procesamiento paralelo.")
-            failed_docs = total_files  # Marcar todos como fallidos si no hay resultados
+            logger.error(f"{C_ERROR}No results received from parallel processing.")
+            failed_docs = total_files  # Mark all as failed if no results
     else:
-        # Procesamiento secuencial si no hay ConcurrencyManager o es un solo archivo
-        logger.info("Procesando secuencialmente.")
+        # Sequential processing if no ConcurrencyManager or is single file
+        logger.info("Processing sequentially.")
         for i, doc_path in enumerate(md_files):
-            logger.info(f"({i+1}/{total_files}) Procesando: {doc_path}")
+            logger.info(f"({i+1}/{total_files}) Processing: {doc_path}")
             result = process_single_document(str(doc_path), markdown_processor, chunker, db, resource_manager)
             if isinstance(result, dict) and result.get("document_id") is not None:
                 successful_docs += 1
                 processed_files.append(str(doc_path))
                 
-                # Guardar metadatos enriquecidos (para estadísticas)
+                # Save rich metadata (for statistics)
                 file_path_str = str(doc_path)
                 file_metadata[file_path_str] = {
                     "size": doc_path.stat().st_size,
@@ -238,21 +238,21 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
             else:
                 failed_docs += 1
 
-    # Calcular tiempo transcurrido para el procesamiento
+    # Calculate elapsed time for processing
     elapsed_time = time.time() - start_time
     
-    # Optimizar la base de datos después de insertar todos los documentos
-    logger.info("Optimizando base de datos...")
+    # Optimize database after inserting all documents
+    logger.info("Optimizing database...")
     db.optimize_database()
     
-    # Si el procesamiento fue exitoso, crear la sesión unificada
+    # If processing was successful, create unified session
     if successful_docs > 0:
         try:
-            # Calcular estadísticas para la sesión
+            # Calculate statistics for session
             total_chunks_processed = sum(metadata.get("chunks", 0) for metadata in file_metadata.values())
             total_processing_time = sum(metadata.get("processing_time", 0) for metadata in file_metadata.values())
             
-            # Actualizar metadatos de la base de datos con estadísticas
+            # Update database metadata with statistics
             db_metadata.update({
                 "total_chunks": total_chunks_processed,
                 "total_files": successful_docs,
@@ -261,55 +261,64 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
                 "processing_date": datetime.now().isoformat()
             })
             
-            # Crear o obtener sesión a través del nuevo método unificado
+            # Create or get session through new unified method
             from modulos.session_manager.session_manager import SessionManager
             session_manager = SessionManager()
             
-            # Si se proporcionó un nombre de sesión, usarlo
+            # If session name was provided, use it
             if session_name:
                 db_metadata["name"] = session_name
                 db_metadata["id"] = session_name
             
-            # Crear la sesión unificada con todos los metadatos
+            # Create unified session with all metadata
             unified_session_id = session_manager.create_unified_session(
                 database_metadata=db_metadata,
                 files_list=processed_files
             )
             
-            logger.info(f"Sesión unificada creada correctamente: {unified_session_id}")
+            logger.info(f"Unified session created successfully: {unified_session_id}")
         except Exception as e:
-            logger.error(f"{C_ERROR}Error al crear sesión unificada: {e}")
+            logger.error(f"{C_ERROR}Error creating unified session: {e}")
     else:
-        logger.warning(f"{C_WARNING}No se creó ninguna sesión porque no se procesaron documentos exitosamente.")
+        logger.warning(f"{C_WARNING}No session created because no documents processed successfully.")
 
-    # Mostrar resumen de procesamiento
-    logger.info(f"Procesamiento completo en {C_VALUE}{elapsed_time:.2f}{C_RESET} segundos")
-    logger.info(f"Documentos procesados correctamente: {C_VALUE}{successful_docs}{C_RESET}")
+    # Show processing summary
+    logger.info(f"Processing completed in {C_VALUE}{elapsed_time:.2f}{C_RESET} seconds")
+    logger.info(f"Documents processed correctly: {C_VALUE}{successful_docs}{C_RESET}")
     
     if failed_docs:
-        logger.warning(f"Documentos con errores: {C_VALUE}{failed_docs}{C_RESET}")
+        logger.warning(f"Documents with errors: {C_VALUE}{failed_docs}{C_RESET}")
     
-    # Liberar recursos
+    # Release resources
     if resource_manager and resource_manager.memory_manager:
-        logger.info("Realizando limpieza final de memoria...")
+        logger.info("Performing final memory cleanup...")
         resource_manager.memory_manager.cleanup(reason="processing_completed")
     
-    logger.info("Proceso de ingestión completado")
+    logger.info("Ingestion process completed")
 
-# Wrapper para usar con map, ya que process_single_document toma múltiples args
 def process_single_document_wrapper(args_tuple):
-    # Desempaquetar argumentos
+    """
+    Wrapper function for use with concurrent processing.
+    
+    Unpacks arguments tuple and calls process_single_document.
+    Handles exceptions at worker level to avoid worker crashes.
+    
+    Args:
+        args_tuple: Tuple containing (file_path, markdown_processor, chunker, db, resource_manager)
+        
+    Returns:
+        Result from process_single_document or None if error occurs
+    """
+    # Unpack arguments
     file_path, markdown_processor, chunker, db, resource_manager = args_tuple
-    # Llamar a la función original
-    # Añadir manejo de excepciones aquí por si la función falla dentro del proceso worker
+    
+    # Call original function with exception handling
     try:
         return process_single_document(file_path, markdown_processor, chunker, db, resource_manager)
     except Exception as e:
-        # Loggear el error desde el proceso worker puede ser complicado dependiendo de la config de logging.
-        # Es más seguro retornar None y loggear el error en el bucle principal que recoge resultados.
-        # logger.error(...) # Podría no funcionar como se espera
-        print(f"[Worker Error] Error procesando {os.path.basename(file_path)}: {e}", file=sys.stderr) # Imprimir a stderr
-        return None 
+        # Print to stderr since worker logging might not be properly configured
+        print(f"[Worker Error] Error processing {os.path.basename(file_path)}: {e}", file=sys.stderr)
+        return None
 
 def process_single_document(file_path: str, 
                            markdown_processor: Any, 
@@ -317,28 +326,28 @@ def process_single_document(file_path: str,
                            db: Any,
                            resource_manager: Any = None) -> Optional[int]:
     """
-    Procesa un único documento Markdown y lo inserta en la base de datos.
-    Utiliza un enfoque de streaming para procesar documentos grandes sin
-    cargar todos los chunks en memoria simultáneamente, y garantiza que
-    todo el procesamiento se realiza en una única transacción.
+    Processes a single Markdown document and inserts it into the database.
+    Uses a streaming approach to process large documents without
+    loading all chunks into memory simultaneously, and ensures
+    that all processing is done in a single transaction.
     
     Args:
-        file_path: Ruta al archivo Markdown
-        markdown_processor: Instancia del procesador de Markdown
-        chunker: Instancia del chunker
-        db: Instancia de la base de datos
-        resource_manager: Instancia de ResourceManager
+        file_path: Path to Markdown file
+        markdown_processor: Markdown processor instance
+        chunker: Chunker instance
+        db: Database instance
+        resource_manager: ResourceManager instance
         
     Returns:
-        ID del documento insertado o None si falla
+        Inserted document ID or None if failed
     """
     if resource_manager is None:
-        # Solo si no recibimos el resource_manager como parámetro
+        # Only if we didn't receive resource_manager as parameter
         try:
             from modulos.resource_management.resource_manager import ResourceManager
             resource_manager = ResourceManager()
         except Exception as e:
-            logger.error(f"Error al inicializar ResourceManager: {e}")
+            logger.error(f"Error initializing ResourceManager: {e}")
             resource_manager = None
     
     memory_manager = None
@@ -346,101 +355,101 @@ def process_single_document(file_path: str,
         memory_manager = resource_manager.memory_manager
 
     try:
-        # Obtener configuración de optimización de memoria
+        # Get memory optimization configuration
         from config import config
         chunks_config = config.get_chunks_config()
         memory_config = chunks_config.get("memory_optimization", {})
         
-        # Configurar intervalo para verificaciones de memoria
-        memory_check_interval = memory_config.get("memory_check_interval", 15.0)  # Revisar memoria cada 15 segundos
+        # Configure interval for memory checks
+        memory_check_interval = memory_config.get("memory_check_interval", 15.0)  # Check memory every 15 seconds
         
-        # Procesar el documento para obtener metadatos y contenido
+        # Process document to get metadata and content
         start_processing_time = time.time()
         metadata, content = markdown_processor.process_document(file_path)
         
-        # Determinar si necesitamos GC antes de continuar con el procesamiento principal
-        if memory_manager and (time.time() - start_processing_time > 2.0):  # Si procesamiento tardó más de 2 segundos
-            # El documento podría ser grande, hacer limpieza preventiva
-            logger.debug("Realizando limpieza preventiva antes de procesar documento grande")
+        # Determine if we need GC before continuing with main processing
+        if memory_manager and (time.time() - start_processing_time > 2.0):  # If processing took more than 2 seconds
+            # Document could be large, do preventive cleanup
+            logger.debug("Performing preventive cleanup before processing large document")
             memory_manager.cleanup(aggressive=False, reason="pre_doc_processing")
         
-        # Obtener el título del documento desde los metadatos
+        # Get document title from metadata
         doc_title = metadata.get('title', 'Documento')
         
-        # Determinar el tamaño del documento para posible suspensión de verificaciones
-        document_size_kb = len(content) / 1024  # Tamaño aproximado en KB
+        # Determine document size for possible suspension of checks
+        document_size_kb = len(content) / 1024  # Approximate size in KB
         
-        # Determinar si el documento es grande (para ajustar estrategias)
-        is_large_document = document_size_kb > 500  # Documentos > 500KB son considerados grandes
+        # Determine if document is large (to adjust strategies)
+        is_large_document = document_size_kb > 500  # Documents > 500KB are considered large
         
-        # Ajustar estrategia de procesamiento basado en tamaño
+        # Adjust processing strategy based on size
         if is_large_document:
-            logger.info(f"Documento grande detectado ({document_size_kb:.1f}KB). Ajustando parámetros de procesamiento.")
+            logger.info(f"Large document detected ({document_size_kb:.1f}KB). Adjusting processing parameters.")
             
-            # Para documentos grandes, considerar suspensión de verificaciones
+            # For large documents, consider suspension of checks
             if resource_manager:
-                if document_size_kb > 5000:  # Documento extremadamente grande (>5MB)
-                    # Suspender verificaciones por más tiempo para documentos muy grandes
+                if document_size_kb > 5000:  # Extremely large document (>5MB)
+                    # Suspend checks for longer time for very large documents
                     resource_manager.auto_suspend_if_needed(document_size_kb=document_size_kb, duration_seconds=600)
-                    logger.info("Verificaciones suspendidas para optimizar procesamiento de documento muy grande")
+                    logger.info("Checks suspended for optimizing processing of very large document")
                 else:
                     resource_manager.auto_suspend_if_needed(document_size_kb=document_size_kb, duration_seconds=300)
-                    logger.info("Verificaciones suspendidas para documento grande")
+                    logger.info("Checks suspended for large document")
         else:
-            logger.info(f"Documento de tamaño estándar ({document_size_kb:.1f}KB). Manteniendo configuración normal.")
+            logger.info(f"Standard size document ({document_size_kb:.1f}KB). Keeping normal configuration.")
             
-            # Para documentos pequeños, considerar suspensión temporal breve
-            if resource_manager and document_size_kb < 50:  # Documentos muy pequeños
+            # For small documents, consider temporary brief suspension
+            if resource_manager and document_size_kb < 50:  # Very small documents
                 resource_manager.auto_suspend_if_needed(document_size_kb=document_size_kb, duration_seconds=30)
         
-        # Insertar metadatos del documento primero
+        # Insert document metadata first
         document_id = db.insert_document_metadata(metadata)
         
         if not document_id:
-            logger.error(f"{C_ERROR}Error al insertar metadatos del documento {file_path}")
+            logger.error(f"{C_ERROR}Error inserting document metadata {file_path}")
             return None
         
-        # Iniciar una única transacción para todo el procesamiento del documento
+        # Start a single transaction for entire document processing
         db.begin_transaction()
         
-        # Variables para estadísticas y control
+        # Variables for statistics and control
         processed_chunks = 0
         start_time = time.time()
         last_memory_check_time = time.time()
         embedding_dim = chunker.model.get_dimensions()
         
         try:
-            # Generar, procesar e insertar chunks uno por uno usando streaming
-            # Sin acumularlos en un buffer para minimizar uso de memoria
+            # Generate, process, and insert chunks one by one using streaming
+            # Without accumulating them in a buffer to minimize memory usage
             for chunk in chunker.process_content_stream(content, doc_title=doc_title):
-                logger.debug(f"Procesando chunk con header: {chunk.get('header', 'Sin header')} y longitud de texto: {len(chunk.get('text', ''))} caracteres")
+                logger.debug(f"Processing chunk with header: {chunk.get('header', 'No header')} and text length: {len(chunk.get('text', ''))} characters")
                 
-                # Verificar si el modelo está inicializado
+                # Verify if model is initialized
                 if chunker.model is None:
-                    logger.error(f"{C_ERROR}Error: El modelo de embeddings en chunker es None. No se puede generar embedding.")
+                    logger.error(f"{C_ERROR}Error: Embedding model in chunker is None. Cannot generate embedding.")
                     db.rollback_transaction()
                     return None
                 
                 try:
-                    # Extraer datos del chunk
+                    # Extract data from chunk
                     header = chunk.get('header', '')
                     text = chunk.get('text', '')
                     page = chunk.get('page', '')
                     
-                    # Verificar datos
+                    # Verify data
                     if not text:
-                        logger.warning("Chunk con texto vacío, saltando")
+                        logger.warning("Empty text chunk, skipping")
                         continue
                     
-                    # Generar embedding para este chunk individualmente
+                    # Generate embedding for this individual chunk
                     try:
                         embedding = chunker.model.get_document_embedding(header, text)
                     except Exception as e:
-                        logger.error(f"Error al generar embedding: {e}")
-                        # Crear embedding vacío como fallback
+                        logger.error(f"Error generating embedding: {e}")
+                        # Create empty embedding as fallback
                         embedding = [0.0] * embedding_dim
                     
-                    # Preparar chunk final con su embedding
+                    # Prepare final chunk with its embedding
                     prepared_chunk = {
                         'text': text,
                         'header': header,
@@ -449,59 +458,59 @@ def process_single_document(file_path: str,
                         'embedding_dim': embedding_dim
                     }
                     
-                    # Insertar directamente este chunk en la base de datos (dentro de la misma transacción)
+                    # Insert directly this chunk into the database (within the same transaction)
                     db.insert_single_chunk(document_id, prepared_chunk)
                     processed_chunks += 1
                     
-                    # Mostrar progreso periódicamente
-                    if processed_chunks % 10 == 0:  # Mostrar cada 10 chunks procesados
+                    # Show progress periodically
+                    if processed_chunks % 10 == 0:  # Show every 10 processed chunks
                         elapsed = time.time() - start_time
                         rate = processed_chunks / elapsed if elapsed > 0 else 0
-                        logger.info(f"Procesados {C_VALUE}{processed_chunks}{C_RESET} chunks ({C_VALUE}{rate:.2f}{C_RESET} chunks/seg)")
+                        logger.info(f"Processed {C_VALUE}{processed_chunks}{C_RESET} chunks ({C_VALUE}{rate:.2f}{C_RESET} chunks/sec)")
                     
-                    # Verificar uso de memoria periódicamente
+                    # Verify memory usage periodically
                     current_time = time.time()
                     if memory_manager and (current_time - last_memory_check_time) >= memory_check_interval:
                         last_memory_check_time = current_time
                         memory_manager.check_memory_usage()
                     
-                    # Liberar referencias explícitamente para ayudar al GC
+                    # Explicitly release references to help GC
                     del embedding
                     del prepared_chunk
                     
                 except Exception as chunk_e:
-                    logger.error(f"{C_ERROR}Error al procesar/insertar chunk individual: {chunk_e}", exc_info=True)
+                    logger.error(f"{C_ERROR}Error processing/inserting individual chunk: {chunk_e}", exc_info=True)
             
-            # Confirmar transacción - todo el documento se confirma de una vez
+            # Confirm transaction - entire document is confirmed at once
             db.commit_transaction()
             
-            # Limpieza final después del procesamiento completo
+            # Final cleanup after complete processing
             if memory_manager:
-                # Solicitar limpieza pero ajustar agresividad según el tamaño del documento procesado
+                # Request cleanup but adjust aggressiveness based on size of processed document
                 is_large_processing = processed_chunks > 100 or document_size_kb > 1000
                 memory_manager.cleanup(
                     aggressive=is_large_processing,  
                     reason=f"post_doc_processing_{processed_chunks}_chunks"
                 )
             else:
-                # Si no hay memory_manager, usar GC tradicional
+                # If no memory_manager, use traditional GC
                 gc.collect()
             
-            # Evaluar al final del procesamiento si debemos reconsiderar la suspensión
-            # basado en el número total de chunks procesados
+            # Evaluate at the end of processing if we should reconsider suspension
+            # based on total chunks processed
             if resource_manager and is_large_document and processed_chunks < 10:
-                logger.info(f"Documento grande ({document_size_kb:.1f}KB) pero generó pocos chunks ({processed_chunks}). Reconsiderando suspensión.")
+                logger.info(f"Large document ({document_size_kb:.1f}KB) but generated few chunks ({processed_chunks}). Reconsidering suspension.")
                 resource_manager.auto_suspend_if_needed(
                     document_size_kb=document_size_kb, 
                     chunk_count=processed_chunks,
-                    duration_seconds=60  # Suspensión más corta para documentos que resultaron ser simples
+                    duration_seconds=60  # Shorter suspension for documents that turned out to be simple
                 )
                 
-            # Calcular estadísticas finales
+            # Calculate final statistics
             total_time = time.time() - start_time
-            logger.info(f"Completado: {file_path} -> {C_VALUE}{processed_chunks}{C_RESET} chunks procesados en {C_VALUE}{total_time:.2f}{C_RESET}s")
+            logger.info(f"Completed: {file_path} -> {C_VALUE}{processed_chunks}{C_RESET} chunks processed in {C_VALUE}{total_time:.2f}{C_RESET}s")
             if processed_chunks > 0:
-                logger.info(f"Rendimiento: {C_VALUE}{processed_chunks / total_time:.2f}{C_RESET} chunks/seg, {C_VALUE}{document_size_kb / total_time:.2f}{C_RESET} KB/seg")
+                logger.info(f"Performance: {C_VALUE}{processed_chunks / total_time:.2f}{C_RESET} chunks/sec, {C_VALUE}{document_size_kb / total_time:.2f}{C_RESET} KB/sec")
             
             return {
                 "document_id": document_id, 
@@ -513,189 +522,182 @@ def process_single_document(file_path: str,
             }
             
         except Exception as e:
-            # Rollback en caso de error - toda la transacción se revierte
-            logger.error(f"{C_ERROR}Error procesando chunks de {file_path}: {e}", exc_info=True)
+            # Rollback in case of error - entire transaction is rolled back
+            logger.error(f"{C_ERROR}Error processing chunks of {file_path}: {e}", exc_info=True)
             try:
                 db.rollback_transaction()
-                logger.info("Transacción revertida.")
+                logger.info("Transaction rolled back.")
             except Exception as rollback_e:
-                logger.error(f"Error adicional al intentar rollback: {rollback_e}")
+                logger.error(f"Additional error when trying to rollback: {rollback_e}")
             return None
     except Exception as e:
-        logger.error(f"{C_ERROR}Error procesando documento {file_path}: {e}", exc_info=True)
+        logger.error(f"{C_ERROR}Error processing document {file_path}: {e}", exc_info=True)
         return None
 
 def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None, 
                  session_id: Optional[str] = None, db_index: Optional[int] = None) -> str:
     """
-    Procesa una consulta utilizando el sistema RAG.
+    Processes a query using the RAG system.
+    
+    This function:
+    1. Retrieves relevant chunks from the database based on query embedding
+    2. Sends these chunks as context to an AI model
+    3. Returns the generated response
     
     Args:
-        query: Texto de la consulta
-        n_chunks: Número de chunks a recuperar
-        model: Modelo de IA a utilizar (opcional)
-        session_id: ID de sesión específica a utilizar (opcional)
-        db_index: Índice de la base de datos a utilizar (opcional)
+        query: Query text
+        n_chunks: Number of chunks to retrieve
+        model: AI model to use (optional)
+        session_id: Specific session ID to use (optional)
+        db_index: Index of database to use (optional)
         
     Returns:
-        Respuesta generada
+        Generated response text
     """
-    # Importaciones bajo demanda
+    # Imports on demand
     from config import config  
     from modulos.session_manager.session_manager import SessionManager
     from modulos.embeddings.embeddings_factory import EmbeddingFactory
     from modulos.clientes.FactoryClient import ClientFactory
     
     try:
-        # Usar session_manager para obtener la configuración correcta
+        # Use session_manager to get correct configuration
         session_manager = SessionManager()
     
-        # Obtener la base de datos y configuración
+        # Get database and configuration
         if db_index is not None:
-            # Si se especificó un índice, usamos ese índice (pasando el session_id si está disponible)
+            # If specific index requested, use that index
             db, session = session_manager.get_database_by_index(db_index, session_id=session_id)
         elif session_id:
-            # Si se especificó un ID de sesión pero no un índice, usamos la base de datos más reciente asociada a la sesión
+            # If session ID provided but no index, use most recent database for that session
             session_dbs = session_manager.get_session_databases(session_id)
             if session_dbs:
-                # Usar la primera base de datos asociada a la sesión (la más reciente)
                 db, session = session_manager.get_database_by_index(0, session_id=session_id)
             else:
-                # Si no hay bases de datos asociadas, usar la más reciente en general
                 db, session = session_manager.get_database_by_index(0)
         else:
-            # Si no se especificó nada, usamos la base de datos más reciente
+            # Default: use most recent database
             db, session = session_manager.get_database_by_index(0)
         
-        # Inicialización del modelo específico que usa esta base de datos
+        # Initialize embedding model that matches the database
         embedding_model = session.get("embedding_model", "modernbert")
         embedding_manager = EmbeddingFactory.get_embedding_manager(embedding_model)
         
         try:
-            # Cargar modelo con manejo de excepciones específico
             embedding_manager.load_model()
         except Exception as e:
-            logger.error(f"Error al cargar el modelo de embeddings: {e}")
-            return "No se pudo cargar el modelo de embeddings. Por favor, verifica la configuración o intenta con otra base de datos."
+            logger.error(f"Error loading embeddings model: {e}")
+            return "Could not load embeddings model. Please check configuration or try with another database."
         
-        # Generar embedding de la consulta
+        # Generate embedding for the query
         query_embedding = embedding_manager.get_query_embedding(query)
         
-        # Buscar los chunks más relevantes con manejo de errores mejorado
+        # Search for most relevant chunks
         try:
             search_results = db.vector_search(query_embedding, n_results=n_chunks)
         except Exception as e:
-            logger.error(f"Error en la búsqueda vectorial: {e}")
-            return "Hubo un problema al buscar información relevante. Es posible que la base de datos seleccionada no sea compatible con la consulta actual."
+            logger.error(f"Vector search error: {e}")
+            return "There was a problem finding relevant information. The selected database may not be compatible with the current query."
         
         if not search_results:
-            return "No se encontró información relevante para responder a esta consulta."
+            return "No relevant information found to answer this query."
         
-        # Usar el modelo de IA especificado o el predeterminado
+        # Determine which AI model to use
         if model is None:
             ai_config = config.get_ai_client_config()
             model = ai_config.get("type", "openai")
             
-        # Obtener cliente de IA con manejo de errores mejorado
+        # Initialize AI client
         try:
             ai_client = ClientFactory.get_client(client_type=model)
         except Exception as e:
-            logger.error(f"Error al crear cliente IA: {e}")
-            return "No se pudo inicializar el modelo de IA. Por favor, verifica tu configuración y API keys."
+            logger.error(f"Error creating AI client: {e}")
+            return "Could not initialize AI model. Please check your configuration and API keys."
         
-        # Preparar contexto para la respuesta
+        # Prepare context chunks for the response
         context_chunks = []
         for chunk in search_results:
             context_chunks.append({
                 "text": chunk["text"],
                 "header": chunk.get("header", ""),
                 "similarity": chunk.get("similarity", 0.0),
-                "page": chunk.get("page", "N/A")  # Asegurar que se incluya el número de página
+                "page": chunk.get("page", "N/A")
             })
         
-        # Generar respuesta con manejo de errores mejorado
+        # Generate response
         try:
-            # Siempre mostrar el contexto usado para la respuesta
             response = ai_client.generate_response(query, context=context_chunks, show_context=True)
             
-            # Si estamos usando streaming, necesitamos asegurarnos de que se muestre el resultado completo
+            # Handle streaming responses
             if hasattr(response, '__iter__') and not isinstance(response, str):
-                # Consumir el generador y devolver el texto completo
                 try:
-                    # Intentar iterar sobre la respuesta
+                    # Collect all chunks from the generator
                     chunks = list(response)
-                    
-                    # Unir los chunks en una respuesta completa
                     full_response = "".join(chunks)
                     
                     if full_response:
                         return full_response
+                    elif hasattr(ai_client, 'last_response_text') and ai_client.last_response_text:
+                        # Fallback to stored response text
+                        return ai_client._format_response_with_context(ai_client.last_response_text, query)
                     else:
-                        # Si la respuesta está vacía después de iterar, significa que el generador no produjo nada
-                        # En este caso, vamos a obtener la respuesta original de Gemini directamente
-                        if hasattr(ai_client, 'last_response_text') and ai_client.last_response_text:
-                            return ai_client._format_response_with_context(ai_client.last_response_text, query)
-                        else:
-                            # Si todo lo demás falla, usar una respuesta genérica
-                            return "La respuesta se generó correctamente pero no se pudo mostrar. Por favor, intenta nuevamente."
+                        return "Response generated successfully but could not be displayed. Please try again."
                 except Exception as e:
-                    # Si hay un error al iterar, intentar usar la respuesta como string
+                    # If iteration fails, try using response as string
                     if response:
                         return str(response)
                     else:
-                        return "Error al procesar la respuesta. Por favor, intenta nuevamente."
+                        return "Error processing response. Please try again."
             
-            # Si llegamos aquí, ya tenemos la respuesta como texto
-            # Nos aseguramos de que la respuesta no sea None
+            # Handle null response
             if response is None:
-                return "No se recibió respuesta del modelo. Esto puede ser un problema de conexión o API."
+                return "No response received from model. This may be a connection or API problem."
                 
-            # Retornamos la respuesta (ya formateada si show_context=True)
+            # Return string response
             return response
             
         except Exception as e:
-            logger.error(f"Error al generar respuesta: {e}")
-            return "Hubo un problema al generar la respuesta. Verifica tu configuración y conexión a internet."
+            logger.error(f"Error generating response: {e}")
+            return "There was a problem generating response. Please check your configuration and internet connection."
         
     except Exception as e:
-        # Actualizar el timestamp de último uso de la base de datos si es posible
+        # Update database last use timestamp if possible
         try:
             if 'session' in locals() and 'db_name' in session:
                 db_name = session.get("id", "")
-                # Usar register_database para actualizar el timestamp
+                # Update timestamp
                 session_manager.register_database(db_name, {
                     "last_used": time.time(),
-                    **session  # Mantener el resto de metadatos
+                    **session
                 })
         except Exception as update_err:
-            # No mostramos este error al usuario final
-            logger.debug(f"Error al actualizar metadatos: {update_err}")
+            logger.debug(f"Error updating metadata: {update_err}")
     
-        # Manejo de errores generales
+        # Format error message
         try:
             error_msg = f"{e.__class__.__name__}: {str(e)}"
         except Exception:
-            error_msg = "Error desconocido durante el procesamiento"
+            error_msg = "Unknown error during processing"
             
-        logger.error(f"Error al procesar consulta: {error_msg}")
+        logger.error(f"Error processing query: {error_msg}")
         
-        # Mensaje de error más amigable
+        # Return user-friendly error message
         if "database" in error_msg.lower():
-            return "Error al acceder a la base de datos. Por favor, verifica que la base de datos seleccionada existe y es accesible."
+            return "Error accessing database. Please check that the selected database exists and is accessible."
         elif "embedding" in error_msg.lower() or "model" in error_msg.lower():
-            return "Error con el modelo de embeddings. Por favor, verifica la configuración o intenta con otro modelo."
+            return "Embedding model error. Please check configuration or try with another model."
         else:
-            return f"Se produjo un error al procesar tu consulta: {error_msg}. Por favor, intenta nuevamente o selecciona otra base de datos."
+            return f"An error occurred processing your query: {error_msg}. Please try again or select another database."
 
 def verify_database_file(db_path: str) -> bool:
     """
-    Verifica que el archivo físico de la base de datos existe.
+    Verifies that the physical database file exists.
     
     Args:
-        db_path: Ruta al archivo de la base de datos
+        db_path: Path to database file
         
     Returns:
-        bool: True si el archivo existe, False en caso contrario
+        bool: True if file exists, False otherwise
     """
     if db_path == ":memory:":
         return True
@@ -705,8 +707,8 @@ def verify_database_file(db_path: str) -> bool:
     
     if exists:
         size_kb = file_path.stat().st_size / 1024
-        logger.info(f"{C_SUCCESS}✓ Base de datos verificada: {C_VALUE}{db_path} ({C_SUCCESS}{size_kb:.2f} KB{C_INFO})")
+        logger.info(f"{C_SUCCESS}✓ Database verified: {C_VALUE}{db_path} ({C_SUCCESS}{size_kb:.2f} KB{C_INFO})")
     else:
-        logger.error(f"{C_ERROR}✗ Archivo de base de datos no encontrado: {C_VALUE}{db_path}")
+        logger.error(f"{C_ERROR}✗ Database file not found: {C_VALUE}{db_path}")
         
     return exists
