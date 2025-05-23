@@ -7,8 +7,10 @@ either for document ingestion or for queries.
 Usage:
     Ingestion: python run.py --ingest --files [directory]
     Query: python run.py --query "Your question here?"
+    Ingest and export: python run.py --ingest --export-chunks --files [directory]
     List sessions: python run.py --list-sessions
     List databases: python run.py --list-dbs
+    Export chunks: python run.py --export-chunks --files [directory]
 """
 
 import argparse
@@ -58,19 +60,19 @@ def main() -> int:
     mode_group = parser.add_mutually_exclusive_group(required=True)
     mode_group.add_argument("--ingest", action="store_true", help="Document ingestion mode")
     mode_group.add_argument("--query", type=str, nargs='?', const='', help="Query for the RAG system. Without argument starts interactive mode.")
-    mode_group.add_argument("--list-sessions", action="store_true", help="List available sessions")
-    mode_group.add_argument("--list-dbs", action="store_true", help="List available databases")
+    mode_group.add_argument("--list-sessions", action="store_true", help="List available sessions and databases")
     mode_group.add_argument("--optimize-db", type=int, help="Optimize a specific database by index")
     mode_group.add_argument("--optimize-all", action="store_true", help="Optimize all databases")
     mode_group.add_argument("--db-stats", action="store_true", help="Show database statistics")
     mode_group.add_argument("--resource-status", action="store_true", help="Show current status of resource manager")
     
+    # Export chunks option (not mutually exclusive)
+    parser.add_argument("--export-chunks", action="store_true", help="Export chunks to TXT files for specified files or directories")
+    
     # Arguments for ingestion mode
     parser.add_argument("--files", type=str, help="Directory or Markdown file to process")
     parser.add_argument("--session-name", type=str, help="Custom name for the session")
-    
-    # Arguments for processing and analysis
-    parser.add_argument("--export-chunks", action="store_true", help="Export chunks to TXT files in the same locations as Markdown files")
+    parser.add_argument("--db-index", type=int, help="Index of existing database to use for ingestion (adds files to it)")
     
     # Arguments for query mode
     processing_config = config.get_processing_config()
@@ -80,7 +82,6 @@ def main() -> int:
                       help=f"Number of chunks to retrieve for the query (default: {default_chunks})")
     parser.add_argument("--model", type=str, help="AI model to use for the query")
     parser.add_argument("--session", type=str, help="Specific session ID to use")
-    parser.add_argument("--db-index", type=int, help="Database index to use (0 is the most recent)")
     parser.add_argument("--show-dbs", action="store_true", help="Show available databases before the query")
     
     # General arguments
@@ -95,19 +96,14 @@ def main() -> int:
     
     try:
         # Execute corresponding mode
+        result = 0
+        
         if args.ingest:
             result = handle_ingest_mode(args)
-            # Export chunks if requested and ingestion was successful (result = 0)
-            if args.export_chunks and result == 0:
-                handle_export_chunks_mode(args)
-            return result
         elif args.query is not None:
             return handle_query_mode(args)
         elif args.list_sessions:
             return list_sessions()
-        elif args.list_dbs:
-            show_available_databases()
-            return 0
         elif args.optimize_db is not None:
             optimize_database(args.optimize_db)
             return 0
@@ -117,12 +113,16 @@ def main() -> int:
         elif args.db_stats:
             show_database_statistics()
             return 0
-        elif args.export_chunks:
-            return handle_export_chunks_mode(args)
         elif args.resource_status:
             return show_resource_status()
-        
-        return 0
+            
+        # Export chunks if requested (can be combined with other modes)
+        if args.export_chunks and (args.ingest is False or result == 0):
+            export_result = handle_export_chunks_mode(args)
+            if result == 0:  # Solo actualizar si no hubo errores previos
+                result = export_result
+                
+        return result
     except Exception as e:
         logger.error(f"{C_ERROR}Unexpected error: {e}")
         return 1
@@ -151,7 +151,13 @@ def handle_ingest_mode(args: argparse.Namespace) -> int:
         
     # Process documents
     logger.info(f"{C_HIGHLIGHT}Starting document ingestion from: {C_VALUE}{args.files}")
-    process_documents(args.files, session_name=args.session_name)
+    
+    # Pass db_index if provided, so documents are added to an existing database
+    db_index = args.db_index
+    if db_index is not None:
+        logger.info(f"{C_HIGHLIGHT}Using existing database with index: {C_VALUE}{db_index}")
+        
+    process_documents(args.files, session_name=args.session_name, db_index=db_index)
     return 0
 
 def handle_query_mode(args: argparse.Namespace) -> int:
@@ -180,21 +186,21 @@ def handle_query_mode(args: argparse.Namespace) -> int:
     
     # In query mode, check if we need to show the databases
     if args.show_dbs or args.db_index is None:
-        # Show a simple summary of databases
-        print("\n" + C_TITLE + " AVAILABLE DATABASES " + C_RESET)
+        # Get sessions list
+        sessions = get_session_list(show_output=False)
+        
+        # Show a simple summary (only the most recent ones)
+        print("\n" + C_TITLE + " AVAILABLE SESSIONS/DATABASES " + C_RESET)
         print_separator()
         
-        sorted_dbs = show_available_databases(show_output=False)
-        
-        # Show simplified list of databases (only the most recent ones)
-        for i, (name, db) in enumerate(sorted_dbs[:5]):  # Limit to 5 databases
-            created_date = datetime.fromtimestamp(db.get('created_at', 0)).strftime('%Y-%m-%d')
-            model = db.get('embedding_model', 'unknown')
+        for i, session in enumerate(sessions[:5]):  # Limit to 5
+            created_date = datetime.fromtimestamp(session.get('created_at', 0)).strftime('%Y-%m-%d')
+            model = session.get('embedding_model', 'unknown')
             
             if i == 0:  # Highlight the most recent
-                print(f"{C_SUCCESS}[{i}] {C_HIGHLIGHT}{name}{C_RESET} - {created_date} - Model: {C_VALUE}{model}{C_RESET}")
+                print(f"{C_SUCCESS}[{i}] {C_HIGHLIGHT}{session['id']}{C_RESET} - {created_date} - Model: {C_VALUE}{model}{C_RESET}")
             else:
-                print(f"[{i}] {C_HIGHLIGHT}{name}{C_RESET} - {created_date} - Model: {model}")
+                print(f"[{i}] {C_HIGHLIGHT}{session['id']}{C_RESET} - {created_date} - Model: {model}")
         
         print_separator()
         
@@ -283,7 +289,7 @@ def handle_query_mode(args: argparse.Namespace) -> int:
 
 def list_sessions() -> int:
     """
-    Lists available sessions.
+    Lists available sessions (which are the same as databases).
     
     Returns:
         int: Result code (0=success, 1=error).
@@ -296,7 +302,7 @@ def list_sessions() -> int:
     sessions = session_manager.list_sessions()
     
     # Show title
-    print("\n" + C_TITLE + " AVAILABLE SESSIONS " + C_RESET)
+    print("\n" + C_TITLE + " AVAILABLE SESSIONS/DATABASES " + C_RESET)
     print_separator()
     
     if not sessions:
@@ -304,44 +310,99 @@ def list_sessions() -> int:
         print()
         return 0
         
-    # Sort sessions by most recent activity
-    sessions.sort(key=lambda s: s.get('last_activity', 0), reverse=True)
+    # Sessions are already sorted by most recent activity in list_sessions
     
     for i, session in enumerate(sessions):
         # Simplify times for display
         created_readable = datetime.fromtimestamp(session.get('created_at', 0)).strftime('%Y-%m-%d %H:%M')
-        last_activity_readable = datetime.fromtimestamp(session.get('last_activity', 0)).strftime('%Y-%m-%d %H:%M')
+        last_modified_readable = datetime.fromtimestamp(session.get('last_modified', 0)).strftime('%Y-%m-%d %H:%M')
         
-        # Get associated databases
-        databases = session.get('databases', [])
+        # Get database info
+        db_type = session.get('db_type', 'unknown')
+        db_path = session.get('db_path', 'unknown')
+        embedding_model = session.get('embedding_model', 'unknown')
+        chunking_method = session.get('chunking_method', 'unknown')
         
-        # Get processed files
+        # Get file info
         files = session.get('files', [])
+        file_count = len(files)
         
-        print(f"{C_HIGHLIGHT}{i}. ID: {session['id']} - Created: {created_readable} - Last activity: {last_activity_readable}")
+        # Get total chunks - puede estar en el nivel raíz o en stats
+        total_chunks = session.get('total_chunks', 'unknown')
+        if total_chunks == 'unknown':
+            stats = session.get('stats', {})
+            total_chunks = stats.get('total_chunks', 'unknown')
         
-        # Show database details
-        if databases:
-            print(f"{C_INFO}   Databases ({len(databases)}):")
-            for j, db in enumerate(databases[:3]):  # Limit to 3 databases to avoid spam
-                print(f"{C_INFO}     {j+1}. {db.get('name', 'No name')} - Model: {db.get('model', 'unknown')} - Chunking: {db.get('chunking', 'unknown')}")
-            if len(databases) > 3:
-                print(f"{C_INFO}     ...and {len(databases) - 3} more")
+        # Format file size if available
+        size_str = ""
+        if os.path.exists(db_path):
+            size_bytes = os.path.getsize(db_path)
+            if size_bytes < 1024:
+                size_str = f"{size_bytes} B"
+            elif size_bytes < 1024 * 1024:
+                size_str = f"{size_bytes/1024:.1f} KB"
+            elif size_bytes < 1024 * 1024 * 1024:
+                size_str = f"{size_bytes/(1024*1024):.1f} MB"
+            else:
+                size_str = f"{size_bytes/(1024*1024*1024):.2f} GB"
         
-        # Show processed files
+        # Display session/db information
+        if i == 0:  # Highlight the most recent session
+            print(f"{C_SUCCESS}[{i}] {C_HIGHLIGHT}{session['id']}{C_RESET}")
+        else:
+            print(f"[{i}] {C_HIGHLIGHT}{session['id']}{C_RESET}")
+            
+        print(f"{C_INFO}   Created: {created_readable} - Last modified: {last_modified_readable}")
+        print(f"{C_INFO}   Type: {C_VALUE}{db_type}{C_RESET} - Model: {C_VALUE}{embedding_model}{C_RESET} - Chunking: {C_VALUE}{chunking_method}{C_RESET}")
+        print(f"{C_INFO}   Files: {C_VALUE}{file_count}{C_RESET} - Chunks: {C_VALUE}{total_chunks}{C_RESET} - Size: {C_VALUE}{size_str}{C_RESET}")
+        
+        # Show file info (limit to first 3)
         if files:
-            print(f"{C_INFO}   Processed files ({len(files)}):")
-            # Show maximum 3 files and summarize the rest
-            for j, file_path in enumerate(files[:3]):
-                file_name = os.path.basename(file_path)
-                print(f"{C_INFO}     {j+1}. {file_name}")
+            print(f"{C_INFO}   Processed files:")
+            for j, file_item in enumerate(files[:3]):
+                if isinstance(file_item, str):
+                    file_name = os.path.basename(file_item)
+                    print(f"{C_INFO}     {j+1}. {file_name}")
+                elif isinstance(file_item, dict):
+                    file_name = os.path.basename(file_item.get('path', 'unknown'))
+                    chunks = file_item.get('chunks', 'unknown')
+                    print(f"{C_INFO}     {j+1}. {file_name} - Chunks: {chunks}")
+                    
             if len(files) > 3:
                 print(f"{C_INFO}     ...and {len(files) - 3} more")
         
         print()
     
     print(Style.BRIGHT + "=" * 80 + "\n")
+    print_status("info", "Use these indices with --db-index for queries or to add documents to existing databases")
+    print_status("info", "Example: python run.py --ingest --files new_docs/ --db-index 0")
+    print_status("info", "Example: python run.py --query \"My question\" --db-index 2")
+    print()
+    
     return 0
+
+def get_session_list(show_output: bool = True) -> List[Dict[str, Any]]:
+    """
+    Gets the list of available sessions/databases.
+    
+    Args:
+        show_output: Whether to display the list
+        
+    Returns:
+        List of session/database data
+    """
+    # Import session manager
+    from modulos.session_manager.session_manager import SessionManager
+    
+    # Use session manager to list sessions
+    session_manager = SessionManager()
+    sessions = session_manager.list_sessions()
+    
+    # Display if requested
+    if show_output:
+        list_sessions()
+        
+    return sessions
 
 def run_interactive_mode(n_chunks: int = 5, model: Optional[str] = None, 
                         session_id: Optional[str] = None, db_index: Optional[int] = None) -> None:
@@ -624,8 +685,8 @@ def optimize_database(db_index: int) -> None:
         
         # Get database instance
         session_manager = SessionManager()
-        # Pass None as session_id since we're optimizing a specific database by index
-        db, metadata = session_manager.get_database_by_index(db_index, session_id=None)
+        # Get database by index without session_id parameter
+        db, metadata = session_manager.get_database_by_index(db_index)
         
         # Measure optimization time
         start_time = time.time()
@@ -784,10 +845,10 @@ def handle_export_chunks_mode(args: argparse.Namespace) -> int:
         session_manager = SessionManager()
         
         if args.db_index is not None:
-            db, session = session_manager.get_database_by_index(args.db_index, session_id=args.session)
+            db, session = session_manager.get_database_by_index(args.db_index)
         else:
             # Use most recent database
-            db, session = session_manager.get_database_by_index(0, session_id=args.session)
+            db, session = session_manager.get_database_by_index(0)
         
         if not db:
             logger.error(f"{C_ERROR}Could not get a database connection")
@@ -951,8 +1012,11 @@ def print_help():
     print_separator()
     
     print(C_SUBTITLE + "BASIC USAGE:" + C_RESET)
-    print(f"  {C_VALUE}Ingest documents:{C_RESET}")
+    print(f"  {C_VALUE}Ingest documents (new session):{C_RESET}")
     print(f"    {C_COMMAND}python run.py --ingest --files documents/{C_RESET}")
+    print()
+    print(f"  {C_VALUE}Add documents to existing database:{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --ingest --files new_docs/ --db-index 0{C_RESET}")
     print()
     print(f"  {C_VALUE}Query the system:{C_RESET}")
     print(f"    {C_COMMAND}python run.py --query \"What is the main topic of this document?\"{C_RESET}")
@@ -960,26 +1024,25 @@ def print_help():
     print(f"  {C_VALUE}Start interactive mode:{C_RESET}")
     print(f"    {C_COMMAND}python run.py --query{C_RESET}")
     print()
-    print(f"  {C_VALUE}List available sessions:{C_RESET}")
+    print(f"  {C_VALUE}List available sessions/databases:{C_RESET}")
     print(f"    {C_COMMAND}python run.py --list-sessions{C_RESET}")
     print()
-    print(f"  {C_VALUE}List available databases:{C_RESET}")
-    print(f"    {C_COMMAND}python run.py --list-dbs{C_RESET}")
-    print()
     print(f"  {C_VALUE}Show database statistics:{C_RESET}")
-    print(f"    {C_COMMAND}python run.py --stats{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --db-stats{C_RESET}")
     
     print_separator()
     print(C_SUBTITLE + "ADDITIONAL OPTIONS:" + C_RESET)
-    print(f"  {C_VALUE}Use specific session/database:{C_RESET}")
+    print(f"  {C_VALUE}Use specific database:{C_RESET}")
     print(f"    {C_COMMAND}python run.py --query \"My question\" --db-index 2{C_RESET}")
-    print(f"    {C_COMMAND}python run.py --query \"My question\" --session session_id{C_RESET}")
     print()
     print(f"  {C_VALUE}Export chunks to text files:{C_RESET}")
     print(f"    {C_COMMAND}python run.py --export-chunks --files documents/{C_RESET}")
     print()
+    print(f"  {C_VALUE}Ingest documents and export chunks in one step:{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --ingest --export-chunks --files documents/{C_RESET}")
+    print()
     print(f"  {C_VALUE}Show resource manager status:{C_RESET}")
-    print(f"    {C_COMMAND}python run.py --resources{C_RESET}")
+    print(f"    {C_COMMAND}python run.py --resource-status{C_RESET}")
     print()
     print(f"  {C_VALUE}Debug mode (more verbose):{C_RESET}")
     print(f"    {C_COMMAND}python run.py --query \"My question\" --debug{C_RESET}")

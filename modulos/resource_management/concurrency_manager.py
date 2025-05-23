@@ -1292,4 +1292,226 @@ class ConcurrencyManager:
             # Asegurar al menos 2 workers para IO y no más que 4x cores
             return max(2, min(base_workers, cpu_count * 4))
 
+    def _is_cpu_bound_task(self, task_type: str) -> bool:
+        """
+        Determina si una tarea es CPU-intensiva basándose en su tipo y patrones de nombre.
+        
+        Args:
+            task_type (str): Tipo de tarea a evaluar
+            
+        Returns:
+            bool: True si la tarea es CPU-intensiva, False si es I/O-intensiva
+        """
+        # Tipos explícitos
+        if task_type == "cpu_intensive":
+            return True
+        elif task_type == "io_intensive":
+            return False
+        
+        # Para "default" u otros tipos, usar patrones heurísticos
+        task_lower = task_type.lower()
+        
+        # Verificar patrones de tareas CPU-intensivas
+        for pattern in _CPU_TASK_PATTERNS:
+            if re.search(pattern, task_lower):
+                return True
+        
+        # Patrones adicionales para I/O
+        io_patterns = [
+            r'read', r'write', r'download', r'upload', r'fetch', 
+            r'save', r'load', r'request', r'response', r'network'
+        ]
+        
+        for pattern in io_patterns:
+            if re.search(pattern, task_lower):
+                return False
+        
+        # Por defecto, asumir I/O-bound (más conservador para evitar sobrecarga del sistema)
+        return False
+
+    def hibernate_pool_if_unused(self, pool_type: str, idle_seconds: float = 600) -> bool:
+        """
+        Pone en modo hibernación un pool sin destruirlo si no se ha usado 
+        por cierto tiempo. Esto libera recursos manteniendo la estructura.
+        
+        Args:
+            pool_type (str): "thread_pool" o "process_pool"
+            idle_seconds (float): Segundos de inactividad para hibernar
+            
+        Returns:
+            bool: True si el pool fue hibernado, False en caso contrario
+        """
+        # Verificar si el pool existe y está activo
+        if pool_type not in self.pools_status:
+            return False
+            
+        pool_info = self.pools_status[pool_type]
+        current_time = time.time()
+        
+        # Si el pool no está activo, no hay nada que hacer
+        if pool_info["status"] != "active":
+            return False
+            
+        # Si no ha pasado suficiente tiempo, no hibernar
+        time_since_last_use = current_time - pool_info["last_used"]
+        if time_since_last_use < idle_seconds:
+            return False
+            
+        # Hibernar el pool adecuado
+        try:
+            if pool_type == "thread_pool" and hasattr(self, "thread_pool"):
+                # Guardar el número de workers antes de hibernar
+                workers = self.thread_pool._max_workers
+                self.thread_pool.shutdown(wait=False)
+                self.thread_pool = None
+                pool_info["workers"] = workers
+                pool_info["status"] = "hibernated"
+                pool_info["hibernated_at"] = current_time
+                self.logger.info(f"Pool de hilos hibernado tras {time_since_last_use:.1f}s de inactividad")
+                return True
+                
+            elif pool_type == "process_pool" and hasattr(self, "process_pool"):
+                # Guardar el número de workers antes de hibernar
+                workers = self.process_pool._max_workers
+                self.process_pool.shutdown(wait=False)
+                self.process_pool = None
+                pool_info["workers"] = workers
+                pool_info["status"] = "hibernated"
+                pool_info["hibernated_at"] = current_time
+                self.logger.info(f"Pool de procesos hibernado tras {time_since_last_use:.1f}s de inactividad")
+                return True
+                
+        except Exception as e:
+            self.logger.error(f"Error al hibernar pool {pool_type}: {e}")
+            
+        return False
+
+    def restore_pool_from_hibernation(self, pool_type: str) -> bool:
+        """
+        Restaura un pool previamente hibernado a su estado activo.
+        
+        Args:
+            pool_type (str): "thread_pool" o "process_pool"
+            
+        Returns:
+            bool: True si el pool fue restaurado, False en caso contrario
+        """
+        if pool_type not in self.pools_status:
+            return False
+            
+        pool_info = self.pools_status[pool_type]
+        
+        # Solo restaurar si está hibernado
+        if pool_info["status"] != "hibernated":
+            return False
+            
+        try:
+            if pool_type == "thread_pool":
+                # Restaurar con el mismo número de workers de antes
+                workers = pool_info["workers"] if pool_info["workers"] > 0 else self.io_workers
+                self.thread_pool = ThreadPoolExecutor(max_workers=workers)
+                pool_info["status"] = "active"
+                pool_info["last_used"] = time.time()
+                pool_info["created_at"] = time.time()
+                self.logger.info(f"Pool de hilos restaurado de hibernación con {workers} workers")
+                return True
+                
+            elif pool_type == "process_pool" and not self.disable_process_pool:
+                # Restaurar con el mismo número de workers de antes
+                workers = pool_info["workers"] if pool_info["workers"] > 0 else self.cpu_workers
+                self.process_pool = ProcessPoolExecutor(max_workers=workers)
+                pool_info["status"] = "active"
+                pool_info["last_used"] = time.time()
+                pool_info["created_at"] = time.time()
+                self.logger.info(f"Pool de procesos restaurado de hibernación con {workers} workers")
+                return True
+                
+        except Exception as e:
+            self.logger.error(f"Error al restaurar pool {pool_type} de hibernación: {e}")
+            pool_info["status"] = "inactive"  # Marcar como inactivo en caso de error
+            
+        return False
+
+    def _calculate_optimal_workers(self, worker_type: str) -> int:
+        """
+        Calcula el número óptimo de workers según el tipo y las condiciones del sistema.
+        
+        Esta función considera:
+        - Configuración explícita desde ResourceManager
+        - Número de cores disponibles
+        - Uso actual de CPU y memoria
+        - Tipo de entorno (desarrollo, producción, etc.)
+        
+        Args:
+            worker_type (str): Tipo de workers a calcular ("cpu" o "io")
+            
+        Returns:
+            int: Número óptimo de workers
+        """
+        # Obtener la configuración desde ResourceManager
+        if worker_type == "cpu":
+            config_value = getattr(self.resource_manager, 'default_cpu_workers', "auto")
+        else:  # io
+            config_value = getattr(self.resource_manager, 'default_io_workers', "auto")
+            
+        # Si hay una configuración explícita que no sea "auto", usarla
+        if isinstance(config_value, int) and config_value > 0:
+            return config_value
+            
+        # Obtener número de cores disponibles
+        cpu_count = os.cpu_count() or 4  # Fallback a 4 si no se puede determinar
+        
+        # Obtener métricas actuales del sistema
+        cpu_percent = self.resource_manager.metrics.get("cpu_percent_system", 0)
+        memory_percent = self.resource_manager.metrics.get("system_memory_percent", 0)
+        
+        # Calcular factor de ajuste basado en uso de recursos
+        # A mayor uso, menor cantidad de workers para no sobrecargar
+        resource_factor = 1.0
+        if cpu_percent > 80:
+            resource_factor *= 0.7  # Reducir 30% si CPU está muy cargada
+        elif cpu_percent > 60:
+            resource_factor *= 0.85  # Reducir 15% si CPU está moderadamente cargada
+            
+        if memory_percent > 85:
+            resource_factor *= 0.7  # Reducir 30% si memoria está muy cargada
+        elif memory_percent > 70:
+            resource_factor *= 0.85  # Reducir 15% si memoria está moderadamente cargada
+            
+        # Ajustar según tipo de entorno
+        environment_type = getattr(self.resource_manager, 'environment_type', "development")
+        
+        # Entornos de desarrollo suelen tener más recursos disponibles para el proceso
+        if "development" in environment_type:
+            env_factor = 1.0
+        # Entornos de producción suelen ser más conservadores
+        elif "production" in environment_type or "server" in environment_type:
+            env_factor = 0.9
+        # Entornos cloud suelen tener recursos compartidos
+        elif any(env in environment_type for env in ["cloud", "aws", "gcp", "azure"]):
+            env_factor = 0.8
+        # Contenedores suelen tener recursos muy limitados
+        elif any(env in environment_type for env in ["container", "kubernetes"]):
+            env_factor = 0.7
+        else:
+            env_factor = 0.9  # Valor por defecto
+            
+        # Calcular el número base de workers según el tipo
+        if worker_type == "cpu":
+            # Para CPU-bound, usar número de cores físicos
+            # Intentar obtener cores físicos, fallback a lógicos
+            physical_cores = psutil.cpu_count(logical=False) or cpu_count
+            base_workers = max(1, int(physical_cores * resource_factor * env_factor))
+            
+            # Asegurar al menos 1 worker y no más que cores lógicos
+            return max(1, min(base_workers, cpu_count))
+        else:  # io
+            # Para IO-bound, se pueden usar más workers ya que están bloqueados
+            # Típicamente 2x o más que el número de cores
+            io_multiplier = 2.0  # Multiplicador para IO vs CPU
+            base_workers = max(2, int(cpu_count * io_multiplier * resource_factor * env_factor))
+            
+            # Asegurar al menos 2 workers para IO y no más que 4x cores
+            return max(2, min(base_workers, cpu_count * 4))
+
     # ... resto del código ...

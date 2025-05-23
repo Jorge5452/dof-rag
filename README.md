@@ -135,8 +135,8 @@ La arquitectura modular se basa en interfaces claras (clases abstractas) con mú
 
 ```
 ┌─────────────────────┐     ┌────────────────────┐     ┌─────────────────────┐
-│  Chunking Module    │     │ Embedding Module   │     │   Database Module    │
-│  ---------------    │     │ ---------------    │     │   ---------------    │
+│  Chunking Module    │     │ Embedding Module   │     │   Database Module   │
+│  ---------------    │     │ ---------------    │     │   ---------------   │
 │  - Character        │     │  - ModernBERT      │     │   - SQLite          │
 │  - Token            │◄────┤  - CDE             ├────►│   - DuckDB          │
 │  - Context          │     │  - E5              │     │                     │
@@ -149,9 +149,9 @@ La arquitectura modular se basa en interfaces claras (clases abstractas) con mú
 ┌─────────┴──────────┐     ┌────────────────────┐     ┌─────────┴─────────┐
 │Resource Management │     │   IA Clients       │     │  Session Manager  │
 │------------------  │     │   ------------     │     │  --------------   │
-│- ResourceManager   │◄───►│   - OpenAI        │◄───►│  - User Sessions  │
-│- MemoryManager     │     │   - Gemini        │     │  - Conversations  │
-│- ConcurrencyManager│     │   - Ollama        │     │  - Context Storage│
+│- ResourceManager   │◄───►│   - OpenAI         │◄───►│  - User Sessions  │
+│- MemoryManager     │     │   - Gemini         │     │  - Conversations  │
+│- ConcurrencyManager│     │   - Ollama         │     │  - Context Storage│
 └────────────────────┘     └────────────────────┘     └───────────────────┘
           ▲                          ▲                           ▲
           │                          │                           │
@@ -192,7 +192,13 @@ pip install -r requirements.txt
 ### Ingestión de Documentos
 
 ```bash
-python run.py --ingest --file docs/
+python run.py --ingest --files docs/
+```
+
+### Ingestión y Exportación de Chunks
+
+```bash
+python run.py --ingest --export-chunks --files docs/
 ```
 
 ### Consulta

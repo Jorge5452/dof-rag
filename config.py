@@ -100,6 +100,10 @@ class Config:
         general_config = self.config.get("general", {})
         return self._process_env_vars(general_config)
     
+    def get_sessions_config(self) -> Dict[str, Any]:
+        """Get sessions configuration."""
+        return self.config.get("sessions", {})
+    
     def get_chunks_config(self) -> Dict[str, Any]:
         """
         Gets the document chunking configuration.

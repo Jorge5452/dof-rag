@@ -12,7 +12,7 @@ import time
 import os
 import sys
 from pathlib import Path
-from typing import Optional, Any
+from typing import Optional, Any, List, Dict
 import concurrent.futures
 import modulos.session_manager.session_manager
 from datetime import datetime
@@ -55,70 +55,129 @@ logging.getLogger('transformers').setLevel(logging.ERROR)
 logging.getLogger('filelock').setLevel(logging.ERROR)
 logging.getLogger('huggingface_hub').setLevel(logging.ERROR)
 
-def process_documents(file_path: str, session_name: Optional[str] = None) -> None:
+def process_documents(file_path: str, session_name: Optional[str] = None, db_index: Optional[int] = None) -> None:
     """
     Process documents from a path and ingest them into the database.
     
     Args:
         file_path: Path to file or directory to process
         session_name: Optional session name (used for database configuration)
+        db_index: Optional index of an existing database/session to use (adds documents to it)
+                  If provided, this overrides session_name
     """
     start_time = time.time()
     
-    # Get the embeddings model first to know dimensions
+    # Initialize SessionManager for database operations
+    from modulos.session_manager.session_manager import SessionManager
+    session_manager = SessionManager()
+    
+    # Variables to hold existing session/database information
+    existing_session = None
+    existing_db = None
+    
+    # Check if using existing database/session
+    if db_index is not None:
+        logger.info(f"Attempting to use existing database with index {db_index}")
+        try:
+            # This will get both database instance and session metadata
+            existing_db, existing_session = session_manager.get_database_by_index(db_index)
+            
+            logger.info(f"Using existing database: {existing_session.get('name', 'Unknown')}")
+            logger.info(f"  - Embedding model: {existing_session.get('embedding_model', 'Unknown')}")
+            logger.info(f"  - Chunking method: {existing_session.get('chunking_method', 'Unknown')}")
+            logger.info(f"  - Database type: {existing_session.get('db_type', 'Unknown')}")
+            
+            # Extract important parameters from existing session
+            embedding_model = existing_session.get("embedding_model", "modernbert")
+            chunking_method = existing_session.get("chunking_method", "character") 
+            db_type = existing_session.get("db_type", "sqlite")
+            embedding_dim = existing_session.get("embedding_dim", 768)
+            
+        except (IndexError, ValueError) as e:
+            logger.error(f"{C_ERROR}Error getting database with index {db_index}: {e}")
+            return
+    
+    # Get the embeddings model based on whether we're using existing DB or creating new
     try:
         from modulos.embeddings.embeddings_factory import EmbeddingFactory
-        embedding_manager = EmbeddingFactory().get_embedding_manager()
+        
+        if existing_session:
+            # Use the embedding model specified in the existing session
+            embedding_model_name = existing_session.get("embedding_model", "modernbert")
+            embedding_manager = EmbeddingFactory.get_embedding_manager(embedding_model_name)
+        else:
+            # Use default/configured embedding model for new session
+            embedding_manager = EmbeddingFactory().get_embedding_manager()
+            
         embedding_dim = embedding_manager.get_dimensions()
-        
-        # Model name will be obtained directly from configuration later
-        # when importing config for the other configurations
-        
         logger.info(f"Embedding dimensions: {C_VALUE}{embedding_dim}{C_RESET}")
     except Exception as e:
         logger.error(f"{C_ERROR}Error initializing embeddings model: {e}")
         return
     
-    # Create or update database
+    # Create or get database
     db = None
     db_metadata = {}  # Store database metadata here
-    try:
-        # Get database configuration
-        from config import config
-        database_config = config.get_database_config()
-        db_type = database_config.get("type", "sqlite")
-        
-        # Get chunking configuration
-        chunks_config = config.get_chunks_config()
-        chunking_method = chunks_config.get("method", "character")
-        
-        # Get model name directly from configuration
-        embedding_config = config.get_embedding_config()
-        embedding_model = embedding_config.get("model", "modernbert")
-        
-        # Create database instance
-        db = DatabaseFactory().get_database_instance(embedding_dim=embedding_dim)
-        
-        # Save relevant metadata for unified session
-        db_path = getattr(db, "_db_path", "")
+    
+    if existing_db:
+        # Use existing database
+        db = existing_db
         db_metadata = {
-            "db_type": db_type,
-            "db_path": db_path,
-            "embedding_dim": embedding_dim,
-            "embedding_model": embedding_model,
-            "chunking_method": chunking_method,
-            "created_at": time.time(),
+            "db_type": existing_session.get("db_type", "sqlite"),
+            "db_path": existing_session.get("db_path", ""),
+            "embedding_dim": existing_session.get("embedding_dim", 768),
+            "embedding_model": existing_session.get("embedding_model", "modernbert"),
+            "chunking_method": existing_session.get("chunking_method", "character"),
+            "created_at": existing_session.get("created_at", time.time()),
             "last_used": time.time()
         }
-    except Exception as e:
-        logger.error(f"{C_ERROR}Error creating or connecting to database: {e}")
-        return
+    else:
+        try:
+            # Get configurations for new database
+            from config import config
+            database_config = config.get_database_config()
+            db_type = database_config.get("type", "sqlite")
+            
+            chunks_config = config.get_chunks_config()
+            chunking_method = chunks_config.get("method", "character")
+            
+            embedding_config = config.get_embedding_config()
+            embedding_model = embedding_config.get("model", "modernbert")
+            
+            # Create new database instance
+            db = DatabaseFactory().get_database_instance(embedding_dim=embedding_dim)
+            
+            # Save relevant metadata for unified session
+            db_path = getattr(db, "_db_path", "")
+            db_metadata = {
+                "db_type": db_type,
+                "db_path": db_path,
+                "embedding_dim": embedding_dim,
+                "embedding_model": embedding_model,
+                "chunking_method": chunking_method,
+                "created_at": time.time(),
+                "last_used": time.time()
+            }
+        except Exception as e:
+            logger.error(f"{C_ERROR}Error creating or connecting to database: {e}")
+            return
     
-    # Get chunker and Markdown processor
+    # Get chunker based on database configuration
     chunker = None
     try:
         from modulos.chunks.ChunkerFactory import ChunkerFactory
-        chunker = ChunkerFactory().get_chunker(embedding_model=embedding_manager)
+        
+        if existing_session:
+            # Use the chunking method from existing session
+            chunking_method = existing_session.get("chunking_method", "character")
+            chunker = ChunkerFactory().get_chunker(
+                chunker_type=chunking_method, 
+                embedding_model=embedding_manager
+            )
+            logger.info(f"Using chunking method from existing session: {chunking_method}")
+        else:
+            # Use default/configured chunker for new session
+            chunker = ChunkerFactory().get_chunker(embedding_model=embedding_manager)
     except Exception as e:
         logger.error(f"{C_ERROR}Error initializing chunker: {e}")
         return
@@ -245,7 +304,7 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
     logger.info("Optimizing database...")
     db.optimize_database()
     
-    # If processing was successful, create unified session
+    # Handle session creation or update
     if successful_docs > 0:
         try:
             # Calculate statistics for session
@@ -261,26 +320,78 @@ def process_documents(file_path: str, session_name: Optional[str] = None) -> Non
                 "processing_date": datetime.now().isoformat()
             })
             
-            # Create or get session through new unified method
-            from modulos.session_manager.session_manager import SessionManager
-            session_manager = SessionManager()
-            
-            # If session name was provided, use it
-            if session_name:
-                db_metadata["name"] = session_name
-                db_metadata["id"] = session_name
-            
-            # Create unified session with all metadata
-            unified_session_id = session_manager.create_unified_session(
-                database_metadata=db_metadata,
-                files_list=processed_files
-            )
-            
-            logger.info(f"Unified session created successfully: {unified_session_id}")
+            # If using existing session, update it
+            if existing_session:
+                session_id = existing_session.get("id")
+                logger.info(f"Updating existing session: {session_id}")
+                
+                # Get existing file list and append new files
+                existing_files = existing_session.get("files", [])
+                if isinstance(existing_files, list):
+                    # Add any files that aren't already in the list
+                    for file_path in processed_files:
+                        if file_path not in existing_files:
+                            existing_files.append(file_path)
+                
+                # Update session with new files and metadata
+                session_manager.update_session_file_list(
+                    session_id=session_id,
+                    new_files=processed_files,
+                    file_metadata=file_metadata
+                )
+                
+                # Update statistics in session
+                current_session = session_manager.get_session(session_id)
+                if current_session:
+                    # Update stats
+                    if "stats" not in current_session:
+                        current_session["stats"] = {}
+                    
+                    # Update or add total documents and chunks
+                    # Actualizar total_documents en stats
+                if "stats" not in current_session:
+                    current_session["stats"] = {}
+                    
+                if "total_documents" in current_session["stats"]:
+                    current_session["stats"]["total_documents"] += successful_docs
+                else:
+                    current_session["stats"]["total_documents"] = successful_docs
+                    
+                # Actualizar total_chunks en el nivel raíz (para consistencia)
+                if "total_chunks" in current_session:
+                    current_session["total_chunks"] += total_chunks_processed
+                else:
+                    current_session["total_chunks"] = total_chunks_processed
+                    
+                # Save updated session
+                session_manager.update_session_metadata(
+                    session_id=session_id,
+                    metadata={
+                        "stats": current_session["stats"],
+                        "total_chunks": current_session["total_chunks"]
+                    }
+                )
+                
+                logger.info(f"Session {session_id} updated with {successful_docs} new documents")
+                
+            else:
+                # Create new unified session
+                # If session name was provided, use it
+                if session_name:
+                    db_metadata["name"] = session_name
+                    db_metadata["id"] = session_name
+                
+                # Create unified session with all metadata
+                unified_session_id = session_manager.create_unified_session(
+                    database_metadata=db_metadata,
+                    files_list=processed_files
+                )
+                
+                logger.info(f"New unified session created: {unified_session_id}")
         except Exception as e:
-            logger.error(f"{C_ERROR}Error creating unified session: {e}")
+            logger.error(f"{C_ERROR}Error creating or updating session: {e}")
     else:
-        logger.warning(f"{C_WARNING}No session created because no documents processed successfully.")
+        logger.warning(f"{C_WARNING}No session created or updated because no documents processed successfully.")
 
     # Show processing summary
     logger.info(f"Processing completed in {C_VALUE}{elapsed_time:.2f}{C_RESET} seconds")
@@ -534,160 +645,158 @@ def process_single_document(file_path: str,
         logger.error(f"{C_ERROR}Error processing document {file_path}: {e}", exc_info=True)
         return None
 
-def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None, 
-                 session_id: Optional[str] = None, db_index: Optional[int] = None) -> str:
+def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
+                session_id: Optional[str] = None, db_index: Optional[int] = None,
+                stream: bool = False) -> str:
     """
-    Processes a query using the RAG system.
-    
-    This function:
-    1. Retrieves relevant chunks from the database based on query embedding
-    2. Sends these chunks as context to an AI model
-    3. Returns the generated response
+    Process a query by retrieving relevant chunks and generating a response.
     
     Args:
-        query: Query text
+        query: The query string
         n_chunks: Number of chunks to retrieve
-        model: AI model to use (optional)
-        session_id: Specific session ID to use (optional)
-        db_index: Index of database to use (optional)
-        
+        model: AI model to use (if None, will use configured default)
+        session_id: Session ID to use (if provided)
+        db_index: Database index to use (if provided - overrides session_id)
+        stream: Whether to stream the response (True) or return the full response (False)
+    
     Returns:
-        Generated response text
+        Generated response (or first chunk if streaming)
+    
+    Raises:
+        ValueError: If no database is found or query fails
     """
-    # Imports on demand
-    from config import config  
-    from modulos.session_manager.session_manager import SessionManager
-    from modulos.embeddings.embeddings_factory import EmbeddingFactory
-    from modulos.clientes.FactoryClient import ClientFactory
+    # Get the database first
+    db = None
+    session_data = None
+
+    # Initialize ResourceManager for metrics
+    from modulos.resource_management.resource_manager import ResourceManager
+    resource_manager = ResourceManager()
+    resource_manager.metrics["operation_in_progress"] = "query_processing"
+    resource_manager.update_metrics() # Force metrics update
+
+    try:
+        # Initialize SessionManager
+        from modulos.session_manager.session_manager import SessionManager
+        session_manager = SessionManager()
+
+        # If db_index is provided, use it (overrides session_id)
+        if db_index is not None:
+            db, session_data = session_manager.get_database_by_index(db_index)
+            logger.debug(f"Using database with index {db_index}: {session_data.get('name', 'Unknown')}")
+        elif session_id:
+            # If session_id is provided, look for it
+            session = session_manager.get_session(session_id)
+            if not session:
+                raise ValueError(f"Session ID {session_id} not found")
+
+            # Get database information from session
+            db_path = session.get('db_path')
+            db_type = session.get('db_type', 'sqlite')
+            embedding_dim = session.get('embedding_dim', 768)
+            embedding_model = session.get('embedding_model', 'modernbert')
+            chunking_method = session.get('chunking_method', 'character')
+
+            # Initialize database connection
+            from modulos.databases.FactoryDatabase import DatabaseFactory
+            db = DatabaseFactory.get_database_instance(
+                db_type=db_type,
+                embedding_dim=embedding_dim, 
+                embedding_model=embedding_model,
+                chunking_method=chunking_method,
+                load_existing=True,
+                db_path=db_path
+            )
+            session_data = session
+        else:
+            # If no specific database is provided, use the most recent session
+            db, session_data = session_manager.get_database_by_index(0)
+            logger.debug(f"Using most recent database: {session_data.get('name', 'Unknown')}")
+    except Exception as e:
+        logger.error(f"{C_ERROR}Error getting database: {e}")
+        raise ValueError(f"Could not connect to database: {e}")
+
+    if not db:
+        raise ValueError("No database available. Please ingest documents first.")
+
+    # Update operation metrics
+    resource_manager.metrics["database_used"] = session_data.get("name", "") if session_data else ""
+    resource_manager.update_metrics()
+
+    # Get the model to use
+    model_name = None  # Will determine based on priority
+    
+    # Priority 1: Explicit model passed as argument
+    if model:
+        model_name = model
+    
+    # Priority 2: Model configured in session
+    elif session_data and 'ai_model' in session_data:
+        model_name = session_data.get('ai_model')  # Use model from session if available
+    
+    # Priority 3: Default client type from configuration
+    if not model_name:
+        from config import config
+        ai_client_config = config.get_ai_client_config()
+        model_name = ai_client_config.get('type', 'gemini')
+    
+    logger.debug(f"Using AI model: {model_name}")
+
+    # Get specified number of chunks for query
+    query_text = query.strip()
+    
+    # Get context - most relevant document fragments
+    fragments = get_context(query_text, n_chunks, db=db)
+
+    if not fragments:
+        logger.warning(f"{C_WARNING}No relevant fragments found for query")
+        # Continue with empty context - client will handle this
+
+    # Get AI client
+    try:
+        from modulos.clientes.FactoryClient import ClientFactory
+        client = ClientFactory.get_client(model_name)
+    except Exception as e:
+        logger.error(f"{C_ERROR}Error initializing AI client: {e}")
+        raise ValueError(f"Failed to initialize AI client: {e}")
+
+    # Update metrics before making API call
+    resource_manager.metrics["ai_model_used"] = model_name
+    resource_manager.metrics["num_chunks_used"] = len(fragments)
+    resource_manager.update_metrics()
     
     try:
-        # Use session_manager to get correct configuration
-        session_manager = SessionManager()
-    
-        # Get database and configuration
-        if db_index is not None:
-            # If specific index requested, use that index
-            db, session = session_manager.get_database_by_index(db_index, session_id=session_id)
-        elif session_id:
-            # If session ID provided but no index, use most recent database for that session
-            session_dbs = session_manager.get_session_databases(session_id)
-            if session_dbs:
-                db, session = session_manager.get_database_by_index(0, session_id=session_id)
-            else:
-                db, session = session_manager.get_database_by_index(0)
-        else:
-            # Default: use most recent database
-            db, session = session_manager.get_database_by_index(0)
-        
-        # Initialize embedding model that matches the database
-        embedding_model = session.get("embedding_model", "modernbert")
-        embedding_manager = EmbeddingFactory.get_embedding_manager(embedding_model)
-        
-        try:
-            embedding_manager.load_model()
-        except Exception as e:
-            logger.error(f"Error loading embeddings model: {e}")
-            return "Could not load embeddings model. Please check configuration or try with another database."
-        
-        # Generate embedding for the query
-        query_embedding = embedding_manager.get_query_embedding(query)
-        
-        # Search for most relevant chunks
-        try:
-            search_results = db.vector_search(query_embedding, n_results=n_chunks)
-        except Exception as e:
-            logger.error(f"Vector search error: {e}")
-            return "There was a problem finding relevant information. The selected database may not be compatible with the current query."
-        
-        if not search_results:
-            return "No relevant information found to answer this query."
-        
-        # Determine which AI model to use
-        if model is None:
-            ai_config = config.get_ai_client_config()
-            model = ai_config.get("type", "openai")
-            
-        # Initialize AI client
-        try:
-            ai_client = ClientFactory.get_client(client_type=model)
-        except Exception as e:
-            logger.error(f"Error creating AI client: {e}")
-            return "Could not initialize AI model. Please check your configuration and API keys."
-        
-        # Prepare context chunks for the response
-        context_chunks = []
-        for chunk in search_results:
-            context_chunks.append({
-                "text": chunk["text"],
-                "header": chunk.get("header", ""),
-                "similarity": chunk.get("similarity", 0.0),
-                "page": chunk.get("page", "N/A")
-            })
-        
         # Generate response
-        try:
-            response = ai_client.generate_response(query, context=context_chunks, show_context=True)
-            
-            # Handle streaming responses
-            if hasattr(response, '__iter__') and not isinstance(response, str):
-                try:
-                    # Collect all chunks from the generator
-                    chunks = list(response)
-                    full_response = "".join(chunks)
-                    
-                    if full_response:
-                        return full_response
-                    elif hasattr(ai_client, 'last_response_text') and ai_client.last_response_text:
-                        # Fallback to stored response text
-                        return ai_client._format_response_with_context(ai_client.last_response_text, query)
-                    else:
-                        return "Response generated successfully but could not be displayed. Please try again."
-                except Exception as e:
-                    # If iteration fails, try using response as string
-                    if response:
-                        return str(response)
-                    else:
-                        return "Error processing response. Please try again."
-            
-            # Handle null response
-            if response is None:
-                return "No response received from model. This may be a connection or API problem."
+        
+        # Improve formatting in interactive mode
+        if fragments:
+            # Store message context in session if we have a valid session
+            if session_data:
+                session_id = session_data.get("id")
+                message_id = f"query_{int(time.time())}"
                 
-            # Return string response
+                try:
+                    session_manager.store_message_context(session_id, message_id, fragments)
+                except Exception as e:
+                    logger.warning(f"Could not store message context: {e}")
+        
+        # Call AI client - this contains context formatting
+        if stream:
+            # For streaming response, prepare the generator
+            response_generator = client.generate_response_stream(query_text, fragments)
+            return response_generator
+        else:
+            # For full response
+            response = client.generate_response(query_text, fragments)
             return response
             
-        except Exception as e:
-            logger.error(f"Error generating response: {e}")
-            return "There was a problem generating response. Please check your configuration and internet connection."
-        
     except Exception as e:
-        # Update database last use timestamp if possible
-        try:
-            if 'session' in locals() and 'db_name' in session:
-                db_name = session.get("id", "")
-                # Update timestamp
-                session_manager.register_database(db_name, {
-                    "last_used": time.time(),
-                    **session
-                })
-        except Exception as update_err:
-            logger.debug(f"Error updating metadata: {update_err}")
-    
-        # Format error message
-        try:
-            error_msg = f"{e.__class__.__name__}: {str(e)}"
-        except Exception:
-            error_msg = "Unknown error during processing"
-            
-        logger.error(f"Error processing query: {error_msg}")
-        
-        # Return user-friendly error message
-        if "database" in error_msg.lower():
-            return "Error accessing database. Please check that the selected database exists and is accessible."
-        elif "embedding" in error_msg.lower() or "model" in error_msg.lower():
-            return "Embedding model error. Please check configuration or try with another model."
-        else:
-            return f"An error occurred processing your query: {error_msg}. Please try again or select another database."
+        logger.error(f"{C_ERROR}Error generating response: {e}")
+        raise ValueError(f"Failed to generate response: {e}")
+    finally:
+        # Update metrics after completion
+        resource_manager.metrics["operation_in_progress"] = "idle"
+        resource_manager.update_metrics()
 
 def verify_database_file(db_path: str) -> bool:
     """
@@ -712,3 +821,48 @@ def verify_database_file(db_path: str) -> bool:
         logger.error(f"{C_ERROR}✗ Database file not found: {C_VALUE}{db_path}")
         
     return exists
+
+def get_context(query: str, n_chunks: int, db: Any) -> List[Dict[str, Any]]:
+    """
+    Get the most relevant context fragments for a query.
+    
+    Args:
+        query: Query text
+        n_chunks: Number of chunks to retrieve
+        db: Database instance to query
+        
+    Returns:
+        List of context fragments (dicts with text, header, similarity, page)
+    """
+    # Try to get embedding manager that's compatible with this database
+    try:
+        from modulos.embeddings.embeddings_factory import EmbeddingFactory
+        
+        # If db has metadata about embedding model, use that
+        embedding_model = getattr(db, "_embedding_model", "modernbert")
+        if not embedding_model:
+            embedding_model = "modernbert"  # Default fallback
+            
+        # Get embedding manager
+        embedding_manager = EmbeddingFactory.get_embedding_manager(embedding_model)
+        
+        # Generate embedding for query
+        query_embedding = embedding_manager.get_query_embedding(query)
+        
+        # Search for most relevant chunks
+        search_results = db.vector_search(query_embedding, n_results=n_chunks)
+        
+        # Format results for model
+        fragments = []
+        for chunk in search_results:
+            fragments.append({
+                "text": chunk["text"],
+                "header": chunk.get("header", ""),
+                "similarity": chunk.get("similarity", 0.0),
+                "page": chunk.get("page", "N/A")
+            })
+            
+        return fragments
+    except Exception as e:
+        logger.error(f"{C_ERROR}Error retrieving context: {e}")
+        return []

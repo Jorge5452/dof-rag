@@ -8,6 +8,14 @@ general:
   sessions_dir: "sessions"
   # Nivel de logging (DEBUG, INFO, WARNING, ERROR)
   log_level: "INFO"
+  stream_response: true
+
+# Configuración para gestión de sesiones
+sessions:
+  max_sessions: 50
+  timeout: 604800  # 7 días en segundos
+  cleanup_interval: 300  # 5 minutos
+  max_contexts: 50
 
 # Configuración para chunking de documentos
 chunks:
