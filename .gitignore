@@ -2,6 +2,7 @@
 .github
 .cursor
 .env
+.vscode/
 pruebas/
 __pycache__/
 modulos/databases/db/

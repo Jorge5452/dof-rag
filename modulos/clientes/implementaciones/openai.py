@@ -8,13 +8,13 @@ class OpenAIClient(IAClient):
     OpenAI client implementation using OpenAI's Python SDK.
     """
     
-    def __init__(self, api_key: str = None, model_name: str = "gpt-3.5-turbo", **kwargs):
+    def __init__(self, api_key: str = None, model_name: str = None, **kwargs):
         """
         Initialize the OpenAI client.
         
         Args:
             api_key (str, optional): OpenAI API key. If None, will try to load from environment variable.
-            model_name (str, optional): Name of the model to use. Defaults to "gpt-3.5-turbo".
+            model_name (str, optional): Name of the model to use. If None, obtains from config.
             **kwargs: Additional parameters for the OpenAI client.
                 embedding_model (str, optional): Name of the embedding model to use.
                 api_key_env (str, optional): Name of the environment variable to use for API key.
@@ -22,10 +22,15 @@ class OpenAIClient(IAClient):
                 api_base_env (str, optional): Name of the environment variable to use for API base.
                 timeout (int, optional): Timeout in seconds for the API call.
         """
+        # Obtener configuración
+        from config import config
+        openai_config = config.get_ai_client_config().get('openai', {})
+        general_config = config.get_ai_client_config().get('general', {})
+        
         # Set default environment variable names
-        api_key_env = kwargs.get("api_key_env", "OPENAI_API_KEY")
-        org_env = kwargs.get("org_env", "OPENAI_ORGANIZATION")
-        api_base_env = kwargs.get("api_base_env", "OPENAI_API_BASE")
+        api_key_env = kwargs.get("api_key_env", openai_config.get("api_key_env", "OPENAI_API_KEY"))
+        org_env = kwargs.get("org_env", openai_config.get("org_env", "OPENAI_ORGANIZATION"))
+        api_base_env = kwargs.get("api_base_env", openai_config.get("api_base_env", "OPENAI_API_BASE"))
         
         # Get API key, clean it if it's from environment variable
         if api_key:
@@ -44,10 +49,11 @@ class OpenAIClient(IAClient):
         print(f"OpenAI API key configured: {masked_key}")
         
         # Get model name with appropriate fallbacks
-        self.model_name = model_name
+        default_model = openai_config.get("model", "gpt-3.5-turbo")
+        self.model_name = model_name or default_model
         
         # Get embedding model or use default
-        self.embedding_model = kwargs.get("embedding_model", "text-embedding-3-small")
+        self.embedding_model = kwargs.get("embedding_model", openai_config.get("embedding_model", "text-embedding-3-small"))
         
         # Get organization if available
         org = kwargs.get("organization", os.getenv(org_env))
@@ -72,11 +78,11 @@ class OpenAIClient(IAClient):
         self.client = openai.OpenAI(**client_args)
         
         # Store generation parameters
-        self.temperature = kwargs.get("temperature", 0.7)
-        self.max_tokens = kwargs.get("max_tokens", 1024)
-        self.top_p = kwargs.get("top_p", 0.95)
-        self.stream = kwargs.get("stream", False)
-        self.system_prompt = kwargs.get("system_prompt", "You are a helpful assistant.")
+        self.temperature = kwargs.get("temperature", openai_config.get("temperature", general_config.get("temperature", 0.7)))
+        self.max_tokens = kwargs.get("max_tokens", openai_config.get("max_tokens", general_config.get("max_tokens", 1024)))
+        self.top_p = kwargs.get("top_p", openai_config.get("top_p", general_config.get("top_p", 0.95)))
+        self.stream = kwargs.get("stream", openai_config.get("stream", general_config.get("stream", False)))
+        self.system_prompt = kwargs.get("system_prompt", openai_config.get("system_prompt", general_config.get("system_prompt", "You are a helpful assistant.")))
     
     def _clean_api_key(self, api_key: str) -> str:
         """
@@ -182,4 +188,4 @@ class OpenAIClient(IAClient):
             input=text
         )
         
-        return response.data[0].embedding 
+        return response.data[0].embedding

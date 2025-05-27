@@ -645,7 +645,7 @@ def process_single_document(file_path: str,
         logger.error(f"{C_ERROR}Error processing document {file_path}: {e}", exc_info=True)
         return None
 
-def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
+def process_query(query: str, n_chunks: int = None, model: Optional[str] = None,
                 session_id: Optional[str] = None, db_index: Optional[int] = None,
                 stream: bool = False) -> str:
     """
@@ -653,7 +653,7 @@ def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
     
     Args:
         query: The query string
-        n_chunks: Number of chunks to retrieve
+        n_chunks: Number of chunks to retrieve (if None, uses config default)
         model: AI model to use (if None, will use configured default)
         session_id: Session ID to use (if provided)
         db_index: Database index to use (if provided - overrides session_id)
@@ -665,6 +665,17 @@ def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
     Raises:
         ValueError: If no database is found or query fails
     """
+    logger.info(f"🚀 Starting query processing: '{query[:50]}{'...' if len(query) > 50 else ''}'")
+    
+    # Get default number of chunks from configuration if not specified
+    if n_chunks is None:
+        from config import config
+        processing_config = config.get_processing_config()
+        n_chunks = processing_config.get("max_chunks_to_retrieve", 5)
+        logger.info(f"📊 Using default chunks from config: {n_chunks}")
+    else:
+        logger.info(f"📊 Using specified chunks: {n_chunks}")
+    
     # Get the database first
     db = None
     session_data = None
@@ -682,10 +693,13 @@ def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
 
         # If db_index is provided, use it (overrides session_id)
         if db_index is not None:
+            logger.info(f"📊 Using specified database index: {db_index}")
             db, session_data = session_manager.get_database_by_index(db_index)
-            logger.debug(f"Using database with index {db_index}: {session_data.get('name', 'Unknown')}")
+            logger.info(f"✅ Database loaded: {session_data.get('name', 'Unknown')}")
+            logger.info(f"📈 Database info - Model: {session_data.get('embedding_model', 'Unknown')}, Type: {session_data.get('db_type', 'Unknown')}")
         elif session_id:
             # If session_id is provided, look for it
+            logger.info(f"🆔 Using specified session ID: {session_id}")
             session = session_manager.get_session(session_id)
             if not session:
                 raise ValueError(f"Session ID {session_id} not found")
@@ -696,6 +710,8 @@ def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
             embedding_dim = session.get('embedding_dim', 768)
             embedding_model = session.get('embedding_model', 'modernbert')
             chunking_method = session.get('chunking_method', 'character')
+
+            logger.info(f"📊 Session info - Model: {embedding_model}, Type: {db_type}, Path: {db_path}")
 
             # Initialize database connection
             from modulos.databases.FactoryDatabase import DatabaseFactory
@@ -710,10 +726,11 @@ def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
             session_data = session
         else:
             # If no specific database is provided, use the most recent session
+            logger.info("📊 Using most recent database (no specific index or session provided)")
             db, session_data = session_manager.get_database_by_index(0)
-            logger.debug(f"Using most recent database: {session_data.get('name', 'Unknown')}")
+            logger.info(f"✅ Most recent database loaded: {session_data.get('name', 'Unknown')}")
     except Exception as e:
-        logger.error(f"{C_ERROR}Error getting database: {e}")
+        logger.error(f"❌ Error getting database: {e}")
         raise ValueError(f"Could not connect to database: {e}")
 
     if not db:
@@ -738,26 +755,36 @@ def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
     if not model_name:
         from config import config
         ai_client_config = config.get_ai_client_config()
-        model_name = ai_client_config.get('type', 'gemini')
+        # Corregir hardcoded "gemini" por el valor configurado
+        model_name = ai_client_config.get('type')
+        
+        # Asegurar que siempre tengamos un valor usando un fallback general
+        if not model_name:
+            model_name = "openai"  # Fallback genérico si la configuración está vacía
     
-    logger.debug(f"Using AI model: {model_name}")
+    logger.info(f"🤖 Using AI model: {model_name}")
 
     # Get specified number of chunks for query
     query_text = query.strip()
     
     # Get context - most relevant document fragments
+    logger.info("🔍 Retrieving context fragments...")
     fragments = get_context(query_text, n_chunks, db=db)
 
     if not fragments:
-        logger.warning(f"{C_WARNING}No relevant fragments found for query")
+        logger.warning(f"⚠️ No relevant fragments found for query")
         # Continue with empty context - client will handle this
+    else:
+        logger.info(f"✅ Retrieved {len(fragments)} context fragments")
 
     # Get AI client
     try:
+        logger.info(f"🔧 Initializing AI client: {model_name}")
         from modulos.clientes.FactoryClient import ClientFactory
         client = ClientFactory.get_client(model_name)
+        logger.info("✅ AI client initialized successfully")
     except Exception as e:
-        logger.error(f"{C_ERROR}Error initializing AI client: {e}")
+        logger.error(f"❌ Error initializing AI client: {e}")
         raise ValueError(f"Failed to initialize AI client: {e}")
 
     # Update metrics before making API call
@@ -767,9 +794,11 @@ def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
     
     try:
         # Generate response
+        logger.info("🔄 Generating AI response...")
         
-        # Improve formatting in interactive mode
+        # Log whether we're passing context to the AI
         if fragments:
+            logger.info(f"📤 Passing {len(fragments)} context fragments to AI model")
             # Store message context in session if we have a valid session
             if session_data:
                 session_id = session_data.get("id")
@@ -779,6 +808,8 @@ def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
                     session_manager.store_message_context(session_id, message_id, fragments)
                 except Exception as e:
                     logger.warning(f"Could not store message context: {e}")
+        else:
+            logger.warning("📤 No context fragments to pass to AI model")
         
         # Call AI client - this contains context formatting
         if stream:
@@ -788,10 +819,11 @@ def process_query(query: str, n_chunks: int = 5, model: Optional[str] = None,
         else:
             # For full response
             response = client.generate_response(query_text, fragments)
+            logger.info("✅ AI response generated successfully")
             return response
             
     except Exception as e:
-        logger.error(f"{C_ERROR}Error generating response: {e}")
+        logger.error(f"❌ Error generating response: {e}")
         raise ValueError(f"Failed to generate response: {e}")
     finally:
         # Update metrics after completion
@@ -834,6 +866,9 @@ def get_context(query: str, n_chunks: int, db: Any) -> List[Dict[str, Any]]:
     Returns:
         List of context fragments (dicts with text, header, similarity, page)
     """
+    logger.info(f"🔍 Starting context retrieval for query: '{query[:50]}{'...' if len(query) > 50 else ''}'")
+    logger.info(f"📊 Requested chunks: {n_chunks}")
+    
     # Try to get embedding manager that's compatible with this database
     try:
         from modulos.embeddings.embeddings_factory import EmbeddingFactory
@@ -843,26 +878,57 @@ def get_context(query: str, n_chunks: int, db: Any) -> List[Dict[str, Any]]:
         if not embedding_model:
             embedding_model = "modernbert"  # Default fallback
             
+        logger.info(f"🤖 Using embedding model: {embedding_model}")
+        
         # Get embedding manager
         embedding_manager = EmbeddingFactory.get_embedding_manager(embedding_model)
+        logger.info(f"✅ Embedding manager initialized successfully")
         
         # Generate embedding for query
+        logger.info("🔄 Generating embedding for query...")
         query_embedding = embedding_manager.get_query_embedding(query)
         
+        if query_embedding:
+            logger.info(f"✅ Query embedding generated - dimensions: {len(query_embedding)}")
+        else:
+            logger.error("❌ Failed to generate query embedding - received None")
+            return []
+        
+        # Check if database has any chunks
+        try:
+            # Try to get a count of chunks in database
+            chunk_count = db.get_total_chunks_count() if hasattr(db, 'get_total_chunks_count') else "unknown"
+            logger.info(f"📈 Database contains {chunk_count} chunks")
+        except Exception as count_e:
+            logger.warning(f"⚠️ Could not get chunk count: {count_e}")
+        
         # Search for most relevant chunks
+        logger.info(f"🔍 Performing vector search...")
         search_results = db.vector_search(query_embedding, n_results=n_chunks)
+        
+        if search_results:
+            logger.info(f"✅ Vector search returned {len(search_results)} results")
+        else:
+            logger.warning("⚠️ Vector search returned no results")
+            return []
         
         # Format results for model
         fragments = []
-        for chunk in search_results:
+        for i, chunk in enumerate(search_results):
+            similarity = chunk.get("similarity", 0.0)
+            text_preview = chunk["text"][:100] + "..." if len(chunk["text"]) > 100 else chunk["text"]
+            logger.info(f"📄 Chunk {i+1}: similarity={similarity:.3f}, text='{text_preview}'")
+            
             fragments.append({
                 "text": chunk["text"],
                 "header": chunk.get("header", ""),
-                "similarity": chunk.get("similarity", 0.0),
+                "similarity": similarity,
                 "page": chunk.get("page", "N/A")
             })
             
+        logger.info(f"✅ Context retrieval completed - returning {len(fragments)} fragments")
         return fragments
+        
     except Exception as e:
-        logger.error(f"{C_ERROR}Error retrieving context: {e}")
+        logger.error(f"❌ Error retrieving context: {e}", exc_info=True)
         return []

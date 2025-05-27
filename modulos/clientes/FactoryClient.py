@@ -32,7 +32,11 @@ class ClientFactory:
         
         # If client_type not provided, use from config
         if client_type is None:
-            client_type = ai_config.get("type", "openai")
+            client_type = ai_config.get("type")
+            
+            # Si 'type' no está definido o está vacío en la configuración
+            if not client_type:
+                client_type = "openai"  # Valor predeterminado genérico
         
         client_type = client_type.lower()
         
@@ -64,4 +68,4 @@ class ClientFactory:
             from modulos.clientes.implementaciones.ollama import OllamaClient
             return OllamaClient(**params)
         else:
-            raise ValueError(f"Cliente de IA no soportado: {client_type}") 
+            raise ValueError(f"Cliente de IA no soportado: {client_type}")

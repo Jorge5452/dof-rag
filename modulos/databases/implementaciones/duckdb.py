@@ -227,7 +227,7 @@ class DuckDBVectorialDatabase(VectorialDatabase):
                 # Continuar a pesar del error
             
             # Crear tabla de chunks con ID autogenerado usando la secuencia
-            # Asegurando que document_id sea INTEGER para coincidir con la clave primaria
+            # Usar FLOAT[] para embeddings en lugar de BLOB para compatibilidad con funciones vectoriales
             self._conn.execute("""
                 CREATE TABLE IF NOT EXISTS chunks (
                     id INTEGER PRIMARY KEY DEFAULT CAST(nextval('chunk_id_seq') AS INTEGER),
@@ -235,7 +235,7 @@ class DuckDBVectorialDatabase(VectorialDatabase):
                     text TEXT NOT NULL,
                     header TEXT,
                     page TEXT,
-                    embedding BLOB,
+                    embedding FLOAT[],
                     embedding_dim INTEGER,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (document_id) REFERENCES documents(id)
@@ -326,18 +326,15 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             self._ext_loaded = True
             return True  # Devolver True para permitir que el proceso continúe incluso si hay problemas con las extensiones
     
-    def serialize_vector(self, vector: List[float]) -> bytes:
+    def serialize_vector(self, vector: List[float]) -> List[float]:
         """
-        Serializa un vector para almacenamiento en la base de datos.
-        
-        Utiliza la dimensión fija establecida en la inicialización. Si el vector
-        proporcionado tiene una dimensión diferente, se trunca o se rellena con ceros.
+        Convierte un vector para almacenamiento en DuckDB como FLOAT[].
         
         Args:
             vector: Lista de valores float que representan el vector
             
         Returns:
-            Vector serializado como bytes
+            Vector como lista de floats (para uso directo en DuckDB)
         """
         # Adaptar el vector a la dimensión configurada
         if len(vector) != self._embedding_dim:
@@ -350,23 +347,23 @@ class DuckDBVectorialDatabase(VectorialDatabase):
                 vector = vector + [0.0] * (self._embedding_dim - len(vector))
                 logger.debug(f"Vector rellenado a {self._embedding_dim} dimensiones")
         
-        # Convertir lista a array numpy y luego a bytes
-        return struct.pack(f'{self._embedding_dim}f', *vector)
+        # Devolver como lista de floats para DuckDB FLOAT[]
+        return vector
     
-    def deserialize_vector(self, blob: bytes, dim: int = None) -> List[float]:
+    def deserialize_vector(self, vector_array: List[float], dim: int = None) -> List[float]:
         """
-        Deserializa un vector desde la base de datos.
+        Obtiene un vector desde DuckDB FLOAT[].
         
         Args:
-            blob: Vector serializado como bytes
+            vector_array: Vector como array de DuckDB
             dim: Dimensión del vector (se ignora y se usa la dimensión fija configurada)
             
         Returns:
             Lista de valores float que representan el vector
         """
-        # Usar la dimensión fija de la clase
-        return list(struct.unpack(f'{self._embedding_dim}f', blob))
-    
+        # Para DuckDB FLOAT[], simplemente devolver la lista
+        return vector_array if vector_array else []
+
     def insert_document(self, document: Dict[str, Any], chunks: List[Dict[str, Any]]) -> int:
         """
         Inserta un documento y sus chunks en la base de datos.
@@ -412,12 +409,12 @@ class DuckDBVectorialDatabase(VectorialDatabase):
                 # Procesar el embedding
                 embedding = chunk.get('embedding')
                 
-                # Serializar el embedding si existe
-                serialized_embedding = None
+                # Convertir el embedding para DuckDB FLOAT[]
+                processed_embedding = None
                 if embedding is not None:
-                    serialized_embedding = self.serialize_vector(embedding)
+                    processed_embedding = self.serialize_vector(embedding)
                 
-                # Insertar el chunk con su embedding serializado
+                # Insertar el chunk con su embedding procesado
                 self._conn.execute("""
                     INSERT INTO chunks (document_id, text, header, page, embedding, embedding_dim, created_at)
                     VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -426,8 +423,8 @@ class DuckDBVectorialDatabase(VectorialDatabase):
                     chunk.get('text', ''),
                     chunk.get('header', None),
                     chunk.get('page', None),
-                    serialized_embedding,
-                    self._embedding_dim if serialized_embedding else None
+                    processed_embedding,
+                    self._embedding_dim if processed_embedding else None
                 ))
             
             # Confirmar la transacción
@@ -512,10 +509,10 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             # Procesar el embedding
             embedding = chunk.get('embedding')
             
-            # Serializar el embedding si existe
-            serialized_embedding = None
+            # Convertir el embedding para DuckDB FLOAT[]
+            processed_embedding = None
             if embedding is not None:
-                serialized_embedding = self.serialize_vector(embedding)
+                processed_embedding = self.serialize_vector(embedding)
             
             # Insertar el chunk individual
             self._conn.execute("""
@@ -527,8 +524,8 @@ class DuckDBVectorialDatabase(VectorialDatabase):
                 chunk.get('text', ''),
                 chunk.get('header', None),
                 chunk.get('page', None),
-                serialized_embedding,
-                self._embedding_dim if serialized_embedding else None
+                processed_embedding,
+                self._embedding_dim if processed_embedding else None
             ))
             
             # Obtener el ID del chunk insertado
@@ -565,100 +562,118 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             logger.error(f"Error al optimizar la base de datos: {e}")
             return False
     
-    def vector_search(self, 
-                     query_embedding: List[float], 
-                     filters: Optional[Dict[str, Any]] = None, 
-                     n_results: int = 5, 
-                     include_neighbors: bool = False) -> List[Dict[str, Any]]:
+    def vector_search(self, query_embedding: List[float], n_results: int = 5) -> List[Dict[str, Any]]:
         """
-        Realiza una búsqueda por similitud vectorial entre el embedding de consulta y los embeddings almacenados.
+        Performs a vector search using cosine similarity with DuckDB FLOAT[] arrays.
         
         Args:
-            query_embedding: Vector de embedding de la consulta
-            filters: Filtros adicionales para la búsqueda (ej. {'document_id': 123})
-            n_results: Número máximo de resultados a retornar
-            include_neighbors: Si se incluyen chunks vecinos en los resultados
+            query_embedding: Query embedding vector
+            n_results: Number of results to return
             
         Returns:
-            Lista de chunks ordenados por similitud
+            List of chunks with similarity scores
         """
-        if not self._conn:
-            logger.error("No hay conexión a la base de datos")
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        logger.info(f"🔍 Starting vector search - query embedding dims: {len(query_embedding)}, requesting {n_results} results")
+        
+        if not query_embedding:
+            logger.error("❌ Empty query embedding provided")
             return []
         
-        # Verificar que el embedding no sea None o vacío
-        if query_embedding is None or len(query_embedding) == 0:
-            logger.error("El embedding de consulta es None o está vacío")
-            return []
-            
         try:
-            # Convertir a numpy array para cálculos más eficientes
-            query_embedding_np = np.array(query_embedding, dtype=np.float32)
+            # Check if we have any chunks
+            count_query = "SELECT COUNT(*) as total FROM chunks WHERE embedding IS NOT NULL"
+            result = self._conn.execute(count_query).fetchone()
+            total_chunks = result[0] if result else 0
             
-            # Verificar dimensiones
-            if len(query_embedding_np) != self._embedding_dim:
-                logger.warning(f"Dimensión de embedding de consulta ({len(query_embedding_np)}) difiere "
-                              f"de la configurada ({self._embedding_dim}). Ajustando dimensiones.")
-                # Adaptar dimensiones
-                if len(query_embedding_np) > self._embedding_dim:
-                    # Truncar si es más grande
-                    query_embedding_np = query_embedding_np[:self._embedding_dim]
-                else:
-                    # Rellenar con ceros si es más pequeño
-                    pad_width = self._embedding_dim - len(query_embedding_np)
-                    query_embedding_np = np.pad(query_embedding_np, (0, pad_width), 'constant')
+            logger.info(f"📊 Database contains {total_chunks} total chunks with embeddings")
             
-            # Normalizar para calcular similitud coseno
-            query_norm = np.linalg.norm(query_embedding_np)
-            if query_norm > 0:
-                query_embedding_np = query_embedding_np / query_norm
-            
-            # Decidir qué método de búsqueda usar
-            # Para búsquedas más grandes, usar el método por lotes
-            total_chunks = 0
-            try:
-                self._cursor.execute("SELECT COUNT(*) FROM chunks WHERE embedding IS NOT NULL")
-                total_chunks = self._cursor.fetchone()[0]
-            except Exception as e:
-                logger.warning(f"No se pudo determinar el número de chunks: {e}")
-            
-            # Si hay muchos chunks, usar búsqueda por lotes
-            if total_chunks > 10000 and not filters:  # Solo usar fast_search si no hay filtros específicos
-                logger.info(f"Usando búsqueda vectorial por lotes para {total_chunks} chunks")
-                results = self.fast_vector_search(
-                    query_embedding=query_embedding_np.tolist(),
-                    n_results=n_results
-                )
-                
-                # Si se solicitan vecinos, agregarlos
-                if include_neighbors and results:
-                    results = self._add_neighbors_to_results(results)
-                    
-                return results
-            else:
-                # Usar búsqueda estándar
-                results = self._vector_search_manual(
-                    query_embedding=query_embedding_np.tolist(),
-                    filters=filters,
-                    n_results=n_results,
-                    include_neighbors=include_neighbors
-                )
-                
-                return results
-                
-        except Exception as e:
-            logger.error(f"Error en vector_search: {e}")
-            # En caso de error, intentar con el método manual
-            try:
-                return self._vector_search_manual(
-                    query_embedding=query_embedding,
-                    filters=filters,
-                    n_results=n_results,
-                    include_neighbors=include_neighbors
-                )
-            except Exception as e2:
-                logger.error(f"Error en búsqueda vectorial de respaldo: {e2}")
+            if total_chunks == 0:
+                logger.warning("⚠️ No chunks with embeddings found in database")
                 return []
+            
+            # Check dimensions of stored embeddings using array_length on FLOAT[]
+            dim_query = "SELECT array_length(embedding) as dim FROM chunks WHERE embedding IS NOT NULL LIMIT 1"
+            dim_result = self._conn.execute(dim_query).fetchone()
+            stored_dim = dim_result[0] if dim_result else 0
+            
+            logger.info(f"📏 Stored embedding dimensions: {stored_dim}, Query dimensions: {len(query_embedding)}")
+            
+            if stored_dim != len(query_embedding):
+                logger.error(f"❌ Dimension mismatch: stored={stored_dim}, query={len(query_embedding)}")
+                return []
+            
+            # Convert query embedding to the format expected by DuckDB
+            query_vector = self.serialize_vector(query_embedding)
+            
+            # Perform vector search query using list_cosine_similarity for FLOAT[] arrays
+            search_query = """
+            SELECT 
+                c.id,
+                c.text,
+                c.header,
+                c.page,
+                d.title as document_title,
+                list_cosine_similarity(c.embedding, ?::FLOAT[]) as similarity
+            FROM chunks c
+            JOIN documents d ON c.document_id = d.id
+            WHERE c.embedding IS NOT NULL
+            ORDER BY similarity DESC
+            LIMIT ?
+            """
+            
+            logger.info("🔄 Executing vector search query...")
+            results = self._conn.execute(search_query, [query_vector, n_results]).fetchall()
+            
+            logger.info(f"📋 Raw query returned {len(results)} results")
+            
+            # Format results
+            chunks = []
+            for row in results:
+                chunk_id, text, header, page, doc_title, similarity = row
+                
+                logger.info(f"📄 Result {len(chunks)+1}: ID={chunk_id}, similarity={similarity:.3f}, text_preview='{text[:50]}...'")
+                
+                chunks.append({
+                    'id': chunk_id,
+                    'text': text,
+                    'header': header or '',
+                    'page': page or 'N/A',
+                    'document_title': doc_title or '',
+                    'similarity': float(similarity)
+                })
+            
+            # Apply similarity threshold filtering
+            threshold = getattr(self, '_similarity_threshold', 0.3)
+            logger.info(f"🎯 Applying similarity threshold: {threshold}")
+            
+            filtered_chunks = [chunk for chunk in chunks if chunk['similarity'] >= threshold]
+            
+            if len(filtered_chunks) != len(chunks):
+                logger.info(f"🔽 Filtered from {len(chunks)} to {len(filtered_chunks)} chunks based on threshold")
+            
+            logger.info(f"✅ Vector search completed - returning {len(filtered_chunks)} chunks")
+            return filtered_chunks
+            
+        except Exception as e:
+            logger.error(f"❌ Error in vector search: {e}", exc_info=True)
+            return []
+
+    def get_total_chunks_count(self) -> int:
+        """
+        Gets the total number of chunks in the database.
+        
+        Returns:
+            Total number of chunks
+        """
+        try:
+            result = self._conn.execute("SELECT COUNT(*) FROM chunks").fetchone()
+            return result[0] if result else 0
+        except Exception as e:
+            logger.error(f"Error getting chunk count: {e}")
+            return 0
     
     def _vector_search_manual(self, query_embedding: List[float], filters=None, n_results=5, include_neighbors=False):
         """
@@ -953,10 +968,10 @@ class DuckDBVectorialDatabase(VectorialDatabase):
             for chunk in chunks:
                 # Procesar el embedding
                 embedding = chunk.get('embedding')
-                serialized_embedding = None
+                processed_embedding = None
                 
                 if embedding is not None:
-                    serialized_embedding = self.serialize_vector(embedding)
+                    processed_embedding = self.serialize_vector(embedding)
                 
                 # Preparar parámetros para este chunk
                 chunk_params.append((
@@ -964,8 +979,8 @@ class DuckDBVectorialDatabase(VectorialDatabase):
                     chunk.get('text', ''),
                     chunk.get('header', None),
                     chunk.get('page', None),
-                    serialized_embedding,
-                    self._embedding_dim if serialized_embedding else None
+                    processed_embedding,
+                    self._embedding_dim if processed_embedding else None
                 ))
             
             # Realizar inserción masiva
