@@ -915,7 +915,7 @@ Cada módulo implementa el **patrón Factory** para creación de instancias:
 
 - **[📁 Módulos del Sistema](modulos/)** - Directorio principal con toda la implementación modular. Cada subdirectorio contiene componentes específicos con documentación propia y ejemplos de uso
 
-- **[🌐 Interfaz Web](web/)** - Chatbot web integrado con interfaz moderna, selección dinámica de bases de datos, historial de conversaciones y streaming de respuestas
+- **[🌐 Interfaz Web](modulos/rag/)** - Chatbot web integrado con interfaz moderna, selección dinámica de bases de datos, historial de conversaciones y streaming de respuestas
 
 ## 🤝 Contribuciones
 
