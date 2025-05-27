@@ -35,7 +35,7 @@ from modulos.utils.formatting import (
 from modulos.utils.logging_utils import setup_logging, silence_verbose_loggers
 
 # Configurar logging
-setup_logging(level=logging.INFO, log_file="/logs/rag_system.log")
+setup_logging(level=logging.INFO, log_file="./logs/rag_system.log")
 
 # Silenciar módulos verbosos
 silence_verbose_loggers()
