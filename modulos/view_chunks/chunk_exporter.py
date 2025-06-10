@@ -1,86 +1,83 @@
-"""
-Exportador de chunks a archivos de texto para visualización y análisis.
+"""Chunk exporter to text files for visualization and analysis.
 
-Este módulo permite exportar los chunks almacenados en la base de datos
-a archivos de texto plano ubicados en la misma ruta que los archivos
-Markdown originales. Incluye metadatos del documento y detalles de cada chunk.
+This module allows exporting chunks stored in the database
+to plain text files located in the same path as the original
+Markdown files. Includes document metadata and details of each chunk.
 """
 
 import os
 import logging
 import gc
-from typing import Dict, List, Any, Optional, Union
+from typing import Dict, Any, Optional
 from datetime import datetime
 
-# Configurar logging
+# Configure logging
 logger = logging.getLogger(__name__)
 
 class ChunkExporter:
     """
-    Clase para exportar chunks de documentos a archivos de texto.
+    Class for exporting document chunks to text files.
     
-    Extrae información de chunks desde la base de datos y genera
-    archivos de texto con formato legible para visualización y análisis.
+    Extracts chunk information from the database and generates
+    text files with readable format for visualization and analysis.
     """
     
     def __init__(self, db_instance):
         """
-        Inicializa el exportador con una instancia de base de datos.
+        Initializes the exporter with a database instance.
         
         Args:
-            db_instance: Instancia de base de datos vectorial
+            db_instance: Vector database instance
         """
         self.db = db_instance
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        # Directorio base para exportaciones si no se especifica uno
+        # Base directory for exports if none is specified
         self.output_base_dir = "exported_chunks"
-        # Opciones de formato
+        # Format options
         self.include_separators = True
         self.include_chunk_number = True
     
     def export_document_chunks(self, document_path: str, output_path: Optional[str] = None) -> bool:
-        """
-        Exporta los chunks de un documento específico a un archivo de texto.
+        """Exports the chunks of a specific document to a text file.
         
         Args:
-            document_path: Ruta del documento Markdown original
-            output_path: Ruta de salida para el archivo de texto. Si es None,
-                         se usará document_path + ".txt"
-                         
+            document_path: Path to the original document
+            output_path: Optional path for the output file
+            
         Returns:
-            bool: True si la exportación fue exitosa, False en caso contrario
+            True if the export was successful, False otherwise
         """
         try:
-            # Normalizar la ruta para búsqueda en la base de datos
+            # Normalize the path for database search
             normalized_path = os.path.normpath(document_path)
             
-            # Buscar el documento en la base de datos
+            # Search for the document in the database
             document = self.find_document_by_path(normalized_path)
             if not document:
-                self.logger.warning(f"No se encontró documento para: {document_path}")
+                self.logger.warning(f"Document not found for: {document_path}")
                 return False
             
-            # Determinar ruta de salida si no se proporcionó
+            # Determine output path if not provided
             if output_path is None:
                 output_path = document_path + ".txt"
             
-            self.logger.info(f"Exportando chunks del documento: {document_path} -> {output_path}")
+            self.logger.info(f"Exporting document chunks: {document_path} -> {output_path}")
             
-            # Asegurar que el directorio de salida existe
+            # Ensure the output directory exists
             os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
             
-            # Obtener y procesar chunks por lotes para manejar documentos grandes
+            # Get and process chunks in batches to handle large documents
             offset = 0
-            limit = 100  # Obtener chunks en lotes para documentos grandes
+            limit = 100  # Get chunks in batches for large documents
             total_chunks = 0
             
             with open(output_path, 'w', encoding='utf-8') as f:
-                # Escribir encabezado y metadatos
+                # Write header and metadata
                 f.write(self.format_document_metadata(document))
                 
-                # Escribir chunks por lotes
+                # Write chunks in batches
                 while True:
-                    self.logger.debug(f"Obteniendo lote de chunks: offset={offset}, limit={limit}")
+                    self.logger.debug(f"Getting chunk batch: offset={offset}, limit={limit}")
                     batch = self.db.get_chunks_by_document(document['id'], offset, limit)
                     
                     if not batch:
@@ -88,48 +85,47 @@ class ChunkExporter:
                     
                     total_chunks += len(batch)
                     
-                    # Escribir los chunks de este lote
+                    # Write the chunks from this batch
                     for i, chunk in enumerate(batch, offset + 1):
                         chunk_text = self.format_chunk(chunk, i)
                         f.write(chunk_text)
                     
-                    # Liberar memoria
+                    # Free memory
                     del batch
-                    if offset % 500 == 0:  # Forzar GC periódicamente para documentos grandes
+                    if offset % 500 == 0:  # Force GC periodically for large documents
                         gc.collect()
                     
                     offset += limit
                 
-                # Escribir resumen al final
-                f.write(f"\n\n================ RESUMEN ================\n")
-                f.write(f"Total de chunks: {total_chunks}\n")
-                f.write(f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+                # Write summary at the end
+                f.write("\n\n================ SUMMARY ================\n")
+                f.write(f"Total chunks: {total_chunks}\n")
+                f.write(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             
-            self.logger.info(f"Exportación completada: {output_path} con {total_chunks} chunks")
+            self.logger.info(f"Export completed: {output_path} with {total_chunks} chunks")
             return True
             
         except Exception as e:
-            self.logger.error(f"Error al exportar chunks para {document_path}: {e}")
+            self.logger.error(f"Error exporting chunks for {document_path}: {e}")
             return False
     
     def find_document_by_path(self, document_path: str) -> Optional[Dict[str, Any]]:
-        """
-        Busca un documento en la base de datos por su ruta de archivo.
+        """Searches for a document in the database by its file path.
         
         Args:
-            document_path: Ruta del archivo a buscar
+            document_path: Path to the document
             
         Returns:
-            Dict con información del documento o None si no se encuentra
+            Dictionary with document information or None if not found
         """
         try:
-            self.logger.debug(f"Buscando documento con ruta: {document_path}")
+            self.logger.debug(f"Searching for document with path: {document_path}")
             
-            # Ejecutar consulta en la base de datos
-            # La mayoría de nuestras implementaciones tienen un cursor
+            # Execute query in the database
+            # Most of our implementations have a cursor
             cursor = self.db._cursor
             
-            # Buscar el documento por ruta exacta
+            # Search for the document by exact path
             cursor.execute(
                 "SELECT id, title, url, file_path, created_at FROM documents WHERE file_path = ?", 
                 (document_path,)
@@ -137,11 +133,11 @@ class ChunkExporter:
             doc = cursor.fetchone()
             
             if doc:
-                # Convertir a diccionario si es una fila de SQLite
+                # Convert to dictionary if it's a SQLite row
                 if hasattr(doc, 'keys'):
                     return dict(doc)
                 else:
-                    # Crear diccionario manualmente
+                    # Create dictionary manually
                     return {
                         'id': doc[0],
                         'title': doc[1],
@@ -150,7 +146,7 @@ class ChunkExporter:
                         'created_at': doc[4]
                     }
             else:
-                # Intentar búsqueda alternativa - con coincidencia parcial de ruta
+                # Try alternative search - with partial path matching
                 cursor.execute(
                     "SELECT id, title, url, file_path, created_at FROM documents WHERE file_path LIKE ?", 
                     (f"%{os.path.basename(document_path)}%",)
@@ -172,76 +168,74 @@ class ChunkExporter:
             return None
             
         except Exception as e:
-            self.logger.error(f"Error al buscar documento: {e}")
+            self.logger.error(f"Error searching for document: {e}")
             return None
     
     def format_document_metadata(self, document: Dict[str, Any]) -> str:
-        """
-        Formatea los metadatos del documento para el archivo de salida.
+        """Formats the document metadata for the output file.
         
         Args:
-            document: Diccionario con información del documento
+            document: Dictionary with document information
             
         Returns:
-            String formateado con los metadatos
+            Formatted string with metadata
         """
         lines = []
-        lines.append("================ METADATOS DEL DOCUMENTO ================\n")
+        lines.append("================ DOCUMENT METADATA ================\n")
         lines.append(f"ID: {document.get('id', 'N/A')}")
-        lines.append(f"Título: {document.get('title', 'Sin título')}")
-        lines.append(f"Ruta: {document.get('file_path', 'N/A')}")
+        lines.append(f"Title: {document.get('title', 'No title')}")
+        lines.append(f"Path: {document.get('file_path', 'N/A')}")
         
-        # Formatear fecha si está disponible
+        # Format date if available
         created_at = document.get('created_at')
         if created_at:
-            # Intentar convertir a formato legible si es timestamp
+            # Try to convert to readable format if it's a timestamp
             try:
                 if isinstance(created_at, (int, float)):
                     created_at = datetime.fromtimestamp(created_at).strftime('%Y-%m-%d %H:%M:%S')
             except Exception:
                 pass
-            lines.append(f"Fecha de procesamiento: {created_at}")
+            lines.append(f"Processing date: {created_at}")
         
-        # Obtener el número de chunks del documento
+        # Get the number of chunks in the document
         try:
             doc_id = document.get('id')
             if doc_id:
-                # Contar los chunks del documento
+                # Count the document chunks
                 cursor = self.db._cursor
                 cursor.execute("SELECT COUNT(*) FROM chunks WHERE document_id = ?", (doc_id,))
                 count_result = cursor.fetchone()
                 total_chunks = count_result[0] if count_result else 0
-                lines.append(f"Total de chunks: {total_chunks}")
+                lines.append(f"Total chunks: {total_chunks}")
         except Exception as e:
-            self.logger.warning(f"No se pudo obtener el número total de chunks: {e}")
+            self.logger.warning(f"Could not get total number of chunks: {e}")
         
-        lines.append("\n=================== CHUNKS GENERADOS ===================\n")
+        lines.append("\n=================== GENERATED CHUNKS ===================\n")
         
         return "\n".join(lines)
     
     def format_chunk(self, chunk: Dict[str, Any], chunk_num: int) -> str:
-        """
-        Formatea un chunk para el archivo de salida.
+        """Formats a chunk for the output file.
         
         Args:
-            chunk: Diccionario con información del chunk
-            chunk_num: Número secuencial del chunk
+            chunk: Dictionary with chunk information
+            chunk_num: Sequential number of the chunk
             
         Returns:
-            String formateado con la información del chunk
+            Formatted string with chunk information
         """
         lines = []
         lines.append(f"\n----- CHUNK #{chunk_num} (ID: {chunk.get('id', 'N/A')}) -----\n")
         
-        # Información del chunk
+        # Chunk information
         if 'page' in chunk and chunk['page']:
-            lines.append(f"Página: {chunk['page']}")
+            lines.append(f"Page: {chunk['page']}")
         
         if 'header' in chunk and chunk['header']:
-            lines.append(f"Encabezado: {chunk['header']}")
+            lines.append(f"Header: {chunk['header']}")
         
-        # Contenido del chunk
-        lines.append(f"\nContenido:\n{'-' * 50}")
+        # Chunk content
+        lines.append(f"\nContent:\n{'-' * 50}")
         lines.append(chunk.get('text', ''))
         lines.append(f"{'-' * 50}\n")
         
@@ -249,13 +243,13 @@ class ChunkExporter:
     
     def export_all_chunks_from_db(self) -> Dict[str, bool]:
         """
-        Exporta los chunks de todos los documentos en la base de datos.
+        Exports chunks from all documents in the database.
         
         Returns:
-            Diccionario con las rutas de documentos y si su exportación fue exitosa
+            Dictionary with document paths and whether their export was successful
         """
         try:
-            # Obtener todos los documentos de la base de datos
+            # Get all documents from the database
             cursor = self.db._cursor
             cursor.execute("SELECT id, title, url, file_path, created_at FROM documents")
             
@@ -274,87 +268,86 @@ class ChunkExporter:
             
             results = {}
             
-            # Exportar chunks para cada documento
+            # Export chunks for each document
             for doc in documents:
                 file_path = doc.get('file_path')
                 if file_path:
                     result = self.export_document_chunks(file_path)
                     results[file_path] = result
                 
-                # Liberar recursos cada pocos documentos
+                # Free resources every few documents
                 if len(results) % 10 == 0:
                     gc.collect()
             
             return results
             
         except Exception as e:
-            self.logger.error(f"Error al exportar todos los chunks: {e}")
+            self.logger.error(f"Error exporting all chunks: {e}")
             return {}
 
     def export_chunk(self, chunk, filename_prefix, metadata=None):
-        """
-        Exporta un único chunk a un archivo de texto.
+        """Exports an individual chunk to a text file.
         
         Args:
-            chunk: El chunk a exportar
-            filename_prefix: Prefijo para el nombre del archivo
-            metadata: Metadatos adicionales opcionales
+            chunk: The chunk to export
+            filename_prefix: Prefix for the filename
+            metadata: Optional additional metadata
             
         Returns:
-            Ruta al archivo generado
+            Path to the generated file
         """
         try:
-            # Asegurar que el directorio existe
+            # Ensure the directory exists
             os.makedirs(self.output_base_dir, exist_ok=True)
             
-            # Crear nombre de archivo
+            # Create filename
             filename = os.path.join(self.output_base_dir, f"{filename_prefix}_{chunk.id if hasattr(chunk, 'id') else 'unnamed'}.txt")
             
             with open(filename, 'w', encoding='utf-8') as f:
-                # Escribir metadatos si existen
+                # Write metadata if it exists
                 if metadata:
-                    f.write("================ METADATOS ================\n")
+                    f.write("================ METADATA ================\n")
                     for key, value in metadata.items():
                         f.write(f"{key}: {value}\n")
                     f.write("\n")
                 
-                # Escribir separador superior si está habilitado
+                # Write top separator if enabled
                 if self.include_separators:
                     f.write("="*40 + "\n")
                 
-                # Escribir número de chunk si está habilitado
+                # Write chunk number if enabled
                 if self.include_chunk_number:
                     f.write(f"Chunk #{getattr(chunk, 'id', 1)}\n\n")
                 
-                # Escribir encabezado si existe
+                # Write header if it exists
                 if hasattr(chunk, 'header') and chunk.header:
-                    f.write(f"Encabezado: {chunk.header}\n\n")
+                    f.write(f"Header: {chunk.header}\n\n")
                 
-                # Escribir texto del chunk
+                # Write chunk text
                 f.write(chunk.text)
                 
-                # Escribir separador inferior si está habilitado
+                # Write bottom separator if enabled
                 if self.include_separators:
                     f.write("\n" + "="*40)
             
-            self.logger.info(f"Chunk exportado a: {filename}")
+            self.logger.info(f"Chunk exported to: {filename}")
             return filename
             
         except Exception as e:
-            self.logger.error(f"Error al exportar chunk: {e}")
+            self.logger.error(f"Error exporting chunk: {e}")
             return None
     
     def export_chunks(self, chunks, base_filename, metadata=None):
         """
-        Exporta múltiples chunks a archivos de texto.
+        Exports multiple chunks to text files.
         
         Args:
-            chunks: Lista de chunks a exportar
-            base_filename: Nombre base para los archivos
-            metadata: Metadatos adicionales opcionales
+            chunks: List of chunks to export
+            base_filename: Base name for the files
+            metadata: Optional additional metadata
             
         Returns:
-            Lista de rutas a los archivos generados
+            List of paths to the generated files
         """
         filenames = []
         
@@ -372,22 +365,22 @@ class ChunkExporter:
 
 def export_chunks_for_files(file_paths: str, db_instance) -> Dict[str, bool]:
     """
-    Exporta los chunks para todos los archivos Markdown especificados.
+    Exports chunks for all specified Markdown files.
     
     Args:
-        file_paths: Ruta a un directorio o archivo individual
-        db_instance: Instancia de base de datos vectorial
+        file_paths: Path to a directory or individual file
+        db_instance: Vector database instance
         
     Returns:
-        Diccionario con las rutas procesadas y si su exportación fue exitosa
+        Dictionary with processed paths and whether their export was successful
     """
     exporter = ChunkExporter(db_instance)
     results = {}
     
     try:
         if os.path.isdir(file_paths):
-            # Recorrer recursivamente el directorio
-            logger.info(f"Exportando chunks para todos los Markdown en: {file_paths}")
+            # Recursively traverse the directory
+            logger.info(f"Exporting chunks for all Markdown files in: {file_paths}")
             
             for root, _, files in os.walk(file_paths):
                 for file in files:
@@ -396,31 +389,34 @@ def export_chunks_for_files(file_paths: str, db_instance) -> Dict[str, bool]:
                         result = exporter.export_document_chunks(md_path)
                         results[md_path] = result
                 
-                # Liberar recursos periódicamente
+                # Free resources periodically
                 if len(results) % 10 == 0:
                     gc.collect()
                     
         elif os.path.isfile(file_paths) and file_paths.lower().endswith('.md'):
-            # Exportar un solo archivo
-            logger.info(f"Exportando chunks para archivo Markdown: {file_paths}")
+            # Export a single file
+            logger.info(f"Exporting chunks for Markdown file: {file_paths}")
             result = exporter.export_document_chunks(file_paths)
             results[file_paths] = result
         else:
-            logger.warning(f"La ruta proporcionada no es un archivo Markdown o directorio válido: {file_paths}")
+            logger.warning(f"The provided path is not a valid Markdown file or directory: {file_paths}")
     
     except Exception as e:
-        logger.error(f"Error al exportar chunks: {e}")
+        logger.error(f"Error exporting chunks: {e}")
     
-    # Liberar recursos
+    # Free resources
     del exporter
     gc.collect()
     
-    # Ahora generar visualizaciones t-SNE para los mismos archivos
+    # Now generate t-SNE visualizations for the same files
     try:
-        from modulos.view_chunks.tsne_visualizer import visualize_tsne_for_files
-        logger.info("Generando visualizaciones t-SNE para los archivos procesados...")
-        visualize_tsne_for_files(file_paths, db_instance)
+        logger.info("Generating t-SNE visualizations for processed files...")
+        from .tsne_visualizer import visualize_tsne_for_files
+        
+        # Get documents for the processed files and generate visualizations
+        for file_path in file_paths if isinstance(file_paths, list) else [file_paths]:
+            visualize_tsne_for_files(file_path)
     except Exception as e:
-        logger.error(f"Error al generar visualizaciones t-SNE: {e}")
+        logger.error(f"Error generating t-SNE visualizations: {e}")
     
-    return results 
+    return results

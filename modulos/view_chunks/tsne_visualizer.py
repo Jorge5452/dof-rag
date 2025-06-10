@@ -1,427 +1,492 @@
-"""
-Visualizador de embeddings de chunks utilizando t-SNE.
+"""Chunk embeddings visualizer using t-SNE.
 
-Este módulo proporciona herramientas para visualizar los embeddings de chunks 
-generados del procesamiento de documentos Markdown utilizando t-SNE (t-Distributed 
-Stochastic Neighbor Embedding), un algoritmo de reducción de dimensionalidad.
-Genera gráficos 2D y 3D que permiten visualizar cómo se distribuyen los embeddings
-en el espacio y ayuda a identificar patrones y grupos semánticos.
+This module provides tools to visualize chunk embeddings generated from
+Markdown document processing using t-SNE (t-Distributed Stochastic Neighbor
+Embedding), a dimensionality reduction algorithm. It generates 2D and 3D plots
+that allow visualization of how embeddings are distributed in space and helps
+identify semantic patterns and groups.
 """
 
 import os
 import logging
+import gc
+from pathlib import Path
+from typing import Dict, List, Any, Optional, Tuple, Union
+from ..session_manager.session_manager import SessionManager
+
 import numpy as np
-from typing import Dict, List, Any, Optional, Tuple
+import matplotlib
 import matplotlib.pyplot as plt
-from matplotlib import cm
 from sklearn.manifold import TSNE
 from sklearn.preprocessing import normalize
 
-# Silenciar warning de joblib configurando el número de cores
-os.environ["LOKY_MAX_CPU_COUNT"] = "4"  # Un valor razonable para la mayoría de sistemas
+# Configure matplotlib for server environments without display
+matplotlib.use('Agg')  # Use non-interactive backend to avoid GUI dependencies
+plt.ioff()  # Disable interactive plotting to prevent blocking operations
 
-# Configurar logging
+# Limit parallel processing to prevent resource exhaustion
+os.environ["LOKY_MAX_CPU_COUNT"] = "4"  # Restrict joblib to 4 cores to avoid memory issues
+
+# Configure logging
 logger = logging.getLogger(__name__)
+
+# Constants for optimization
+CONSTANTS = {
+    'MIN_CHUNKS_NEEDED': 2,
+    'DEFAULT_LIMIT': 1000,
+    'DEFAULT_DPI': 150,
+    'RANDOM_STATE': 42,
+    'FIGURE_SIZE_2D': (12, 10),
+    'FIGURE_SIZE_3D': (14, 12),
+    'SMALL_CHUNK_THRESHOLD': 5,
+    'MEDIUM_CHUNK_THRESHOLD': 10,
+    'LARGE_CHUNK_THRESHOLD': 20,
+    'DERIVED_3D_THRESHOLD': 15
+}
 
 class TSNEVisualizer:
     """
-    Clase para visualizar embeddings de chunks utilizando t-SNE.
+    Class for visualizing chunk embeddings using t-SNE.
     
-    Genera visualizaciones 2D y 3D de los embeddings de chunks
-    para facilitar el análisis y la identificación de patrones.
+    Generates 2D and 3D visualizations of chunk embeddings
+    to facilitate analysis and pattern identification.
     """
     
     def __init__(self, db_instance):
         """
-        Inicializa el visualizador con una instancia de base de datos.
+        Initializes the visualizer with a database instance.
         
         Args:
-            db_instance: Instancia de base de datos vectorial
+            db_instance: Vector database instance
         """
         self.db = db_instance
         self.logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
     
-    def generate_tsne_embeddings(self, document_id: int, perplexity: float = 30.0) -> Tuple[np.ndarray, List[Dict[str, Any]], np.ndarray, np.ndarray]:
+    def generate_tsne_embeddings(self, document_id: int, perplexity: float = 30.0) -> Optional[Tuple[np.ndarray, List[Dict[str, Any]], np.ndarray, np.ndarray]]:
         """
-        Genera embeddings t-SNE en 2D y 3D para un documento específico.
+        Generates 2D and 3D t-SNE embeddings for a specific document.
         
         Args:
-            document_id: ID del documento en la base de datos
-            perplexity: Parámetro de perplexity para t-SNE (valor recomendado: 5-50)
+            document_id: Document ID in the database
+            perplexity: Perplexity parameter for t-SNE (recommended value: 5-50)
             
         Returns:
-            Tupla con (embeddings originales, lista de chunks, embeddings 2D, embeddings 3D)
-            Retorna None si no hay suficientes chunks con embeddings
+            Tuple with (original embeddings, chunk list, 2D embeddings, 3D embeddings)
+            Returns None if there are not enough chunks with embeddings
         """
         try:
-            # Obtener todos los chunks del documento con sus embeddings
-            offset = 0
-            limit = 1000  # Un límite grande para obtener todos los chunks
-            chunks = self.db.get_chunks_by_document(document_id, offset, limit)
+            # Retrieve all text chunks for the specified document from database
+            chunks = self.db.get_chunks_by_document(document_id, 0, CONSTANTS['DEFAULT_LIMIT'])
             
-            # Filtrar chunks que tienen embeddings
-            chunks_with_embeddings = [chunk for chunk in chunks if "embedding" in chunk and chunk["embedding"] is not None]
+            # Filter out chunks without embedding vectors (required for t-SNE)
+            chunks_with_embeddings = [
+                chunk for chunk in chunks 
+                if chunk.get("embedding") is not None
+            ]
             
-            # Verificar que hay suficientes chunks para t-SNE
-            min_chunks_needed = 2  # Mínimo absoluto para visualizar puntos
+            # Verify there are enough chunks for t-SNE
+            n_chunks = int(len(chunks_with_embeddings))
+            if n_chunks < CONSTANTS['MIN_CHUNKS_NEEDED']:
+                self.logger.warning(
+                    f"Not enough chunks with embeddings for document {document_id}. "
+                    f"At least {CONSTANTS['MIN_CHUNKS_NEEDED']} chunks are needed."
+                )
+                return None
             
-            if len(chunks_with_embeddings) < min_chunks_needed:
-                self.logger.warning(f"No hay suficientes chunks con embeddings para el documento {document_id}. Se necesitan al menos {min_chunks_needed} chunks.")
-                return None, None, None, None
-            
-            # Extraer embeddings
+            # Convert embedding lists to numpy array and apply L2 normalization
             embeddings = np.array([chunk["embedding"] for chunk in chunks_with_embeddings])
-            
-            # Normalizar embeddings para consistencia
             normalized_embeddings = normalize(embeddings, axis=1, norm='l2')
             
-            # Adaptar parámetros de t-SNE según el número de chunks
-            n_chunks = len(chunks_with_embeddings)
+            # Calculate adaptive t-SNE parameters based on dataset size
+            tsne_params = self._get_tsne_parameters(n_chunks, perplexity)
             
-            # Para t-SNE la perplexity debe ser menor que n_samples - 1
-            # Se recomienda entre 5 y 50, pero adaptamos para conjuntos pequeños
-            if n_chunks <= 5:
-                # Para conjuntos muy pequeños, usar perplexity baja
-                adjusted_perplexity = max(1.0, n_chunks / 3)
-                n_iter = 500  # Más iteraciones para conjuntos pequeños
-                early_exaggeration = 6.0  # Valor equilibrado
-            elif n_chunks <= 10:
-                adjusted_perplexity = max(2.0, n_chunks / 3)
-                n_iter = 1000
-                early_exaggeration = 8.0
-            else:
-                # Para conjuntos normales, usar la perplexity recomendada
-                adjusted_perplexity = min(perplexity, n_chunks - 1)
-                n_iter = 1000
-                early_exaggeration = 12.0
-            
-            # Generar embeddings t-SNE en 2D
+            # Generate 2D t-SNE embeddings
             tsne_2d = TSNE(
-                n_components=2, 
-                perplexity=adjusted_perplexity,
-                n_iter=n_iter,
-                early_exaggeration=early_exaggeration,
-                random_state=42
+                n_components=2,
+                perplexity=tsne_params['perplexity'],
+                max_iter=tsne_params['n_iter'],
+                early_exaggeration=tsne_params['early_exaggeration'],
+                random_state=CONSTANTS['RANDOM_STATE'],
+                n_jobs=1  # Explicit single-threaded for consistency
             )
             tsne_embeddings_2d = tsne_2d.fit_transform(normalized_embeddings)
             
-            # Generar embeddings t-SNE en 3D (solo si hay suficientes chunks)
-            if n_chunks >= 3:  # Para 3D necesitamos al menos 3 puntos
-                tsne_3d = TSNE(
-                    n_components=3, 
-                    perplexity=adjusted_perplexity,
-                    n_iter=n_iter,
-                    early_exaggeration=early_exaggeration,
-                    random_state=42
-                )
-                tsne_embeddings_3d = tsne_3d.fit_transform(normalized_embeddings)
-            else:
-                # Para 1 o 2 chunks, generar una visualización 3D simple
-                # Añadimos una dimensión con valores aleatorios pequeños para visualizarlos
-                tsne_embeddings_3d = np.column_stack((
-                    tsne_embeddings_2d, 
-                    np.random.normal(0, 0.01, size=n_chunks)
-                ))
+            # Generate 3D embeddings using hybrid approach (derived or computed)
+            tsne_embeddings_3d = self._generate_3d_embeddings(
+                normalized_embeddings, tsne_embeddings_2d, n_chunks, tsne_params
+            )
             
-            self.logger.info(f"Generados embeddings t-SNE para {n_chunks} chunks con perplexity={adjusted_perplexity:.2f}")
+            self.logger.info(
+                f"Generated t-SNE embeddings for {n_chunks} chunks "
+                f"with perplexity={tsne_params['perplexity']:.2f}"
+            )
             return normalized_embeddings, chunks_with_embeddings, tsne_embeddings_2d, tsne_embeddings_3d
             
         except Exception as e:
-            self.logger.error(f"Error al generar embeddings t-SNE: {e}")
-            return None, None, None, None
+            self.logger.error(f"Error generating t-SNE embeddings: {e}")
+            return None
     
-    def create_2d_plot(self, tsne_embeddings_2d: np.ndarray, chunks: List[Dict[str, Any]], 
-                      output_path: str, title: Optional[str] = None) -> bool:
+    def _get_tsne_parameters(self, n_chunks: int, perplexity: float) -> Dict[str, float]:
         """
-        Crea y guarda un gráfico 2D de los embeddings t-SNE.
+        Get optimized t-SNE parameters based on the number of chunks.
         
         Args:
-            tsne_embeddings_2d: Embeddings t-SNE en 2D
-            chunks: Lista de chunks con información relacionada
-            output_path: Ruta donde guardar el gráfico
-            title: Título opcional para el gráfico
+            n_chunks: Number of chunks
+            perplexity: Base perplexity value
             
         Returns:
-            bool: True si la operación fue exitosa, False en caso contrario
+            Dictionary with t-SNE parameters
+        """
+        # t-SNE requires perplexity < n_samples, adjust parameters by dataset size
+        n_chunks = int(n_chunks)  # Convert to integer for threshold comparisons
+        if n_chunks <= CONSTANTS['SMALL_CHUNK_THRESHOLD']:
+            return {
+                'perplexity': max(1.0, n_chunks / 3),
+                'n_iter': 250,
+                'early_exaggeration': 6.0
+            }
+        elif n_chunks <= CONSTANTS['MEDIUM_CHUNK_THRESHOLD']:
+            return {
+                'perplexity': max(2.0, n_chunks / 3),
+                'n_iter': 300,
+                'early_exaggeration': 8.0
+            }
+        elif n_chunks <= CONSTANTS['LARGE_CHUNK_THRESHOLD']:
+            return {
+                'perplexity': min(perplexity, n_chunks - 1),
+                'n_iter': 400,
+                'early_exaggeration': 10.0
+            }
+        else:
+            return {
+                'perplexity': min(perplexity, n_chunks - 1),
+                'n_iter': 500,
+                'early_exaggeration': 12.0
+            }
+    
+    def _generate_3d_embeddings(self, normalized_embeddings: np.ndarray, 
+                               tsne_embeddings_2d: np.ndarray, n_chunks: int, 
+                               tsne_params: Dict[str, float]) -> np.ndarray:
+        """
+        Generate 3D t-SNE embeddings using optimized approach.
+        
+        Args:
+            normalized_embeddings: Normalized input embeddings
+            tsne_embeddings_2d: 2D t-SNE embeddings
+            n_chunks: Number of chunks
+            tsne_params: t-SNE parameters
+            
+        Returns:
+            3D t-SNE embeddings
+        """
+        np.random.seed(CONSTANTS['RANDOM_STATE'])  # Ensure reproducibility
+        n_chunks = int(n_chunks)  # Ensure n_chunks is integer
+        
+        if n_chunks >= 3 and n_chunks <= CONSTANTS['DERIVED_3D_THRESHOLD']:
+            # For datasets ≤15 chunks: create pseudo-3D by adding structured Z-axis
+            z_component = np.random.normal(0, 0.1, size=n_chunks)
+            # Correlate Z-axis with 2D position to maintain some spatial relationship
+            z_component += 0.05 * (tsne_embeddings_2d[:, 0] + tsne_embeddings_2d[:, 1])
+            return np.column_stack((tsne_embeddings_2d, z_component))
+        
+        elif n_chunks > CONSTANTS['DERIVED_3D_THRESHOLD']:
+            # For datasets >15 chunks: compute true 3D t-SNE transformation
+            tsne_3d = TSNE(
+                n_components=3,
+                perplexity=tsne_params['perplexity'],
+                max_iter=tsne_params['n_iter'],
+                early_exaggeration=tsne_params['early_exaggeration'],
+                random_state=CONSTANTS['RANDOM_STATE'],
+                n_jobs=1
+            )
+            return tsne_3d.fit_transform(normalized_embeddings)
+        
+        else:
+            # For datasets with 1-2 chunks: add minimal Z variation for 3D display
+            z_component = np.random.normal(0, 0.01, size=n_chunks)
+            return np.column_stack((tsne_embeddings_2d, z_component))
+    
+    def create_2d_plot(self, tsne_embeddings_2d: np.ndarray, chunks: List[Dict[str, Any]], 
+                      output_path: Union[str, Path], title: Optional[str] = None) -> bool:
+        """
+        Creates and saves a 2D plot of t-SNE embeddings.
+        
+        Args:
+            tsne_embeddings_2d: 2D t-SNE embeddings
+            chunks: List of chunks with related information
+            output_path: Path where to save the plot
+            title: Optional title for the plot
+            
+        Returns:
+            bool: True if the operation was successful, False otherwise
         """
         try:
-            # Eliminar archivos existentes si existen
-            if os.path.exists(output_path):
-                os.remove(output_path)
-                self.logger.info(f"Reemplazando archivo existente: {output_path}")
+            output_path = Path(output_path)
+            self._remove_existing_file(output_path)
             
-            plt.figure(figsize=(12, 10))
+            # Initialize matplotlib figure with predefined dimensions
+            fig, ax = plt.subplots(figsize=CONSTANTS['FIGURE_SIZE_2D'])
             
-            # Obtener información para colorear puntos (usando páginas o encabezados)
-            colors = []
-            unique_headers = set()
+            # Extract page-based colors and size-adaptive plot parameters
+            colors = self._extract_colors(chunks)
+            plot_params = self._get_plot_parameters(len(chunks))
             
-            for chunk in chunks:
-                # Usar página como color si está disponible
-                if "page" in chunk and chunk["page"]:
-                    colors.append(int(chunk["page"]) if isinstance(chunk["page"], (int, float)) or 
-                                 (isinstance(chunk["page"], str) and chunk["page"].isdigit()) else 0)
-                else:
-                    # Si no hay página, usar un valor predeterminado
-                    colors.append(0)
-                
-                # Recopilar encabezados únicos para la leyenda
-                if "header" in chunk and chunk["header"]:
-                    unique_headers.add(chunk["header"])
-            
-            # Ajustar visualización según cantidad de puntos
-            n_chunks = len(chunks)
-            
-            if n_chunks <= 5:
-                s = 200  # Puntos más grandes para pocos chunks
-                alpha = 0.9
-                linewidths = 1.0
-            else:
-                s = 100
-                alpha = 0.7
-                linewidths = 0.5
-            
-            # Crear scatter plot
-            scatter = plt.scatter(
+            # Create scatter plot
+            scatter = ax.scatter(
                 tsne_embeddings_2d[:, 0], 
                 tsne_embeddings_2d[:, 1],
                 c=colors, 
                 cmap='viridis',
-                alpha=alpha,
-                s=s,
-                edgecolors='w',
-                linewidths=linewidths
+                **plot_params
             )
             
-            # Añadir etiquetas para pocos puntos
-            if n_chunks <= 10:
-                for i, chunk in enumerate(chunks):
-                    chunk_id = chunk.get('id', i)
-                    plt.annotate(
-                        f'Chunk {chunk_id}', 
-                        (tsne_embeddings_2d[i, 0], tsne_embeddings_2d[i, 1]),
-                        xytext=(5, 5),
-                        textcoords='offset points',
-                        fontsize=9
-                    )
+            # Add text labels only for datasets with ≤10 chunks to avoid clutter
+            self._add_chunk_labels(ax, tsne_embeddings_2d, chunks)
             
-            # Configurar el gráfico
-            plt.title(title or f"Visualización t-SNE 2D de {n_chunks} Embeddings de Chunks", fontsize=16)
-            plt.xlabel("t-SNE Componente 1", fontsize=12)
-            plt.ylabel("t-SNE Componente 2", fontsize=12)
-            plt.grid(alpha=0.3)
+            # Configure the plot
+            n_chunks = len(chunks)
+            ax.set_title(title or f"2D t-SNE Visualization of {n_chunks} Chunk Embeddings", fontsize=16)
+            ax.set_xlabel("t-SNE Component 1", fontsize=12)
+            ax.set_ylabel("t-SNE Component 2", fontsize=12)
+            ax.grid(alpha=0.3)
             
-            # Añadir colorbar si hay variedad de colores
+            # Display colorbar only when chunks span multiple pages
             if len(set(colors)) > 1:
-                cbar = plt.colorbar(scatter)
-                cbar.set_label("Número de Página", fontsize=12)
+                cbar = fig.colorbar(scatter, ax=ax)
+                cbar.set_label("Page Number", fontsize=12)
             
-            # Guardar el gráfico
-            plt.tight_layout()
-            plt.savefig(output_path, dpi=300, bbox_inches="tight")
-            plt.close()
+            # Save and cleanup
+            self._save_and_cleanup(fig, output_path)
             
-            self.logger.info(f"Gráfico t-SNE 2D guardado en: {output_path}")
+            self.logger.info(f"2D t-SNE plot saved at: {output_path}")
             return True
             
         except Exception as e:
-            self.logger.error(f"Error al crear gráfico t-SNE 2D: {e}")
+            self.logger.error(f"Error creating 2D t-SNE plot: {e}")
             return False
     
     def create_3d_plot(self, tsne_embeddings_3d: np.ndarray, chunks: List[Dict[str, Any]], 
-                      output_path: str, title: Optional[str] = None) -> bool:
+                      output_path: Union[str, Path], title: Optional[str] = None) -> bool:
         """
-        Crea y guarda un gráfico 3D de los embeddings t-SNE.
+        Creates and saves a 3D plot of t-SNE embeddings.
         
         Args:
-            tsne_embeddings_3d: Embeddings t-SNE en 3D
-            chunks: Lista de chunks con información relacionada
-            output_path: Ruta donde guardar el gráfico
-            title: Título opcional para el gráfico
+            tsne_embeddings_3d: 3D t-SNE embeddings
+            chunks: List of chunks with related information
+            output_path: Path where to save the plot
+            title: Optional title for the plot
             
         Returns:
-            bool: True si la operación fue exitosa, False en caso contrario
+            bool: True if the operation was successful, False otherwise
         """
         try:
-            # Eliminar archivos existentes si existen
-            if os.path.exists(output_path):
-                os.remove(output_path)
-                self.logger.info(f"Reemplazando archivo existente: {output_path}")
+            output_path = Path(output_path)
+            self._remove_existing_file(output_path)
+            self._cleanup_old_view_files(output_path)
             
-            # Crear figura 3D
-            fig = plt.figure(figsize=(14, 12))
+            # Initialize 3D matplotlib figure with larger dimensions
+            fig = plt.figure(figsize=CONSTANTS['FIGURE_SIZE_3D'])
             ax = fig.add_subplot(111, projection='3d')
             
-            # Obtener información para colorear puntos (usando páginas o encabezados)
-            colors = []
-            for chunk in chunks:
-                # Usar página como color si está disponible
-                if "page" in chunk and chunk["page"]:
-                    colors.append(int(chunk["page"]) if isinstance(chunk["page"], (int, float)) or 
-                                 (isinstance(chunk["page"], str) and chunk["page"].isdigit()) else 0)
-                else:
-                    # Si no hay página, usar un valor predeterminado
-                    colors.append(0)
+            # Extract page-based colors and size-adaptive plot parameters
+            colors = self._extract_colors(chunks)
+            plot_params = self._get_plot_parameters(len(chunks))
+            plot_params['depthshade'] = True  # Enable depth shading for 3D visual effect
             
-            # Ajustar visualización según cantidad de puntos
-            n_chunks = len(chunks)
-            
-            if n_chunks <= 5:
-                s = 200  # Puntos más grandes para pocos chunks
-                alpha = 0.9
-                linewidths = 1.0
-            else:
-                s = 100
-                alpha = 0.7
-                linewidths = 0.5
-            
-            # Crear scatter plot 3D
+            # Create 3D scatter plot
             scatter = ax.scatter(
                 tsne_embeddings_3d[:, 0],
                 tsne_embeddings_3d[:, 1], 
                 tsne_embeddings_3d[:, 2],
                 c=colors,
                 cmap='viridis',
-                alpha=alpha,
-                s=s,
-                edgecolors='w',
-                linewidths=linewidths,
-                depthshade=True
+                **plot_params
             )
             
-            # Añadir etiquetas para pocos puntos
-            if n_chunks <= 10:
-                for i, chunk in enumerate(chunks):
-                    chunk_id = chunk.get('id', i)
-                    ax.text(
-                        tsne_embeddings_3d[i, 0],
-                        tsne_embeddings_3d[i, 1], 
-                        tsne_embeddings_3d[i, 2],
-                        f'Chunk {chunk_id}',
-                        size=9
-                    )
+            # Add 3D text labels only for datasets with ≤10 chunks
+            self._add_3d_chunk_labels(ax, tsne_embeddings_3d, chunks)
             
-            # Configurar el gráfico
-            ax.set_title(title or f"Visualización t-SNE 3D de {n_chunks} Embeddings de Chunks", fontsize=16)
-            ax.set_xlabel("t-SNE Componente 1", fontsize=12)
-            ax.set_ylabel("t-SNE Componente 2", fontsize=12)
-            ax.set_zlabel("t-SNE Componente 3", fontsize=12)
+            # Configure the plot
+            n_chunks = len(chunks)
+            ax.set_title(title or f"3D t-SNE Visualization of {n_chunks} Chunk Embeddings", fontsize=16)
+            ax.set_xlabel("t-SNE Component 1", fontsize=12)
+            ax.set_ylabel("t-SNE Component 2", fontsize=12)
+            ax.set_zlabel("t-SNE Component 3", fontsize=12)
             
-            # Añadir colorbar si hay variedad de colores
+            # Add colorbar if there is color variety
             if len(set(colors)) > 1:
                 cbar = fig.colorbar(scatter, ax=ax, pad=0.1)
-                cbar.set_label("Número de Página", fontsize=12)
+                cbar.set_label("Page Number", fontsize=12)
             
-            # Configurar varias vistas para mejorar interpretación
-            views = [(30, 45), (0, 0), (0, 90), (90, 0)]
-            if n_chunks <= 5:
-                # Para pocos puntos, guardar varias vistas
-                for i, (elev, azim) in enumerate(views):
-                    view_path = output_path.replace('.png', f'_view{i}.png')
-                    
-                    # Eliminar archivos de vistas existentes si existen
-                    if os.path.exists(view_path):
-                        os.remove(view_path)
-                        self.logger.debug(f"Reemplazando archivo existente: {view_path}")
-                    
-                    ax.view_init(elev=elev, azim=azim)
-                    plt.savefig(view_path, dpi=300, bbox_inches="tight")
-                
-                # Volver a la vista principal
-                ax.view_init(elev=30, azim=45)
-            else:
-                # Para muchos puntos, solo la vista principal
-                ax.view_init(elev=30, azim=45)
-                
-                # Eliminar archivos de vistas si existen de ejecuciones anteriores
-                # (por si antes hubo pocos chunks y ahora hay muchos)
-                for i in range(len(views)):
-                    view_path = output_path.replace('.png', f'_view{i}.png')
-                    if os.path.exists(view_path):
-                        os.remove(view_path)
-                        self.logger.debug(f"Eliminando vista no necesaria: {view_path}")
+            # Set consistent 3D viewing angle (30° elevation, 45° azimuth)
+            ax.view_init(elev=30, azim=45)
             
-            # Guardar el gráfico principal
-            plt.tight_layout()
-            plt.savefig(output_path, dpi=300, bbox_inches="tight")
-            plt.close()
+            # Save and cleanup
+            self._save_and_cleanup(fig, output_path)
             
-            self.logger.info(f"Gráfico t-SNE 3D guardado en: {output_path}")
+            self.logger.info(f"3D t-SNE plot saved at: {output_path}")
             return True
             
         except Exception as e:
-            self.logger.error(f"Error al crear gráfico t-SNE 3D: {e}")
+            self.logger.error(f"Error creating 3D t-SNE plot: {e}")
             return False
     
-    def visualize_document_embeddings(self, document_path: str) -> bool:
+    def _remove_existing_file(self, file_path: Path) -> None:
+        """Delete existing plot file to prevent overwrite conflicts."""
+        if file_path.exists():
+            file_path.unlink()
+            self.logger.info(f"Replacing existing file: {file_path}")
+    
+    def _cleanup_old_view_files(self, output_path: Path) -> None:
+        """Remove any multi-angle view files from previous 3D plot generations."""
+        views = [(30, 45), (0, 0), (0, 90), (90, 0)]
+        for i in range(len(views)):
+            view_path = output_path.with_name(f"{output_path.stem}_view{i}.png")
+            if view_path.exists():
+                view_path.unlink()
+                self.logger.debug(f"Removing old view file: {view_path}")
+    
+    def _extract_colors(self, chunks: List[Dict[str, Any]]) -> List[int]:
+        """Convert chunk page numbers to integer color values for plot coloring."""
+        colors = []
+        for chunk in chunks:
+            page = chunk.get("page")
+            if page:
+                if isinstance(page, (int, float)):
+                    colors.append(int(page))
+                elif isinstance(page, str) and page.isdigit():
+                    colors.append(int(page))
+                else:
+                    colors.append(0)
+            else:
+                colors.append(0)
+        return colors
+    
+    def _get_plot_parameters(self, n_chunks: int) -> Dict[str, Any]:
+        """Return scatter plot styling parameters adapted to dataset size."""
+        if n_chunks <= CONSTANTS['SMALL_CHUNK_THRESHOLD']:
+            return {
+                'alpha': 0.9,      # Higher opacity for small datasets
+                's': 200,          # Larger point size for visibility
+                'edgecolors': 'w', # White borders for definition
+                'linewidths': 1.0  # Thicker borders
+            }
+        else:
+            return {
+                'alpha': 0.7,      # Lower opacity to reduce visual clutter
+                's': 100,          # Smaller points for dense plots
+                'edgecolors': 'w', # White borders for definition
+                'linewidths': 0.5  # Thinner borders
+            }
+    
+    def _add_chunk_labels(self, ax, embeddings: np.ndarray, chunks: List[Dict[str, Any]]) -> None:
+        """Add labels to chunks for small datasets (2D)."""
+        if len(chunks) <= CONSTANTS['MEDIUM_CHUNK_THRESHOLD']:
+            for i, chunk in enumerate(chunks):
+                chunk_id = chunk.get('id', i)
+                ax.annotate(
+                    f'Chunk {chunk_id}', 
+                    (embeddings[i, 0], embeddings[i, 1]),
+                    xytext=(5, 5),
+                    textcoords='offset points',
+                    fontsize=9
+                )
+    
+    def _add_3d_chunk_labels(self, ax, embeddings: np.ndarray, chunks: List[Dict[str, Any]]) -> None:
+        """Add labels to chunks for small datasets (3D)."""
+        if len(chunks) <= CONSTANTS['MEDIUM_CHUNK_THRESHOLD']:
+            for i, chunk in enumerate(chunks):
+                chunk_id = chunk.get('id', i)
+                ax.text(
+                    embeddings[i, 0],
+                    embeddings[i, 1], 
+                    embeddings[i, 2],
+                    f'Chunk {chunk_id}',
+                    size=9
+                )
+    
+    def _save_and_cleanup(self, fig, output_path: Path) -> None:
+        """Save plot to file and release matplotlib memory resources."""
+        plt.tight_layout()
+        fig.savefig(output_path, dpi=CONSTANTS['DEFAULT_DPI'], bbox_inches="tight")
+        plt.close(fig)
+        gc.collect()  # Force garbage collection to prevent memory leaks
+    
+    def visualize_document_embeddings(self, document_path: Union[str, Path]) -> bool:
         """
-        Visualiza los embeddings de un documento usando t-SNE.
+        Visualizes document embeddings using t-SNE.
         
         Args:
-            document_path: Ruta del documento Markdown
+            document_path: Path to the Markdown document
             
         Returns:
-            bool: True si la operación fue exitosa, False en caso contrario
+            bool: True if the operation was successful, False otherwise
         """
         try:
-            # Normalizar la ruta para búsqueda en la base de datos
-            normalized_path = os.path.normpath(document_path)
+            # Convert to absolute path for consistent database matching
+            document_path = Path(document_path)
+            normalized_path = str(document_path.resolve())
             
-            # Buscar documento en la base de datos
+            # Query database for document record using file path
             document = self.find_document_by_path(normalized_path)
             if not document:
-                self.logger.warning(f"No se encontró documento para: {document_path}")
+                self.logger.warning(f"No document found for: {document_path}")
                 return False
             
-            # Obtener ID del documento
-            document_id = document["id"]
-            title = document.get("title", os.path.basename(document_path))
-            
-            # Generar embeddings t-SNE
-            _, chunks, tsne_2d, tsne_3d = self.generate_tsne_embeddings(document_id, perplexity=30.0)
-            
-            if tsne_2d is None or tsne_3d is None:
-                self.logger.warning(f"No se pudieron generar embeddings t-SNE para: {document_path}")
+            # Generate t-SNE embeddings
+            embeddings_result = self.generate_tsne_embeddings(document["id"], perplexity=30.0)
+            if embeddings_result is None:
+                self.logger.warning(f"Could not generate t-SNE embeddings for: {document_path}")
                 return False
             
-            # Definir rutas de salida para los gráficos
-            output_dir = os.path.dirname(os.path.abspath(document_path))
-            base_name = os.path.splitext(os.path.basename(document_path))[0]
+            _, chunks, tsne_2d, tsne_3d = embeddings_result
+            title = document.get("title", document_path.name)
             
-            # Crear gráfico 2D
-            output_path_2d = os.path.join(output_dir, f"{base_name}_tsne_2d.png")
-            title_2d = f"t-SNE 2D: {title}"
-            self.create_2d_plot(tsne_2d, chunks, output_path_2d, title_2d)
+            # Construct output file paths in same directory as source document
+            output_dir = document_path.parent
+            base_name = document_path.stem
             
-            # Crear gráfico 3D
-            output_path_3d = os.path.join(output_dir, f"{base_name}_tsne_3d.png")
-            title_3d = f"t-SNE 3D: {title}"
-            self.create_3d_plot(tsne_3d, chunks, output_path_3d, title_3d)
+            # Create plots
+            success_2d = self.create_2d_plot(
+                tsne_2d, chunks, 
+                output_dir / f"{base_name}_tsne_2d.png", 
+                f"t-SNE 2D: {title}"
+            )
             
-            self.logger.info(f"Visualizaciones t-SNE generadas para: {document_path}")
-            return True
+            success_3d = self.create_3d_plot(
+                tsne_3d, chunks, 
+                output_dir / f"{base_name}_tsne_3d.png", 
+                f"t-SNE 3D: {title}"
+            )
+            
+            if success_2d and success_3d:
+                self.logger.info(f"t-SNE visualizations generated for: {document_path}")
+                return True
+            else:
+                self.logger.warning(f"Some visualizations failed for: {document_path}")
+                return False
             
         except Exception as e:
-            self.logger.error(f"Error al visualizar embeddings del documento: {e}")
+            self.logger.error(f"Error visualizing document embeddings: {e}")
             return False
     
     def find_document_by_path(self, document_path: str) -> Optional[Dict[str, Any]]:
         """
-        Busca un documento en la base de datos por su ruta de archivo.
+        Searches for a document in the database by its file path.
         
         Args:
-            document_path: Ruta del archivo a buscar
+            document_path: Path to the file to search for
             
         Returns:
-            Dict con información del documento o None si no se encuentra
+            Dict with document information or None if not found
         """
         try:
-            self.logger.debug(f"Buscando documento con ruta: {document_path}")
+            self.logger.debug(f"Searching for document with path: {document_path}")
             
-            # Ejecutar consulta en la base de datos
+            # Access database cursor for SQL query execution
             cursor = self.db._cursor
             
-            # Buscar el documento por ruta exacta
+            # Query documents table using exact file path match
             cursor.execute(
                 "SELECT id, title, url, file_path, created_at FROM documents WHERE file_path = ?", 
                 (document_path,)
@@ -429,11 +494,11 @@ class TSNEVisualizer:
             doc = cursor.fetchone()
             
             if doc:
-                # Convertir a diccionario si es una fila de SQLite
+                # Convert SQLite row to dictionary format
                 if hasattr(doc, 'keys'):
                     return dict(doc)
                 else:
-                    # Crear diccionario manualmente
+                    # Manual conversion for tuple-based results
                     return {
                         'id': doc[0],
                         'title': doc[1],
@@ -442,7 +507,7 @@ class TSNEVisualizer:
                         'created_at': doc[4]
                     }
             else:
-                # Intentar búsqueda alternativa - con coincidencia parcial de ruta
+                # Fallback: search using filename pattern matching
                 cursor.execute(
                     "SELECT id, title, url, file_path, created_at FROM documents WHERE file_path LIKE ?", 
                     (f"%{os.path.basename(document_path)}%",)
@@ -464,48 +529,61 @@ class TSNEVisualizer:
             return None
             
         except Exception as e:
-            self.logger.error(f"Error al buscar documento: {e}")
+            self.logger.error(f"Error searching for document: {e}")
             return None
 
 
-def visualize_tsne_for_files(file_paths: str, db_instance) -> Dict[str, bool]:
+def visualize_tsne_for_files(target_path: str, db_index: int = 0) -> bool:
     """
-    Genera visualizaciones t-SNE para los embeddings de chunks de los archivos especificados.
+    Generates t-SNE visualizations for documents in the specified path.
     
     Args:
-        file_paths: Ruta a un directorio o archivo individual
-        db_instance: Instancia de base de datos vectorial
+        target_path: Path to file or directory to visualize
+        db_index: Database index (default: 0)
         
     Returns:
-        Diccionario con las rutas procesadas y si su visualización fue exitosa
+        bool: True if successful, False otherwise
     """
-    visualizer = TSNEVisualizer(db_instance)
-    results = {}
-    
     try:
-        if os.path.isdir(file_paths):
-            # Recorrer recursivamente el directorio
-            logger.info(f"Generando visualizaciones t-SNE para todos los Markdown en: {file_paths}")
-            
-            for root, _, files in os.walk(file_paths):
+        # Initialize database connection through session management
+        session_manager = SessionManager()
+        db, db_metadata = session_manager.get_database_by_index(db_index)
+        
+        if not db:
+            print(f"Database with index {db_index} not found")
+            return False
+        
+        # Initialize visualizer
+        visualizer = TSNEVisualizer(db)
+        
+        # Convert to absolute path for consistent file system operations
+        target_path = os.path.abspath(target_path)
+        
+        if os.path.isfile(target_path):
+            # Generate t-SNE plots for single markdown file
+            document = visualizer.find_document_by_path(target_path)
+            if document:
+                return visualizer.visualize_document_embeddings(target_path)
+            else:
+                print(f"Document not found for path: {target_path}")
+                return False
+        elif os.path.isdir(target_path):
+            # Recursively process all markdown files in directory tree
+            success = True
+            for root, dirs, files in os.walk(target_path):
                 for file in files:
-                    if file.lower().endswith('.md'):
-                        md_path = os.path.join(root, file)
-                        result = visualizer.visualize_document_embeddings(md_path)
-                        results[md_path] = result
-                        
-        elif os.path.isfile(file_paths) and file_paths.lower().endswith('.md'):
-            # Visualizar un solo archivo
-            logger.info(f"Generando visualizaciones t-SNE para archivo Markdown: {file_paths}")
-            result = visualizer.visualize_document_embeddings(file_paths)
-            results[file_paths] = result
+                    if file.endswith('.md'):
+                        file_path = os.path.join(root, file)
+                        document = visualizer.find_document_by_path(file_path)
+                        if document:
+                            result = visualizer.visualize_document_embeddings(file_path)
+                            if not result:
+                                success = False
+            return success
         else:
-            logger.warning(f"La ruta proporcionada no es un archivo Markdown o directorio válido: {file_paths}")
-    
+            print(f"Path not found: {target_path}")
+            return False
+            
     except Exception as e:
-        logger.error(f"Error al generar visualizaciones t-SNE: {e}")
-    
-    # Liberar recursos
-    del visualizer
-    
-    return results 
+        print(f"Error generating t-SNE visualization: {e}")
+        return False
