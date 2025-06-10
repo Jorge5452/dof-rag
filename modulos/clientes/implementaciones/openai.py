@@ -8,7 +8,7 @@ class OpenAIClient(IAClient):
     OpenAI client implementation using OpenAI's Python SDK.
     """
     
-    def __init__(self, api_key: str = None, model_name: str = None, **kwargs):
+    def __init__(self, api_key: Optional[str] = None, model_name: Optional[str] = None, **kwargs: Any) -> None:
         """
         Initialize the OpenAI client.
         
@@ -110,7 +110,7 @@ class OpenAIClient(IAClient):
         
         return cleaned_key if cleaned_key else None
     
-    def generate_response(self, prompt: str, context: List[Dict[str, Any]] = None, **kwargs) -> str:
+    def generate_response(self, prompt: str, context: Optional[List[Dict[str, Any]]] = None, **kwargs: Any) -> str:
         """
         Generate a response using the OpenAI model.
         
@@ -125,7 +125,7 @@ class OpenAIClient(IAClient):
                 stream (bool, optional): Whether to stream the response. Defaults to False.
         
         Returns:
-            str: The generated response.
+            str: The generated response with separators for response and context.
         """
         # Override generation parameters with kwargs if provided
         temperature = kwargs.get("temperature", self.temperature)
@@ -139,39 +139,70 @@ class OpenAIClient(IAClient):
         # Prepare messages with context if provided
         messages = []
         
-        # Add system message
+        # Format context if provided
+        context_text = ""
         if context:
-            context_text = "\n\n".join([f"Context {i+1}:\n{chunk['text']}" for i, chunk in enumerate(context)])
-            messages.append({
-                "role": "system", 
-                "content": system_message
-            })
-            messages.append({"role": "user", "content": f"Context:\n{context_text}\n\nQuestion: {prompt}"})
+            context_text = "\n\n".join([f"Fragmento {i+1}:\n{chunk['text']}" for i, chunk in enumerate(context)])
+            user_content = f"CONTEXTO DEL DOCUMENTO:\n{context_text}\n\nPREGUNTA DEL USUARIO:\n{prompt}"
         else:
-            messages.append({"role": "system", "content": system_message})
-            messages.append({"role": "user", "content": prompt})
+            user_content = prompt
         
-        # Generate response
-        response = self.client.chat.completions.create(
-            model=self.model_name,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            top_p=top_p,
-            frequency_penalty=frequency_penalty,
-            presence_penalty=presence_penalty,
-            stream=stream
-        )
+        messages.append({"role": "system", "content": system_message})
+        messages.append({"role": "user", "content": user_content})
         
-        # Handle streaming or non-streaming response
-        if stream:
-            full_response = ""
-            for chunk in response:
-                if chunk.choices[0].delta.content is not None:
-                    full_response += chunk.choices[0].delta.content
-            return full_response
-        else:
-            return response.choices[0].message.content
+        try:
+            # Generate response
+            if stream:
+                response_stream = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    frequency_penalty=frequency_penalty,
+                    presence_penalty=presence_penalty,
+                    stream=True
+                )
+                
+                # Accumulate the full response
+                full_response = ""
+                for chunk in response_stream:
+                    if chunk.choices[0].delta.content is not None:
+                        full_response += chunk.choices[0].delta.content
+                
+                # Add separators for response and context
+                formatted_response = "=======================  RESPONSE  =======================\n"
+                formatted_response += full_response
+                if context:
+                    formatted_response += "\n=======================  CONTEXT  =======================\n"
+                    formatted_response += context_text
+                
+                return formatted_response
+            else:
+                response = self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    frequency_penalty=frequency_penalty,
+                    presence_penalty=presence_penalty,
+                    stream=False
+                )
+                
+                model_response = response.choices[0].message.content
+                
+                # Add separators for response and context
+                formatted_response = "=======================  RESPONSE  =======================\n"
+                formatted_response += model_response
+                if context:
+                    formatted_response += "\n=======================  CONTEXT  =======================\n"
+                    formatted_response += context_text
+                
+                return formatted_response
+                
+        except Exception as e:
+            raise Exception(f"Error generating response from OpenAI: {str(e)}")
     
     def get_embedding(self, text: str) -> List[float]:
         """

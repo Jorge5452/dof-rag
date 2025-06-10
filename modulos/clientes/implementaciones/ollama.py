@@ -9,7 +9,7 @@ class OllamaClient(IAClient):
     Ollama AI client implementation for local LLM inference.
     """
     
-    def __init__(self, base_url: str = None, model_name: str = None, **kwargs):
+    def __init__(self, base_url: Optional[str] = None, model_name: Optional[str] = None, **kwargs: Any) -> None:
         """
         Initialize the Ollama client.
         
@@ -21,7 +21,7 @@ class OllamaClient(IAClient):
                 base_url_env (str, optional): Name of the environment variable to use for base URL.
                 timeout (int, optional): Timeout in seconds for the API call.
         """
-        # Obtener configuración
+        # Get configuration
         from config import config
         ollama_config = config.get_ai_client_config().get('ollama', {})
         general_config = config.get_ai_client_config().get('general', {})
@@ -38,7 +38,7 @@ class OllamaClient(IAClient):
             if api_url:
                 self.base_url = self._clean_value(api_url)
             else:
-                # Usar valor de configuración o el valor por defecto
+                # Use configuration value or default value
                 self.base_url = ollama_config.get("api_url", "http://localhost:11434")
         
         # Ensure URL doesn't end with a slash
@@ -62,7 +62,7 @@ class OllamaClient(IAClient):
         self.stream = kwargs.get("stream", ollama_config.get("stream", general_config.get("stream", False)))
         
         # Request timeout
-        self.timeout = kwargs.get("timeout", ollama_config.get("timeout", 60))
+        self.timeout = kwargs.get("timeout", ollama_config.get("timeout", 120))
         
         # Validate connection to Ollama server and check if model is available
         try:
@@ -91,38 +91,31 @@ class OllamaClient(IAClient):
         except requests.exceptions.RequestException as e:
             raise ConnectionError(f"Failed to connect to Ollama server: {str(e)}")
     
-    def _clean_value(self, value: str) -> str:
-        """
-        Clean a value by removing whitespace and quotes for better accessibility.
-        Supports both single and double quotes, and handles various edge cases.
+    def _clean_value(self, value: Optional[str]) -> Optional[str]:
+        """Clean a value from quotes and whitespace.
         
         Args:
-            value (str): The value to clean.
+            value (Optional[str]): The value to clean.
             
         Returns:
-            str: The cleaned value.
+            Optional[str]: The cleaned value or None if the input was empty.
         """
         if not value:
             return None
             
-        # Remove leading/trailing whitespace
         cleaned_value = value.strip()
         
-        # Remove surrounding quotes (both single and double)
-        if len(cleaned_value) >= 2:
-            # Check for double quotes
-            if cleaned_value.startswith('"') and cleaned_value.endswith('"'):
-                cleaned_value = cleaned_value[1:-1]
-            # Check for single quotes
-            elif cleaned_value.startswith("'") and cleaned_value.endswith("'"):
-                cleaned_value = cleaned_value[1:-1]
-        
-        # Remove any remaining whitespace after quote removal
-        cleaned_value = cleaned_value.strip()
+        # Remove quotes if present (both single and double quotes)
+        if (cleaned_value.startswith('"') and cleaned_value.endswith('"')) or \
+           (cleaned_value.startswith("'") and cleaned_value.endswith("'")):
+            cleaned_value = cleaned_value[1:-1]
+            
+        # Additional cleaning - remove any remaining quotes and whitespace
+        cleaned_value = cleaned_value.replace('"', '').replace("'", '').strip()
         
         return cleaned_value if cleaned_value else None
     
-    def _build_unified_prompt(self, system_prompt: str, context: List[Dict[str, Any]], query: str) -> str:
+    def _build_unified_prompt(self, system_prompt: str, context: Optional[List[Dict[str, Any]]], query: str) -> str:
         """
         Builds a unified prompt combining system prompt, context and user query.
         
@@ -139,7 +132,7 @@ class OllamaClient(IAClient):
         
         # Add context if available
         if context:
-            unified_prompt += "CONTEXTO DE DOCUMENTOS:\n"
+            unified_prompt += "CONTEXTO DEL DOCUMENTO:\n"
             for i, chunk in enumerate(context):
                 chunk_text = chunk.get('text', '')
                 chunk_header = chunk.get('header', '')
@@ -148,20 +141,13 @@ class OllamaClient(IAClient):
                     unified_prompt += f"Fragmento {i+1} - {chunk_header}:\n{chunk_text}\n\n"
                 else:
                     unified_prompt += f"Fragmento {i+1}:\n{chunk_text}\n\n"
-            
-            unified_prompt += "INSTRUCCIONES:\n"
-            unified_prompt += "Utiliza únicamente la información del contexto anterior para responder la siguiente pregunta. "
-            unified_prompt += "Si la información no es suficiente, indícalo claramente.\n\n"
-        else:
-            unified_prompt += "NOTA: No se ha proporcionado contexto específico para esta consulta.\n\n"
         
         # Add user query
-        unified_prompt += f"PREGUNTA DEL USUARIO:\n{query}\n\n"
-        unified_prompt += "RESPUESTA:"
+        unified_prompt += f"PREGUNTA DEL USUARIO:\n{query}"
         
         return unified_prompt
     
-    def generate_response(self, prompt: str, context: List[Dict[str, Any]] = None, **kwargs) -> str:
+    def generate_response(self, prompt: str, context: Optional[List[Dict[str, Any]]] = None, **kwargs: Any) -> str:
         """
         Generate a response using the Ollama model.
         
@@ -175,7 +161,7 @@ class OllamaClient(IAClient):
                 stream (bool, optional): Whether to stream the response. Defaults to instance default.
         
         Returns:
-            str: The generated response.
+            str: The generated response with separators for response and context.
         """
         # Override generation parameters with kwargs if provided
         temperature = kwargs.get("temperature", self.temperature)
@@ -192,6 +178,14 @@ class OllamaClient(IAClient):
         
         # Build unified prompt combining system prompt, context and query
         unified_prompt = self._build_unified_prompt(system_prompt, context, prompt)
+        
+        # Format context text for the separator
+        context_text = ""
+        if context and len(context) > 0:
+            for i, fragment in enumerate(context):
+                header = fragment.get("header", f"Fragment {i+1}")
+                text = fragment.get("text", "")
+                context_text += f"{header}:\n{text}\n\n"
         
         # Use chat API with only user message
         endpoint = f"{self.base_url}/api/chat"
@@ -215,7 +209,7 @@ class OllamaClient(IAClient):
             response.raise_for_status()
         except requests.exceptions.ConnectionError:
             raise Exception("Connection error: Ollama server is not reachable. Please ensure Ollama is running.")
-        except requests.exceptions.HTTPError as e:
+        except requests.exceptions.HTTPError:
             if response.status_code == 404:
                 raise Exception(f"Model '{self.model_name}' not found on Ollama server. Please install it with: ollama pull {self.model_name}")
             else:
@@ -237,16 +231,34 @@ class OllamaClient(IAClient):
                     # Stop if done
                     if json_response.get("done", False):
                         break
-            return full_response
+            
+            # Add separators for response and context
+            formatted_response = "=======================  RESPONSE  =======================\n"
+            formatted_response += full_response
+            if context and len(context) > 0:
+                formatted_response += "\n=======================  CONTEXT  =======================\n"
+                formatted_response += context_text
+            
+            return formatted_response
         else:
             # For non-streaming, extract response from JSON
             json_response = response.json()
+            model_response = ""
             if "message" in json_response and "content" in json_response["message"]:
-                return json_response["message"]["content"]
+                model_response = json_response["message"]["content"]
             elif "response" in json_response:  # Generate API response
-                return json_response["response"]
+                model_response = json_response["response"]
             else:
                 raise Exception(f"Unexpected Ollama API response: {json_response}")
+            
+            # Add separators for response and context
+            formatted_response = "=======================  RESPONSE  =======================\n"
+            formatted_response += model_response
+            if context and len(context) > 0:
+                formatted_response += "\n=======================  CONTEXT  =======================\n"
+                formatted_response += context_text
+            
+            return formatted_response
     
     def get_embedding(self, text: str) -> List[float]:
         """
@@ -269,7 +281,7 @@ class OllamaClient(IAClient):
             response.raise_for_status()
         except requests.exceptions.ConnectionError:
             raise Exception("Connection error: Ollama server is not reachable. Please ensure Ollama is running.")
-        except requests.exceptions.HTTPError as e:
+        except requests.exceptions.HTTPError:
             if response.status_code == 404:
                 raise Exception(f"Embedding model '{self.embedding_model}' not found on Ollama server. Please install it with: ollama pull {self.embedding_model}")
             else:

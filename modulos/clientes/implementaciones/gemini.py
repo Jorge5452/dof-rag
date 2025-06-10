@@ -6,13 +6,13 @@ from typing import List, Dict, Any, Optional, Generator, Union
 from ..AbstractClient import IAClient
 from dotenv import load_dotenv
 
-# Lock para prevenir problemas con llamadas concurrentes a la API
+# Lock to prevent issues with concurrent API calls
 api_lock = threading.Lock()
 
 class GeminiClient(IAClient):
     """
     Gemini AI client implementation using Google's official google-genai SDK.
-    Optimizado para el flujo RAG: recibir contexto y pregunta, generar respuesta.
+    Optimized for RAG flow: receiving context and question, generating response.
     """
     
     def __init__(
@@ -21,8 +21,8 @@ class GeminiClient(IAClient):
         model: Optional[str] = None,
         api_key_env: Optional[str] = None,
         response_mime_type: Optional[str] = None,
-        **kwargs
-    ):
+        **kwargs: Any
+    ) -> None:
         """
         Initialize the Gemini client using the official google-genai library.
         
@@ -53,13 +53,13 @@ class GeminiClient(IAClient):
         # Clean the API key - remove quotes if present for accessibility
         self.api_key = self._clean_api_key(self.api_key)
         
-        # Simplificación de log de API key
-        print(f"Gemini API key configurada correctamente")
+        # Simplified API key log
+        print("Gemini API key configured correctly")
         
         # Get model name from params, Gemini config, or default
         default_model = gemini_config.get('model', 'gemini-2.0-flash')
         self.model_name = model or gemini_config.get('model', default_model)
-        print(f"Modelo Gemini: {self.model_name}")
+        print(f"Gemini model: {self.model_name}")
         
         # Set generation parameters using global config values
         self.temperature = kwargs.get("temperature", general_config.get('temperature', 0.3))
@@ -83,12 +83,12 @@ class GeminiClient(IAClient):
         try:
             # Initialize the client with the new google-genai library
             self.client = genai.Client(api_key=self.api_key)
-            print(f"Cliente Gemini inicializado correctamente")
+            print("Gemini client initialized correctly")
             
-        except ImportError as ie:
+        except ImportError:
             raise ImportError("Google GenAI package not installed. Please install it with 'pip install google-genai'.")
         except Exception as e:
-            print(f"Error al inicializar cliente Gemini: {str(e)}")
+            print(f"Error initializing Gemini client: {str(e)}")
             raise ValueError(f"Error initializing Gemini client: {str(e)}")
     
     def _clean_api_key(self, api_key: str) -> str:
@@ -139,7 +139,7 @@ class GeminiClient(IAClient):
         
         # Add context if available
         if context:
-            unified_prompt += "CONTEXTO DE DOCUMENTOS:\n"
+            unified_prompt += "CONTEXTO DEL DOCUMENTO:\n"
             for i, chunk in enumerate(context):
                 chunk_text = chunk.get('text', '')
                 chunk_header = chunk.get('header', '')
@@ -148,16 +148,9 @@ class GeminiClient(IAClient):
                     unified_prompt += f"Fragmento {i+1} - {chunk_header}:\n{chunk_text}\n\n"
                 else:
                     unified_prompt += f"Fragmento {i+1}:\n{chunk_text}\n\n"
-            
-            unified_prompt += "INSTRUCCIONES:\n"
-            unified_prompt += "Utiliza únicamente la información del contexto anterior para responder la siguiente pregunta. "
-            unified_prompt += "Si la información no es suficiente, indícalo claramente.\n\n"
-        else:
-            unified_prompt += "NOTA: No se ha proporcionado contexto específico para esta consulta.\n\n"
         
         # Add user query
-        unified_prompt += f"PREGUNTA DEL USUARIO:\n{query}\n\n"
-        unified_prompt += "RESPUESTA:"
+        unified_prompt += f"PREGUNTA DEL USUARIO:\n{query}"
         
         return unified_prompt
     
@@ -166,7 +159,7 @@ class GeminiClient(IAClient):
         prompt: str,
         context: Optional[Union[str, List[Dict[str, Any]]]] = None,
         stream: Optional[bool] = None,
-        **kwargs
+        **kwargs: Any
     ) -> Union[str, Generator[str, None, None]]:
         """
         Generate a response from the model using the new google-genai library.
@@ -178,7 +171,7 @@ class GeminiClient(IAClient):
             **kwargs: Additional parameters for the generation.
         
         Returns:
-            Union[str, Generator[str, None, None]]: The generated response or a generator for streaming.
+            Union[str, Generator[str, None, None]]: The generated response with separators for response and context.
         """
         try:
             # Store the context for later access
@@ -190,7 +183,7 @@ class GeminiClient(IAClient):
             general_config = ai_config.get('general', {})
             system_prompt = general_config.get('system_prompt', 'You are a helpful assistant.')
             
-            print(f"Generando respuesta con modelo {self.model_name}...")
+            print(f"Generating response with model {self.model_name}...")
             
             # Set stream parameter
             stream = stream if stream is not None else self.stream
@@ -218,6 +211,14 @@ class GeminiClient(IAClient):
                 response_mime_type=self.response_mime_type,
             )
             
+            # Format context text for the separator
+            context_text = ""
+            if context and isinstance(context, list) and len(context) > 0:
+                for i, fragment in enumerate(context):
+                    header = fragment.get("header", f"Fragment {i+1}")
+                    text = fragment.get("text", "")
+                    context_text += f"{header}:\n{text}\n\n"
+            
             # Generate response with thread lock to prevent concurrent API issues
             with api_lock:
                 if stream:
@@ -234,7 +235,14 @@ class GeminiClient(IAClient):
                         if hasattr(chunk, 'text') and chunk.text:
                             full_response += chunk.text
                     
-                    return full_response
+                    # Add separators for response and context
+                    formatted_response = "=======================  RESPONSE  =======================\n"
+                    formatted_response += full_response
+                    if context and isinstance(context, list) and len(context) > 0:
+                        formatted_response += "\n=======================  CONTEXT  =======================\n"
+                        formatted_response += context_text
+                    
+                    return formatted_response
                 else:
                     # Use non-streaming generation
                     response = self.client.models.generate_content(
@@ -243,13 +251,23 @@ class GeminiClient(IAClient):
                         config=generation_config
                     )
                     
+                    model_response = ""
                     if hasattr(response, 'text'):
-                        return response.text
+                        model_response = response.text
                     else:
-                        return str(response)
+                        model_response = str(response)
+                    
+                    # Add separators for response and context
+                    formatted_response = "=======================  RESPONSE  =======================\n"
+                    formatted_response += model_response
+                    if context and isinstance(context, list) and len(context) > 0:
+                        formatted_response += "\n=======================  CONTEXT  =======================\n"
+                        formatted_response += context_text
+                    
+                    return formatted_response
                 
         except Exception as e:
-            error_msg = f"Error al generar respuesta: {str(e)}"
+            error_msg = f"Error generating response: {str(e)}"
             return error_msg
     
     def get_last_context(self) -> Union[str, List[Dict[str, Any]], None]:
@@ -261,20 +279,23 @@ class GeminiClient(IAClient):
         """
         return self.last_used_context
     
-    # Implementación requerida por la interfaz IAClient
-    # Método vacío ya que Gemini no necesita generar embeddings en este flujo
+    # Implementation required by the IAClient interface
+    # Empty method since Gemini doesn't need to generate embeddings in this flow
     def get_embedding(self, text: str) -> List[float]:
         """
         Get embeddings for a text. 
         
-        Note: Esta implementación es un stub para cumplir con la interfaz IAClient.
-        En el flujo RAG actual, este método no se utiliza para Gemini.
+        Note: This implementation is a stub to comply with the IAClient interface.
+        In the current RAG flow, this method is not used for Gemini.
         
         Args:
             text (str): The text to get embeddings for.
             
         Returns:
             List[float]: The embedding vector (empty for Gemini implementation).
+            
+        Raises:
+            Warning: Prints a warning that this method is not implemented for GeminiClient.
         """
-        print("ADVERTENCIA: El método get_embedding no está implementado para GeminiClient en el flujo RAG actual.")
+        print("WARNING: The get_embedding method is not implemented for GeminiClient in the current RAG flow.")
         return []

@@ -1,4 +1,4 @@
-from typing import Optional, Dict, Any
+from typing import Optional, Any
 from .AbstractClient import IAClient
 from config import Config
 
@@ -8,7 +8,7 @@ class ClientFactory:
     """
     
     @staticmethod
-    def get_client(client_type: Optional[str] = None, api_key: Optional[str] = None, **kwargs) -> IAClient:
+    def get_client(client_type: Optional[str] = None, api_key: Optional[str] = None, **kwargs: Any) -> IAClient:
         """
         Get an instance of the specified AI client type.
         
@@ -34,9 +34,9 @@ class ClientFactory:
         if client_type is None:
             client_type = ai_config.get("type")
             
-            # Si 'type' no está definido o está vacío en la configuración
+            # If 'type' is not defined or is empty in the configuration
             if not client_type:
-                client_type = "openai"  # Valor predeterminado genérico
+                client_type = "openai"  # Default generic value
         
         client_type = client_type.lower()
         
@@ -68,4 +68,4 @@ class ClientFactory:
             from modulos.clientes.implementaciones.ollama import OllamaClient
             return OllamaClient(**params)
         else:
-            raise ValueError(f"Cliente de IA no soportado: {client_type}")
+            raise ValueError(f"AI client not supported: {client_type}")
