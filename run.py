@@ -1,46 +1,43 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 """
-Entry point for the RAG system.
+RAG System - Main Entry Point
 
-This script handles command-line arguments and executes the main system functions,
-either for document ingestion or for queries.
+This script provides the main interface for the RAG (Retrieval-Augmented Generation) system.
+It supports document ingestion, querying, session management, and various utility functions.
 
 Usage:
-    Ingestion: python run.py --ingest --files [directory]
-    Query: python run.py --query "Your question here?"
-    Ingest and export: python run.py --ingest --export-chunks --files [directory]
-    List sessions: python run.py --list-sessions
-    List databases: python run.py --list-dbs
-    Export chunks: python run.py --export-chunks --files [directory]
+    python run.py --ingest --files <path>          # Ingest documents
+    python run.py --query "<question>"              # Query the system
+    python run.py --list-sessions                   # List available sessions
+    python run.py --db-stats                        # Show database statistics
+    python run.py --optimize-db <index>             # Optimize specific database
+    python run.py --resource-status                 # Show resource manager status
 """
 
-import argparse
-import logging
-import os
+# Standard library imports
 import sys
+import os
+import argparse
 import time
-from pathlib import Path
-from typing import Optional, List, Tuple, Dict, Any
+import logging
 from datetime import datetime
+from typing import Optional, List, Dict, Any, Tuple
 
-# Importación global necesaria para evitar errores de referencia
-from config import config
+# Add project root to path for imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Importar utilidades del sistema
-from modulos.utils.formatting import (
-    C_TITLE, C_SUBTITLE, C_SUCCESS, C_ERROR, C_WARNING, C_HIGHLIGHT, 
-    C_COMMAND, C_PARAM, C_INFO, C_VALUE, C_PROMPT, C_RESET, C_SEPARATOR, Style,
-    print_header, print_separator, print_status, print_formatted_response,
-    print_command_help, print_useful_commands
-)
+# Import logging utilities
 from modulos.utils.logging_utils import setup_logging, silence_verbose_loggers
 
-# Configurar logging
-setup_logging(level=logging.INFO, log_file="./logs/rag_system.log")
+# Import formatting utilities
+from modulos.utils.formatting import (
+    C_TITLE, C_SUBTITLE, C_HIGHLIGHT, C_VALUE, C_INFO, C_SUCCESS, 
+    C_ERROR, C_WARNING, C_COMMAND, C_PROMPT, C_RESET
+)
+from colorama import Style
 
-# Silenciar módulos verbosos
-silence_verbose_loggers()
-
-# Obtener logger para este módulo
+# Configure logging
 logger = logging.getLogger(__name__)
 
 def main() -> int:
@@ -50,6 +47,10 @@ def main() -> int:
     Returns:
         int: Exit code (0 for success, 1 for error)
     """
+    # Initialize logging
+    setup_logging(level=logging.INFO, log_file="./logs/rag_system.log")
+    silence_verbose_loggers()
+    
     # Configure argument parser
     parser = argparse.ArgumentParser(
         description="RAG system for document ingestion and queries",
@@ -75,11 +76,8 @@ def main() -> int:
     parser.add_argument("--db-index", type=int, help="Index of existing database to use for ingestion (adds files to it)")
     
     # Arguments for query mode
-    processing_config = config.get_processing_config()
-    default_chunks = processing_config.get("max_chunks_to_retrieve", 5)
-    
-    parser.add_argument("--chunks", type=int, default=default_chunks, 
-                      help=f"Number of chunks to retrieve for the query (default: {default_chunks})")
+    parser.add_argument("--chunks", type=int, default=5, 
+                      help="Number of chunks to retrieve for the query (default: 5)")
     parser.add_argument("--model", type=str, help="AI model to use for the query")
     parser.add_argument("--session", type=str, help="Specific session ID to use")
     parser.add_argument("--show-dbs", action="store_true", help="Show available databases before the query")
@@ -90,7 +88,7 @@ def main() -> int:
     args = parser.parse_args()
     
     # Configure logging level
-    if args.debug or config.get_general_config().get("debug", False):
+    if args.debug:
         logging.getLogger().setLevel(logging.DEBUG)
         logger.debug(C_SUCCESS + "Debug mode enabled")
     
@@ -115,13 +113,9 @@ def main() -> int:
             return 0
         elif args.resource_status:
             return show_resource_status()
+        elif args.export_chunks:
+            return handle_export_chunks_mode(args)
             
-        # Export chunks if requested (can be combined with other modes)
-        if args.export_chunks and (args.ingest is False or result == 0):
-            export_result = handle_export_chunks_mode(args)
-            if result == 0:  # Solo actualizar si no hubo errores previos
-                result = export_result
-                
         return result
     except Exception as e:
         logger.error(f"{C_ERROR}Unexpected error: {e}")
@@ -137,32 +131,40 @@ def handle_ingest_mode(args: argparse.Namespace) -> int:
     Returns:
         int: Exit code (0 for success, 1 for error)
     """
-    # Load modules only when needed for ingestion
-    from main import process_documents
-    
     if not args.files:
         logger.error(f"{C_ERROR}The --files argument is required for --ingest mode")
         return 1
         
-    # Verify directory or file exists
     if not os.path.exists(args.files):
         logger.error(f"{C_ERROR}The directory or file {args.files} does not exist")
         return 1
-        
-    # Process documents
-    logger.info(f"{C_HIGHLIGHT}Starting document ingestion from: {C_VALUE}{args.files}")
     
-    # Pass db_index if provided, so documents are added to an existing database
-    db_index = args.db_index
-    if db_index is not None:
-        logger.info(f"{C_HIGHLIGHT}Using existing database with index: {C_VALUE}{db_index}")
+    try:
+        from main import process_documents
         
-    process_documents(args.files, session_name=args.session_name, db_index=db_index)
-    return 0
+        process_documents(
+            file_path=args.files,
+            db_index=args.db_index
+        )
+        success = True
+        
+        # If export-chunks is also requested, execute it after ingestion
+        if args.export_chunks:
+            print(f"\n{C_INFO}Starting chunk export after ingestion...{C_RESET}")
+            export_result = handle_export_chunks_mode(args)
+            if export_result != 0:
+                logger.warning(f"{C_WARNING}Ingestion completed but chunk export failed")
+                return export_result
+        
+        return 0 if success else 1
+        
+    except Exception as e:
+        logger.error(f"{C_ERROR}Error during ingestion: {e}")
+        return 1
 
 def handle_query_mode(args: argparse.Namespace) -> int:
     """
-    Handles query mode.
+    Handles query mode (both interactive and single query).
     
     Args:
         args: Command line arguments
@@ -170,41 +172,32 @@ def handle_query_mode(args: argparse.Namespace) -> int:
     Returns:
         int: Exit code (0 for success, 1 for error)
     """
-    # Load modules only when needed for query
     from main import process_query
     
-    # Configure logging level based on debug mode
-    if args.debug:
-        logging.getLogger().setLevel(logging.DEBUG)
-    else:
-        # Reduce logging verbosity in normal mode
-        logging.getLogger().setLevel(logging.WARNING)
-        silence_verbose_loggers()
+    interactive_mode = not args.query or args.query.strip() == ""
     
-    # Check if we're in interactive mode (empty query)
-    interactive_mode = args.query == ''
-    
-    # In query mode, check if we need to show the databases
-    if args.show_dbs or args.db_index is None:
-        # Get sessions list
-        sessions = get_session_list(show_output=False)
+    if interactive_mode or args.db_index is None:
+        sorted_dbs = show_available_databases(show_output=False)
         
-        # Show a simple summary (only the most recent ones)
-        print("\n" + C_TITLE + " AVAILABLE SESSIONS/DATABASES " + C_RESET)
+        if not sorted_dbs:
+            print_status("error", "No databases available. Please ingest documents first.")
+            print_status("info", "Example: python run.py --ingest --files documents/")
+            return 1
+        
+        print("\n" + C_TITLE + " AVAILABLE DATABASES " + C_RESET)
         print_separator()
         
-        for i, session in enumerate(sessions[:5]):  # Limit to 5
+        for i, (name, session) in enumerate(sorted_dbs):
             created_date = datetime.fromtimestamp(session.get('created_at', 0)).strftime('%Y-%m-%d')
             model = session.get('embedding_model', 'unknown')
             
-            if i == 0:  # Highlight the most recent
-                print(f"{C_SUCCESS}[{i}] {C_HIGHLIGHT}{session['id']}{C_RESET} - {created_date} - Model: {C_VALUE}{model}{C_RESET}")
+            if i == 0:
+                print(f"[{i}] {C_SUCCESS}{C_HIGHLIGHT}{session['id']}{C_RESET} - {created_date} - Model: {model} {C_SUCCESS}(most recent){C_RESET}")
             else:
                 print(f"[{i}] {C_HIGHLIGHT}{session['id']}{C_RESET} - {created_date} - Model: {model}")
         
         print_separator()
         
-        # If we only wanted to show the databases and no index was provided, ask
         if args.db_index is None:
             try:
                 db_index = input(f"\n{C_PROMPT}Select database index (Enter to use the most recent): ")
@@ -213,24 +206,18 @@ def handle_query_mode(args: argparse.Namespace) -> int:
             except ValueError:
                 print_status("warning", "Invalid input. Using the most recent database.")
     
-    # Show start message
     if interactive_mode:
-        # Interactive mode
         run_interactive_mode(args.chunks, args.model, args.session, args.db_index)
     else:
-        # Single query mode - Simplified interface
         print("\n" + C_SUBTITLE + " QUERY: " + C_VALUE + f"{args.query}" + C_RESET)
         
-        # Timer to measure response time
         start_time = time.time()
         
-        # Temporarily reduce log level during query if not in debug mode
         original_log_level = logging.getLogger().level
         if not args.debug:
             logging.getLogger().setLevel(logging.WARNING)
             
         try:
-            # Process the query
             response = process_query(
                 args.query, 
                 n_chunks=args.chunks, 
@@ -239,33 +226,25 @@ def handle_query_mode(args: argparse.Namespace) -> int:
                 db_index=args.db_index
             )
         except Exception as e:
-            # In case of error, show clear message
             response = f"Error processing query: {str(e)}"
         finally:
-            # Restore original log level
             logging.getLogger().setLevel(original_log_level)
         
-        # Show response with better formatting
         print("\n" + C_TITLE + " RESPONSE " + C_RESET)
         print_separator()
         
-        # Extract only the response section if it contains format separators
-        if "=======================  RESPUESTA  =======================" in response:
-            parts = response.split("=======================  RESPUESTA  =======================")
+        if "=======================  RESPONSE  =======================" in response:
+            parts = response.split("=======================  RESPONSE  =======================")
             if len(parts) > 1:
-                # Extract the response part (without header)
-                response_text = parts[1].split("=======================  CONTEXTO  =======================")[0].strip()
-                context_text = response.split("=======================  CONTEXTO  =======================")
+                response_text = parts[1].split("=======================  CONTEXT  =======================")[0].strip()
+                context_text = response.split("=======================  CONTEXT  =======================")
                 
-                # Print only the response first
                 print(response_text)
                 
-                # Show response time after the main response
                 elapsed_time = time.time() - start_time
                 print_separator()
                 print_status("info", f"Response time: {elapsed_time:.2f} seconds")
                 
-                # Print context if it exists - Now we always show the context
                 if len(context_text) > 1:
                     print("\n" + C_TITLE + " CONTEXT USED " + C_RESET)
                     print_separator()
@@ -273,14 +252,12 @@ def handle_query_mode(args: argparse.Namespace) -> int:
             else:
                 print(response)
                 
-                # Show response time
                 elapsed_time = time.time() - start_time
                 print_separator()
                 print_status("info", f"Response time: {elapsed_time:.2f} seconds")
         else:
             print(response)
             
-            # Show response time
             elapsed_time = time.time() - start_time
             print_separator()
             print_status("info", f"Response time: {elapsed_time:.2f} seconds")
@@ -327,7 +304,7 @@ def list_sessions() -> int:
         files = session.get('files', [])
         file_count = len(files)
         
-        # Get total chunks - puede estar en el nivel raíz o en stats
+        # Get total chunks - can be at root level or in stats
         total_chunks = session.get('total_chunks', 'unknown')
         if total_chunks == 'unknown':
             stats = session.get('stats', {})
@@ -335,7 +312,7 @@ def list_sessions() -> int:
         
         # Format file size if available
         size_str = ""
-        if os.path.exists(db_path):
+        if db_path and os.path.exists(db_path):
             size_bytes = os.path.getsize(db_path)
             if size_bytes < 1024:
                 size_str = f"{size_bytes} B"
@@ -417,7 +394,6 @@ def run_interactive_mode(n_chunks: int = 5, model: Optional[str] = None,
     """
     # Import only when needed for interactive mode
     from main import process_query
-    from colorama import Style  # Ensure Style is available
     
     # Configure logging level for interactive mode
     logging.getLogger().setLevel(logging.WARNING)
@@ -434,30 +410,23 @@ def run_interactive_mode(n_chunks: int = 5, model: Optional[str] = None,
     print_status("info", f"For help: {C_COMMAND}help{C_RESET} or {C_COMMAND}?{C_RESET}")
     print_separator()
     
-    # Variables to maintain state
     current_db_index = db_index
     current_session_id = session_id
     current_model = model
-    history = []
     
-    # Main loop for interactive mode
     while True:
         try:
-            # Get query from user
             query = input(f"\n{C_PROMPT}> ")
             
-            # Check special commands
             if query.lower() in ["exit", "quit", "q"]:
                 print_status("success", "Session ended.")
                 break
                 
             elif query.lower() == "dbs":
-                # Show available databases
-                sorted_dbs = show_available_databases()
+                show_available_databases()
                 continue
                 
             elif query.lower().startswith("change "):
-                # Change active database
                 try:
                     new_index = int(query.split()[1])
                     current_db_index = new_index
@@ -467,7 +436,6 @@ def run_interactive_mode(n_chunks: int = 5, model: Optional[str] = None,
                 continue
                 
             elif query.lower() in ["help", "?"]:
-                # Show help commands
                 print("\n" + C_TITLE + " AVAILABLE COMMANDS " + C_RESET)
                 print_separator()
                 print(f"{C_INFO}• {C_COMMAND}exit{C_RESET}, {C_COMMAND}quit{C_RESET}, {C_COMMAND}q{C_RESET} - Exit interactive mode")
@@ -478,16 +446,10 @@ def run_interactive_mode(n_chunks: int = 5, model: Optional[str] = None,
                 continue
                 
             elif not query.strip():
-                # Ignore empty queries
                 continue
             
-            # Process normal query - Reduce verbosity
-            # Don't show processing message for cleaner experience
-            
-            # Measure response time
             start_time = time.time()
             
-            # Process query with error handling
             try:
                 response = process_query(
                     query, 
@@ -497,17 +459,11 @@ def run_interactive_mode(n_chunks: int = 5, model: Optional[str] = None,
                     db_index=current_db_index
                 )
                 
-                # Add to history
-                history.append((query, response))
-                
-                # Show response with improved formatting
-                # Extract only response section if it contains format separators
-                if "=======================  RESPUESTA  =======================" in response:
-                    parts = response.split("=======================  RESPUESTA  =======================")
+                if "=======================  RESPONSE  =======================" in response:
+                    parts = response.split("=======================  RESPONSE  =======================")
                     if len(parts) > 1:
-                        # Extract response part (without header)
-                        response_text = parts[1].split("=======================  CONTEXTO  =======================")[0].strip()
-                        context_text = response.split("=======================  CONTEXTO  =======================")
+                        response_text = parts[1].split("=======================  CONTEXT  =======================")[0].strip()
+                        context_text = response.split("=======================  CONTEXT  =======================")
                         
                         # Print only the response
                         print("\n" + C_TITLE + " RESPONSE " + C_RESET)
@@ -525,22 +481,18 @@ def run_interactive_mode(n_chunks: int = 5, model: Optional[str] = None,
                             print_separator()
                             print(context_text[1].strip())
                     else:
-                        # If we can't separate the response, show everything
                         print("\n" + C_TITLE + " RESPONSE " + C_RESET)
                         print_separator()
                         print(response)
                         
-                        # Show response time
                         elapsed_time = time.time() - start_time
                         print_separator()
                         print_status("info", f"Time: {elapsed_time:.2f} seconds")
                 else:
-                    # If not formatted, show complete response
                     print("\n" + C_TITLE + " RESPONSE " + C_RESET)
                     print_separator()
                     print(response)
                     
-                    # Show response time
                     elapsed_time = time.time() - start_time
                     print_separator()
                     print_status("info", f"Time: {elapsed_time:.2f} seconds")
@@ -568,25 +520,14 @@ def show_available_databases(show_output: bool = True) -> List[Tuple[str, Dict[s
     Returns:
         Sorted list of databases (name, metadata)
     """
-    # Import session manager
     from modulos.session_manager.session_manager import SessionManager
-    from colorama import Style  # Ensure Style is available
-    import os
     
-    # Use session manager to list databases
     session_manager = SessionManager()
-    databases = session_manager.list_available_databases()
+    sessions = session_manager.list_sessions()
     
-    # Convert dictionary to sorted list by last use (most recent first)
-    sorted_dbs = []
-    for name, metadata in databases.items():
-        sorted_dbs.append((name, metadata))
+    sorted_dbs = [(session_data.get("id"), session_data) for session_data in sessions]
     
-    sorted_dbs.sort(key=lambda x: x[1].get('last_used', 0), reverse=True)
-    
-    # If requested to display output
     if show_output:
-        # Show title
         print("\n" + C_TITLE + " AVAILABLE DATABASES " + C_RESET)
         print_separator()
         
@@ -596,9 +537,8 @@ def show_available_databases(show_output: bool = True) -> List[Tuple[str, Dict[s
             
         # Show summarized information for each database
         for i, (name, db) in enumerate(sorted_dbs):
-            # Format dates for human readability
             created_date = datetime.fromtimestamp(db.get('created_at', 0)).strftime('%Y-%m-%d')
-            last_used_date = datetime.fromtimestamp(db.get('last_used', 0)).strftime('%Y-%m-%d')
+            last_modified_date = datetime.fromtimestamp(db.get('last_modified', 0)).strftime('%Y-%m-%d')
             
             # Get basic information
             model = db.get('embedding_model', 'unknown')
@@ -606,7 +546,6 @@ def show_available_databases(show_output: bool = True) -> List[Tuple[str, Dict[s
             db_type = db.get('db_type', 'unknown')
             db_path = db.get('db_path', 'unknown')
             
-            # Get file size if exists
             size_str = ""
             if db_path and os.path.exists(db_path):
                 size_bytes = os.path.getsize(db_path)
@@ -620,36 +559,37 @@ def show_available_databases(show_output: bool = True) -> List[Tuple[str, Dict[s
                 else:
                     size_str = f"{size_bytes/(1024*1024*1024):.2f} GB"
                 size_str = f" - Size: {size_str}"
-            else:
-                size_str = ""
             
-            # Get associated session information
             session_info = ""
             session_id = db.get('session_id')
             if session_id:
                 session_info = f" - Session: {session_id}"
             
-            # Get custom name if exists
             custom_name = db.get('custom_name', '')
             custom_name_info = f" - Name: {custom_name}" if custom_name else ""
             
             # Show information with improved formatting
             print(f"{C_HIGHLIGHT}{i}. {name}{custom_name_info}")
             print(f"{C_INFO}   Model: {C_VALUE}{model}{C_RESET} - Chunking: {C_VALUE}{chunking}{C_RESET} - Type: {C_VALUE}{db_type}{C_RESET}")
-            print(f"{C_INFO}   Created: {C_VALUE}{created_date}{C_RESET} - Last use: {C_VALUE}{last_used_date}{C_RESET}{size_str}{session_info}")
+            print(f"{C_INFO}   Created: {C_VALUE}{created_date}{C_RESET} - Last modified: {C_VALUE}{last_modified_date}{C_RESET}{size_str}{session_info}")
             
-            # Show file information if available
             files = db.get('files', [])
             if files:
                 print(f"{C_INFO}   Files: {C_VALUE}{len(files)}{C_RESET}")
                 # Show up to 2 example files
                 for j, file_path in enumerate(files[:2]):
-                    file_name = os.path.basename(file_path)
+                    if isinstance(file_path, dict):
+                        path_value = file_path.get("path", "")
+                        file_name = os.path.basename(path_value) if path_value else "Unknown file"
+                    elif file_path:
+                        file_name = os.path.basename(file_path)
+                    else:
+                        file_name = "Unknown file"
                     print(f"{C_INFO}     - {file_name}")
                 if len(files) > 2:
                     print(f"{C_INFO}     - ...and {len(files) - 2} more")
             
-            print()  # Separation between databases
+            print()
         
         print_separator()
     
@@ -662,7 +602,6 @@ def optimize_database(db_index: int) -> None:
     Args:
         db_index: Index of the database to optimize
     """
-    # Import only when needed
     from modulos.session_manager.session_manager import SessionManager
     
     try:
@@ -683,18 +622,11 @@ def optimize_database(db_index: int) -> None:
         
         print(f"\n{C_INFO}Optimizing database: {C_VALUE}{name}")
         
-        # Get database instance
         session_manager = SessionManager()
-        # Get database by index without session_id parameter
         db, metadata = session_manager.get_database_by_index(db_index)
         
-        # Measure optimization time
         start_time = time.time()
-        
-        # Execute optimization
         success = db.optimize_database()
-        
-        # Calculate time
         elapsed_time = time.time() - start_time
         
         if success:
@@ -709,7 +641,6 @@ def optimize_all_databases() -> None:
     """
     Optimizes all available databases.
     """
-    # Import only when needed
     from modulos.databases.FactoryDatabase import DatabaseFactory
     
     print_header("OPTIMIZATION OF ALL DATABASES")
@@ -728,7 +659,7 @@ def optimize_all_databases() -> None:
     
     # Start optimization
     start_time = time.time()
-    results = DatabaseFactory.optimize_all_databases(db_names)  # Pass database names
+    results = DatabaseFactory.optimize_all_databases(db_names)
     elapsed_time = time.time() - start_time
     
     # Show results
@@ -742,15 +673,12 @@ def show_database_statistics() -> None:
     """
     Shows detailed statistics of all databases.
     """
-    # Import only when needed
     from modulos.databases.FactoryDatabase import DatabaseFactory
     
     print_header("DATABASE STATISTICS")
     
-    # Get statistics
     stats = DatabaseFactory.get_db_statistics()
     
-    # Show global statistics
     print(f"{C_SUBTITLE}GLOBAL STATISTICS:")
     print(f"{C_INFO}• Total databases: {C_VALUE}{stats['total_databases']}")
     print(f"{C_INFO}• Total documents: {C_VALUE}{stats['total_documents']}")
@@ -769,16 +697,13 @@ def show_database_statistics() -> None:
             print(f"{C_INFO}• Documents: {C_VALUE}{db_stats.get('total_documents', 'N/A')}")
             print(f"{C_INFO}• Chunks: {C_VALUE}{db_stats.get('total_chunks', 'N/A')}")
             
-            # Latest document information
             if "latest_document" in db_stats:
                 doc = db_stats["latest_document"]
                 print(f"{C_INFO}• Latest document: {C_VALUE}{doc.get('title', 'Untitled')} (ID: {doc.get('id', 'N/A')})")
             
-            # Database size
             if "db_size_mb" in db_stats:
                 print(f"{C_INFO}• Size: {C_VALUE}{db_stats['db_size_mb']:.2f} MB")
             
-            # Creation date
             if "db_created" in db_stats and db_stats["db_created"] != "unknown":
                 try:
                     created_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(db_stats["db_created"]))
@@ -804,22 +729,20 @@ def query_database(db_index: int, query: str, session_id: str = None) -> None:
         if session_id:
             print(f"{C_INFO}Querying in session: {C_VALUE}{session_id}")
         
-        # Process the query
-        response = process_query(
+        # Process the query - response is handled by streaming
+        process_query(
             query=query, 
             db_index=db_index,
             session_id=session_id,
             stream=True
         )
         
-        # The response has already been shown to the user through streaming
-        
     except Exception as e:
         print(f"{C_ERROR}Error querying: {str(e)}")
 
 def handle_export_chunks_mode(args: argparse.Namespace) -> int:
     """
-    Handles exporting chunks to TXT files.
+    Handles the export chunks mode.
     
     Args:
         args: Command line arguments
@@ -831,23 +754,19 @@ def handle_export_chunks_mode(args: argparse.Namespace) -> int:
         logger.error(f"{C_ERROR}The --files argument is required for --export-chunks mode")
         return 1
         
-    # Verify that the directory or file exists
     if not os.path.exists(args.files):
         logger.error(f"{C_ERROR}The directory or file {args.files} does not exist")
         return 1
     
     try:
-        # Import export module
         from modulos.view_chunks.chunk_exporter import export_chunks_for_files
-        
-        # Get most recent database or specified by index
         from modulos.session_manager.session_manager import SessionManager
+        
         session_manager = SessionManager()
         
         if args.db_index is not None:
             db, session = session_manager.get_database_by_index(args.db_index)
         else:
-            # Use most recent database
             db, session = session_manager.get_database_by_index(0)
         
         if not db:
@@ -857,7 +776,6 @@ def handle_export_chunks_mode(args: argparse.Namespace) -> int:
         print(f"\n{C_TITLE} EXPORTING CHUNKS {C_RESET}")
         print_separator()
         
-        # Show information about the database being used
         print(f"{C_INFO}Database: {C_VALUE}{session.get('id', 'unknown')}")
         print(f"{C_INFO}Model: {C_VALUE}{session.get('embedding_model', 'unknown')}")
         print(f"{C_INFO}Chunking method: {C_VALUE}{session.get('chunking_method', 'unknown')}")
@@ -879,7 +797,6 @@ def handle_export_chunks_mode(args: argparse.Namespace) -> int:
             print(f"{C_ERROR}Files with errors: {failed}")
         print_separator()
         
-        # Release resources
         db.close()
         import gc
         gc.collect()
@@ -899,8 +816,7 @@ def show_resource_status() -> int:
     """
     try:
         from modulos.resource_management.resource_manager import ResourceManager
-        from modulos.utils.formatting import print_header, print_separator, C_HIGHLIGHT, C_VALUE, C_INFO, C_ERROR, C_RESET, C_SUCCESS
-        import pprint
+        from modulos.utils.formatting import print_header, print_separator, C_HIGHLIGHT, C_VALUE, C_INFO, C_ERROR, C_RESET
 
         print_header("RESOURCE MANAGER STATUS")
 

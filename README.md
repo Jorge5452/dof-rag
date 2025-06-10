@@ -1,6 +1,6 @@
-# Sistema RAG (Retrieval-Augmented Generation)
+# Sistema RAG Modular (Retrieval-Augmented Generation)
 
-Un sistema completo de RAG para análisis de documentos Markdown que combina búsqueda vectorial con generación de respuestas mediante IA.
+Un sistema RAG empresarial completo y modular para análisis de documentos Markdown que combina búsqueda vectorial avanzada con generación de respuestas mediante múltiples proveedores de IA. Diseñado con arquitectura extensible, gestión inteligente de recursos y optimización de rendimiento.
 
 ## 📋 Índice
 
@@ -33,30 +33,61 @@ Un sistema completo de RAG para análisis de documentos Markdown que combina bú
 
 ## 🚀 Características Principales
 
-- **📄 Procesamiento de documentos**: Ingesta y procesa archivos Markdown con chunking inteligente y optimización de memoria
-- **🔍 Búsqueda vectorial**: Encuentra información relevante usando embeddings semánticos con múltiples algoritmos de similitud
-- **🤖 Múltiples modelos IA**: Compatible con OpenAI, Google Gemini y Ollama con configuración unificada
-- **🗄️ Bases de datos vectoriales**: Soporte para SQLite y DuckDB con optimizaciones específicas y búsqueda eficiente
-- **💾 Gestión de recursos**: Monitoreo automático de memoria y CPU con limpieza inteligente y concurrencia adaptativa
-- **💬 Modo interactivo**: Interfaz conversacional para consultas continuas con historial y comandos especiales
-- **🌐 Interfaz web**: Chatbot web integrado para acceso fácil y amigable al sistema
-- **📊 Gestión de sesiones**: Sistema unificado para organizar proyectos y bases de datos con metadatos completos
-- **⚡ Optimización de rendimiento**: Procesamiento paralelo, batching dinámico y liberación automática de recursos
+### **🏗️ Arquitectura Modular**
+- **Patrones de diseño**: Factory, Abstract Factory y Singleton para máxima extensibilidad
+- **Componentes desacoplados**: Chunking, embeddings, bases de datos y clientes IA independientes
+- **Configuración centralizada**: Sistema unificado con `config.yaml` y variables de entorno
+
+### **📄 Procesamiento Avanzado de Documentos**
+- **Chunking inteligente**: 4 estrategias (token, carácter, contexto, página) con solapamiento configurable
+- **Optimización de memoria**: Procesamiento streaming con batching dinámico y garbage collection automático
+- **Extracción de metadatos**: Preservación de estructura jerárquica y encabezados Markdown
+
+### **🔍 Búsqueda Vectorial de Alto Rendimiento**
+- **Modelos de embeddings**: ModernBERT, E5-multilingual, CDE-small con normalización automática
+- **Bases de datos optimizadas**: SQLite con sqlite-vec y DuckDB con búsqueda vectorial nativa
+- **Algoritmos de similitud**: Coseno, euclidiana y producto punto con umbrales configurables
+
+### **🤖 Integración Multi-Proveedor IA**
+- **APIs soportadas**: OpenAI GPT, Google Gemini, Ollama (modelos locales)
+- **Configuración unificada**: Parámetros consistentes (temperatura, top_p, max_tokens)
+- **Manejo robusto**: Reintentos automáticos, timeouts y fallbacks
+
+### **💾 Gestión Inteligente de Recursos**
+- **ResourceManager centralizado**: Monitoreo automático de CPU y memoria con umbrales adaptativos
+- **ConcurrencyManager**: Control de paralelización con pools de workers optimizados
+- **MemoryManager**: Limpieza automática y optimización de batch sizes según recursos disponibles
+
+### **📊 Sistema de Sesiones Empresarial**
+- **Gestión unificada**: Organización de proyectos con metadatos completos y timeouts configurables
+- **Persistencia**: Almacenamiento de configuraciones y historial de conversaciones
+- **Escalabilidad**: Soporte para múltiples sesiones concurrentes con cleanup automático
+
+### **🌐 Interfaces de Usuario**
+- **CLI avanzada**: Comandos especializados con opciones de debugging y monitoreo
+- **Chatbot web**: Interfaz moderna con streaming de respuestas y selección dinámica de bases de datos
+- **Modo interactivo**: Conversaciones continuas con comandos especiales y historial
+
+### **⚡ Optimización de Rendimiento**
+- **Procesamiento paralelo**: Distribución inteligente de tareas según recursos del sistema
+- **Batching adaptativo**: Ajuste dinámico de tamaños de lote según memoria disponible
+- **Caching inteligente**: Reutilización de embeddings y optimización de consultas repetidas
 
 ## 🛠️ Instalación
 
 ### Requisitos del Sistema
 
-- **Python 3.8 o superior**
+- **Python 3.12 o superior** (requerido por dependencias modernas)
 - **8GB RAM mínimo** (16GB recomendado para documentos grandes)
-- **2GB espacio libre** para modelos y bases de datos
+- **4GB espacio libre** para modelos de embeddings y bases de datos
+- **CPU multi-core recomendado** para procesamiento paralelo óptimo
 
 ### Instalación Rápida
 
 1. **Clonar el repositorio:**
 ```bash
 git clone <repository-url>
-cd dof-rag
+cd new_rag
 ```
 
 2. **Crear entorno virtual:**
@@ -69,11 +100,15 @@ source .venv/bin/activate  # Linux/Mac
 
 3. **Instalar dependencias:**
 ```bash
-# El proyecto usa pyproject.toml para gestión de dependencias
+# Método recomendado: usando uv (más rápido)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync
+
+# Método alternativo: pip tradicional
 pip install -e .
 
-# O instalación alternativa si hay problemas:
-pip install -r requirements.txt
+# Para desarrollo: instalar dependencias adicionales
+pip install -e ".[dev]"
 ```
 
 4. **Configurar variables de entorno:**
@@ -779,43 +814,36 @@ resource_management:
 3. **Variables de entorno**: Sobrescriben configuración del archivo
 4. **Parámetros de línea de comandos**: Máxima prioridad
 
-#### **🎯 Configuraciones Clave**
+#### **🎯 Configuraciones Principales**
 
-**Rendimiento y Recursos:**
-```yaml
-resource_management:
-  monitoring:
-    aggressive_threshold_mem_pct: 85  # Umbral memoria crítica
-    warning_threshold_mem_pct: 75     # Umbral advertencia
-  concurrency:
-    cpu_workers: "auto"               # Workers automáticos
-    max_total_workers: null           # Sin límite por defecto
-  memory:
-    model_release:
-      inactive_timeout_sec: 300       # Liberar modelos inactivos
-```
+El archivo `config.yaml` incluye configuraciones para:
 
-**Calidad de Respuestas:**
-```yaml
-ai_client:
-  general:
-    temperature: 0.7                  # Balance creatividad/precisión
-    top_p: 0.85                       # Diversidad de respuestas
-    top_k: 50                         # Vocabulario permitido
-    system_prompt: "..."              # Instrucciones del sistema
-processing:
-  max_chunks_to_retrieve: 5           # Contexto por consulta
-```
+- **General**: Debug, logging, directorios y sesiones
+- **Chunking**: Métodos de segmentación con optimización de memoria
+- **Embeddings**: Modelos soportados (ModernBERT, E5-small, CDE-small)
+- **Database**: SQLite y DuckDB con parámetros de rendimiento
+- **AI Client**: OpenAI, Gemini y Ollama con configuración unificada
+- **Resource Management**: Gestión de memoria, concurrencia y monitoreo
 
-**Optimización de Memoria:**
+**Ejemplo básico:**
 ```yaml
 chunks:
-  memory_optimization:
-    enabled: true                     # Habilitar optimización
-    batch_size: 50                    # Tamaño de lote base
-    memory_check_interval: 15         # Verificación cada 15s
-    force_gc: true                    # Garbage collection forzado
+  method: "token"
+  token:
+    max_tokens: 2048
+    token_overlap: 100
+
+embeddings:
+  model: "modernbert"
+  
+ai_client:
+  default: "openai"
+  general:
+    temperature: 0.7
+    max_tokens: 2048
 ```
+
+> 📋 **Nota**: Para ver la configuración completa, consulta el archivo `config.yaml` en el directorio raíz del proyecto.
 
 ### 🔑 Variables de Entorno
 
@@ -823,21 +851,91 @@ Las variables de entorno tienen prioridad sobre `config.yaml` y permiten configu
 
 ```bash
 # .env
-# APIs principales
-OPENAI_API_KEY=sk-tu_openai_key_aqui
-GEMINI_API_KEY=tu_gemini_key_aqui
+# === CLAVES API (Configurar según el proveedor de IA) ===
+# OpenAI (GPT-4, GPT-3.5, etc.)
+OPENAI_API_KEY=sk-proj-...
+
+# Google Gemini
+GEMINI_API_KEY=AIza...
+
+# Ollama (servidor local)
 OLLAMA_API_URL=http://localhost:11434
+OLLAMA_MODEL=llama3.2:3b
 
 # APIs adicionales
 ANTHROPIC_API_KEY=tu_anthropic_key_aqui
 
-# Configuración de desarrollo
+# === CONFIGURACIÓN DEL SISTEMA ===
+# Modo de desarrollo y logging
 RAG_DEBUG_MODE=true
 RAG_LOG_LEVEL=DEBUG
+STREAM_RESPONSE=true
+LOG_DIR=logs
+SESSIONS_DIR=sessions
 
-# Configuración de base de datos
+# === OPTIMIZACIÓN DE RECURSOS ===
+# Gestión de memoria
+MEMORY_WARNING_THRESHOLD=80
+MEMORY_AGGRESSIVE_THRESHOLD=90
+FORCE_GC_THRESHOLD=85
+CLEANUP_INTERVAL=60
+
+# Concurrencia y workers
+DEFAULT_CPU_WORKERS=auto
+DEFAULT_IO_WORKERS=auto
+MAX_TOTAL_WORKERS=16
+TASK_TIMEOUT=300
+
+# === CONFIGURACIÓN DE BASE DE DATOS ===
+# Directorios y umbrales
 RAG_DB_TYPE=duckdb
 RAG_DB_PATH=/custom/path/to/db
+DB_DIR=modulos/databases/db
+SIMILARITY_THRESHOLD=0.3
+USE_VECTOR_EXTENSION=true
+
+# DuckDB específico
+DUCKDB_MEMORY_LIMIT=2GB
+DUCKDB_THREADS=4
+DUCKDB_ENABLE_OPTIMIZER=true
+
+# === CONFIGURACIÓN DE EMBEDDINGS ===
+# Modelo por defecto
+EMBEDDING_MODEL=modernbert
+EMBEDDING_DEVICE=cpu
+EMBEDDING_BATCH_SIZE=32
+TRUST_REMOTE_CODE=true
+
+# === CONFIGURACIÓN DE CHUNKING ===
+# Método y parámetros
+CHUNK_METHOD=token
+MAX_TOKENS=2048
+TOKEN_OVERLAP=100
+CHUNK_SIZE=1000
+CHUNK_OVERLAP=200
+
+# Optimización de memoria para chunking
+MEMORY_OPTIMIZATION_ENABLED=true
+BATCH_SIZE=50
+MIN_BATCH_SIZE=5
+MAX_BATCH_SIZE=200
+MEMORY_CHECK_INTERVAL=15
+
+# === CONFIGURACIÓN DE SESIONES ===
+MAX_SESSIONS=50
+SESSION_TIMEOUT=604800  # 7 días
+SESSION_CLEANUP_INTERVAL=300  # 5 minutos
+MAX_CONTEXTS=50
+
+# === CONFIGURACIÓN DE PROCESAMIENTO ===
+MAX_CHUNKS_TO_RETRIEVE=5
+CONTEXT_WINDOW_SIZE=8192
+RE_RANK_RESULTS=false
+
+# === CONFIGURACIÓN DE MONITOREO ===
+MONITORING_ENABLED=true
+MONITORING_INTERVAL=30
+LOG_METRICS=false
 
 # Configuración de recursos
 RAG_MEMORY_LIMIT=8GB
@@ -897,9 +995,103 @@ gemini_config = config.get_specific_ai_config('gemini')
 
 - **[💾 Resource Management](modulos/resource_management/README.md)** - Documentación del sistema centralizado para gestión inteligente de recursos (memoria, CPU, concurrencia). Explica el monitoreo automático, gestión de modelos de embedding, configuración de umbrales, y optimización de rendimiento.
 
-### 🔧 APIs Internas
+- **[🔍 Chunking Avanzado](modulos/chunks/README.md)** - Estrategias de segmentación y optimización de memoria para procesamiento de documentos grandes.
 
-Cada módulo implementa el **patrón Factory** para creación de instancias:
+- **[🤖 Clientes IA](modulos/clientes/README.md)** - Integración multi-proveedor con OpenAI, Gemini, Ollama y configuración unificada.
+
+- **[📊 Bases de Datos Vectoriales](modulos/databases/README.md)** - SQLite-vec, DuckDB y optimización de búsqueda vectorial.
+
+- **[🎯 Embeddings](modulos/embeddings/README.md)** - Modelos soportados (ModernBERT, E5, CDE-small) y configuración avanzada.
+
+### 🔧 APIs Internas y Patrones de Diseño
+
+El sistema implementa múltiples patrones de diseño para máxima flexibilidad:
+
+**Factory Pattern - Clientes IA:**
+```python
+from modulos.clientes.FactoryClient import get_client
+from config import config
+
+# Crear cliente con configuración automática
+client = get_client("openai")
+response = client.generate_response(
+    prompt="¿Qué es RAG?",
+    context=retrieved_chunks,
+    temperature=0.7,
+    max_tokens=2048
+)
+
+# Soporte para múltiples proveedores
+gemini_client = get_client("gemini")
+ollama_client = get_client("ollama")
+```
+
+**Factory Pattern - Embeddings:**
+```python
+from modulos.embeddings.embeddings_factory import get_embedding_manager
+
+# Crear embedder con gestión automática de recursos
+embedder = get_embedding_manager("modernbert")
+vectors = embedder.get_document_embedding("header", "texto del documento")
+query_vector = embedder.get_query_embedding("consulta del usuario")
+```
+
+**Factory Pattern - Bases de Datos:**
+```python
+from modulos.databases.FactoryDatabase import get_database_instance
+
+# Crear base de datos con configuración automática
+db = get_database_instance("duckdb", embedding_dim=768)
+db.connect("path/to/database")
+
+# Operaciones vectoriales optimizadas
+results = db.vector_search(
+    query_embedding=query_vector,
+    n_results=5
+)
+```
+
+**Strategy Pattern - Chunking:**
+```python
+from modulos.chunks.ChunkerFactory import get_chunker
+from modulos.embeddings.embeddings_factory import get_embedding_manager
+
+# Estrategias de chunking especializadas
+embedding_model = get_embedding_manager("modernbert")
+token_chunker = get_chunker("token", embedding_model)
+context_chunker = get_chunker("context", embedding_model)
+
+# Chunking con optimización de memoria
+for chunk in token_chunker.process_content_stream(large_document):
+    # Procesamiento streaming para documentos grandes
+    process_chunk(chunk)
+```
+
+**Singleton Pattern - Gestión de Recursos:**
+```python
+from modulos.resource_management.resource_manager import ResourceManager
+from modulos.resource_management.memory_manager import MemoryManager
+
+# Gestión centralizada de recursos
+resource_manager = ResourceManager()
+status = resource_manager.get_system_status()
+resource_manager.cleanup_if_needed()
+
+# Monitoreo de memoria en tiempo real
+memory_manager = MemoryManager()
+memory_manager.start_monitoring()
+current_usage = memory_manager.get_memory_usage()
+```
+
+**Gestión de Sesiones:**
+```python
+from modulos.session_manager.session_manager import SessionManager
+
+# Gestión avanzada de sesiones
+session_manager = SessionManager()
+sessions = session_manager.list_sessions()
+session_data = session_manager.get_session_by_index(0)
+```
 
 - **🤖 Clientes IA**: `modulos/clientes/FactoryClient.py` - Abstracciones unificadas para OpenAI, Gemini, Ollama con manejo consistente de errores y configuración
 - **📊 Embeddings**: `modulos/embeddings/embeddings_factory.py` - Gestión de modelos ModernBERT, E5, CDE-small con optimización de memoria y dispositivo
@@ -957,14 +1149,3 @@ Para desarrollo detallado, consulta la **[🛠️ Guía del Desarrollador](DEVEL
 - Guías paso a paso para agregar nuevos componentes
 - Estándares de código y mejores prácticas
 
-## 📄 Licencia
-
-Este proyecto está bajo la **licencia MIT**. Ver archivo `LICENSE` para detalles completos.
-
-### Resumen de la Licencia
-- ✅ **Uso comercial** permitido
-- ✅ **Modificación** permitida  
-- ✅ **Distribución** permitida
-- ✅ **Uso privado** permitido
-- ❗ **Sin garantía** - el software se proporciona "como está"
-- 📋 **Atribución requerida** - incluir aviso de copyright

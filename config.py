@@ -1,8 +1,28 @@
 import os
 import yaml
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Union, List
 from pathlib import Path
 from dotenv import load_dotenv
+
+# Default configuration constants - centralized fallback values
+class DefaultValues:
+    """
+    Centralized default values for the RAG system configuration.
+    These constants serve as fallback values when configuration is missing or fails to load.
+    """
+    # Database defaults
+    SIMILARITY_THRESHOLD = 0.3
+    
+    # DuckDB defaults
+    DUCKDB_MEMORY_LIMIT = '2GB'
+    DUCKDB_THREADS = 4
+    
+    # SQLite defaults
+    SQLITE_VECTOR_TABLE_NAME = 'vec_chunks'
+    
+    # Add other default values here as needed
+    # BATCH_SIZE = 16
+    # TIMEOUT_SECONDS = 120
 
 class Config:
     """
@@ -57,12 +77,12 @@ class Config:
         with open(config_path, 'r', encoding='utf-8') as file:
             return yaml.safe_load(file)
     
-    def _process_env_vars(self, config: Dict[str, Any]) -> Dict[str, Any]:
+    def _process_env_vars(self, config: Union[Dict[str, Any], List[Any], Any]) -> Union[Dict[str, Any], List[Any], Any]:
         """
         Processes environment variables in configuration.
         
         Args:
-            config: Configuration as dictionary.
+            config: Configuration as dictionary, list, or any value.
             
         Returns:
             Configuration with processed environment variables.
@@ -88,7 +108,13 @@ class Config:
             Configuration as dictionary.
         """
         # Process environment variables before returning
-        return self._process_env_vars(self.config.copy())
+        processed = self._process_env_vars(self.config.copy())
+        # Ensure we return a dictionary
+        if isinstance(processed, dict):
+            return processed
+        else:
+            # Fallback in case something went wrong
+            return self.config.copy()
     
     def get_general_config(self) -> Dict[str, Any]:
         """
@@ -98,7 +124,8 @@ class Config:
             Dictionary with general configuration.
         """
         general_config = self.config.get("general", {})
-        return self._process_env_vars(general_config)
+        processed = self._process_env_vars(general_config)
+        return processed if isinstance(processed, dict) else {}
     
     def get_sessions_config(self) -> Dict[str, Any]:
         """Get sessions configuration."""
@@ -112,7 +139,8 @@ class Config:
             Dictionary with chunks configuration.
         """
         chunks_config = self.config.get("chunks", {})
-        return self._process_env_vars(chunks_config)
+        processed = self._process_env_vars(chunks_config)
+        return processed if isinstance(processed, dict) else {}
     
     def get_embedding_config(self) -> Dict[str, Any]:
         """
@@ -122,7 +150,8 @@ class Config:
             Dictionary with embeddings configuration.
         """
         embedding_config = self.config.get("embeddings", {})
-        return self._process_env_vars(embedding_config)
+        processed = self._process_env_vars(embedding_config)
+        return processed if isinstance(processed, dict) else {}
     
     def get_database_config(self) -> Dict[str, Any]:
         """
@@ -151,7 +180,8 @@ class Config:
         
         # Update paths and process environment variables
         db_config = self._update_db_paths(db_config)
-        return self._process_env_vars(db_config)
+        processed = self._process_env_vars(db_config)
+        return processed if isinstance(processed, dict) else db_config
     
     def _update_db_paths(self, db_config: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -219,7 +249,8 @@ class Config:
             Dictionary with AI client configuration.
         """
         ai_client_config = self.config.get("ai_client", {})
-        return self._process_env_vars(ai_client_config)
+        processed = self._process_env_vars(ai_client_config)
+        return processed if isinstance(processed, dict) else {}
     
     def get_processing_config(self) -> Dict[str, Any]:
         """
@@ -229,39 +260,44 @@ class Config:
             Dictionary with processing configuration.
         """
         processing_config = self.config.get("processing", {})
-        return self._process_env_vars(processing_config)
+        processed = self._process_env_vars(processing_config)
+        return processed if isinstance(processed, dict) else {}
     
     def get_resource_management_config(self) -> Dict[str, Any]:
         """
         Gets the resource manager configuration.
-        
+
         This method processes the 'resource_management' section of the configuration,
         which includes subsections like 'monitoring', 'memory' and 'concurrency'.
-        
+
         Returns:
             Dictionary with resource management configuration, transformed
             to a flat structure for easier use in ResourceManager.
         """
         resource_config = self.config.get("resource_management", {})
-        
+
         # Process environment variables in the configuration
         processed_config = self._process_env_vars(resource_config)
         
+        # Ensure we have a dictionary
+        if not isinstance(processed_config, dict):
+            processed_config = {}
+
         # Convert hierarchical structure to flat structure for easier use
         # in ResourceManager, keeping the original section keys
         flat_config = {}
-        
+
         # Include top-level properties
         for key, value in processed_config.items():
             if not isinstance(value, dict):
                 flat_config[key] = value
-        
+
         # Include subsections with their original keys
         for section_name, section_values in processed_config.items():
             if isinstance(section_values, dict):
                 for key, value in section_values.items():
                     flat_config[f"{key}"] = value
-        
+
         return flat_config
     
     def get_specific_model_config(self, model_type: str) -> Dict[str, Any]:
@@ -354,7 +390,11 @@ class Config:
         if method is None:
             method = chunks_config.get("method", "context")
         
-        method_config = chunks_config.get(method, {})
+        # Ensure method is not None before using it as a key
+        if method is not None:
+            method_config = chunks_config.get(method, {})
+        else:
+            method_config = {}
         return method_config
     
     def save_config(self) -> None:
@@ -400,7 +440,11 @@ class Config:
         if db_type is None:
             db_type = db_config.get("type", "sqlite")
         
-        type_config = db_config.get(db_type, {})
+        # Ensure db_type is not None before using it as a key
+        if db_type is not None:
+            type_config = db_config.get(db_type, {})
+        else:
+            type_config = {}
         
         # Add type to configuration
         instance_config = {"type": db_type, **type_config}

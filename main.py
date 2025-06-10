@@ -13,12 +13,7 @@ import os
 import sys
 from pathlib import Path
 from typing import Optional, Any, List, Dict
-import concurrent.futures
-import modulos.session_manager.session_manager
 from datetime import datetime
-
-# Configure logging
-logger = logging.getLogger(__name__)
 
 # Import colorama for terminal formatting
 from colorama import init, Fore, Style, Back
@@ -26,6 +21,10 @@ import gc
 
 # Import DatabaseFactory
 from modulos.databases.FactoryDatabase import DatabaseFactory
+
+# Configure logging
+logger = logging.getLogger(__name__)
+
 
 # Initialize colorama for cross-platform compatibility
 init(autoreset=True)
@@ -82,11 +81,6 @@ def process_documents(file_path: str, session_name: Optional[str] = None, db_ind
             # This will get both database instance and session metadata
             existing_db, existing_session = session_manager.get_database_by_index(db_index)
             
-            logger.info(f"Using existing database: {existing_session.get('name', 'Unknown')}")
-            logger.info(f"  - Embedding model: {existing_session.get('embedding_model', 'Unknown')}")
-            logger.info(f"  - Chunking method: {existing_session.get('chunking_method', 'Unknown')}")
-            logger.info(f"  - Database type: {existing_session.get('db_type', 'Unknown')}")
-            
             # Extract important parameters from existing session
             embedding_model = existing_session.get("embedding_model", "modernbert")
             chunking_method = existing_session.get("chunking_method", "character") 
@@ -110,7 +104,6 @@ def process_documents(file_path: str, session_name: Optional[str] = None, db_ind
             embedding_manager = EmbeddingFactory().get_embedding_manager()
             
         embedding_dim = embedding_manager.get_dimensions()
-        logger.info(f"Embedding dimensions: {C_VALUE}{embedding_dim}{C_RESET}")
     except Exception as e:
         logger.error(f"{C_ERROR}Error initializing embeddings model: {e}")
         return
@@ -174,7 +167,6 @@ def process_documents(file_path: str, session_name: Optional[str] = None, db_ind
                 chunker_type=chunking_method, 
                 embedding_model=embedding_manager
             )
-            logger.info(f"Using chunking method from existing session: {chunking_method}")
         else:
             # Use default/configured chunker for new session
             chunker = ChunkerFactory().get_chunker(embedding_model=embedding_manager)
@@ -188,6 +180,15 @@ def process_documents(file_path: str, session_name: Optional[str] = None, db_ind
     except Exception as e:
         logger.error(f"{C_ERROR}Error initializing Markdown processor: {e}")
         return
+    
+    # Display ingestion configuration clearly and concisely
+    print_ingestion_config(
+        embedding_model=embedding_model,
+        db_type=db_type,
+        file_path=file_path,
+        embedding_dim=embedding_dim,
+        chunking_method=chunking_method
+    )
     
     # Find Markdown files for processing
     md_files = []
@@ -348,7 +349,7 @@ def process_documents(file_path: str, session_name: Optional[str] = None, db_ind
                         current_session["stats"] = {}
                     
                     # Update or add total documents and chunks
-                    # Actualizar total_documents en stats
+                    # Update total_documents in stats
                 if "stats" not in current_session:
                     current_session["stats"] = {}
                     
@@ -357,7 +358,7 @@ def process_documents(file_path: str, session_name: Optional[str] = None, db_ind
                 else:
                     current_session["stats"]["total_documents"] = successful_docs
                     
-                # Actualizar total_chunks en el nivel raíz (para consistencia)
+                # Update total_chunks at root level (for consistency)
                 if "total_chunks" in current_session:
                     current_session["total_chunks"] += total_chunks_processed
                 else:
@@ -755,12 +756,12 @@ def process_query(query: str, n_chunks: int = None, model: Optional[str] = None,
     if not model_name:
         from config import config
         ai_client_config = config.get_ai_client_config()
-        # Corregir hardcoded "gemini" por el valor configurado
+        # Fix hardcoded "gemini" with configured value
         model_name = ai_client_config.get('type')
         
-        # Asegurar que siempre tengamos un valor usando un fallback general
+        # Ensure we always have a value using a general fallback
         if not model_name:
-            model_name = "openai"  # Fallback genérico si la configuración está vacía
+            model_name = "openai"  # Generic fallback if configuration is empty
     
     logger.info(f"🤖 Using AI model: {model_name}")
 
@@ -772,7 +773,7 @@ def process_query(query: str, n_chunks: int = None, model: Optional[str] = None,
     fragments = get_context(query_text, n_chunks, db=db)
 
     if not fragments:
-        logger.warning(f"⚠️ No relevant fragments found for query")
+        logger.warning("⚠️ No relevant fragments found for query")
         # Continue with empty context - client will handle this
     else:
         logger.info(f"✅ Retrieved {len(fragments)} context fragments")
@@ -882,7 +883,7 @@ def get_context(query: str, n_chunks: int, db: Any) -> List[Dict[str, Any]]:
         
         # Get embedding manager
         embedding_manager = EmbeddingFactory.get_embedding_manager(embedding_model)
-        logger.info(f"✅ Embedding manager initialized successfully")
+        logger.info("✅ Embedding manager initialized successfully")
         
         # Generate embedding for query
         logger.info("🔄 Generating embedding for query...")
@@ -903,7 +904,7 @@ def get_context(query: str, n_chunks: int, db: Any) -> List[Dict[str, Any]]:
             logger.warning(f"⚠️ Could not get chunk count: {count_e}")
         
         # Search for most relevant chunks
-        logger.info(f"🔍 Performing vector search...")
+        logger.info("🔍 Performing vector search...")
         search_results = db.vector_search(query_embedding, n_results=n_chunks)
         
         if search_results:
@@ -932,3 +933,22 @@ def get_context(query: str, n_chunks: int, db: Any) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"❌ Error retrieving context: {e}", exc_info=True)
         return []
+
+def print_ingestion_config(embedding_model: str, db_type: str, file_path: str, embedding_dim: int, chunking_method: str) -> None:
+    """
+    Display the chosen configurations for document ingestion clearly and concisely.
+    
+    Args:
+        embedding_model: Name of the embedding model
+        db_type: Type of database
+        file_path: Path to file or directory to process
+        embedding_dim: Embedding dimension
+        chunking_method: Chunking method used
+    """
+    print(f"\n{C_HIGHLIGHT}▶ Ingestion Configuration:{C_RESET}")
+    print(f"  • Model: {C_VALUE}{embedding_model}{C_RESET}")
+    print(f"  • Database: {C_VALUE}{db_type}{C_RESET}")
+    print(f"  • File: {C_VALUE}{file_path}{C_RESET}")
+    print(f"  • Dimension: {C_VALUE}{embedding_dim}{C_RESET}")
+    print(f"  • Chunk method: {C_VALUE}{chunking_method}{C_RESET}")
+    print("")
