@@ -1,8 +1,9 @@
 import re
 import logging
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 
 from modulos.chunks.ChunkAbstract import ChunkAbstract
+from config import config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -15,24 +16,25 @@ class ContextChunker(ChunkAbstract):
     using headings and other contextual signals.
     """
     
-    def __init__(self, embedding_model=None) -> None:
+    def __init__(self, embedding_model: Optional[Any] = None, max_chunk_size: Optional[int] = None, max_header_level: Optional[int] = None) -> None:
         """
-        Constructor initializing the chunker with context-specific configuration.
+        Initializes the ContextChunker with configurable parameters.
         
         Args:
-            embedding_model: Initialized embedding model. If None, it must be assigned later.
+            embedding_model: Embedding model to use
+            max_chunk_size: Maximum chunk size in characters
+            max_header_level: Maximum header level to consider
         """
         super().__init__(embedding_model)
         
-        # Get specific configuration for context chunking
-        self.context_config = self.chunks_config.get("context", {})
+        # Load configuration
+        chunks_config = config.get_chunks_config()
+        context_config = chunks_config.get("context", {})
         
-        # Configuration parameters with default values
-        self.use_headers = self.context_config.get("use_headers", True)
-        self.max_header_level = self.context_config.get("max_header_level", 3)
-        self.max_chunk_size = self.context_config.get("max_chunk_size", 1500)
-        
-        logger.info(f"ContextChunker initialized with max_header_level={self.max_header_level}, max_chunk_size={self.max_chunk_size}")
+        # Set parameters with default values from configuration
+        self.max_chunk_size = max_chunk_size or context_config.get("max_chunk_size", 1500)
+        self.max_header_level = max_header_level or context_config.get("max_header_level", 6)
+        self.use_headers = context_config.get("use_headers", True)
     
     def extract_headers(self, content: str, **kwargs) -> List[Dict[str, Any]]:
         """

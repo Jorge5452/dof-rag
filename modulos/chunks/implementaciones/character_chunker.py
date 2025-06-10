@@ -1,10 +1,8 @@
 import re
 import logging
 import math
-from typing import List, Dict, Any, Optional
-
+from typing import List, Dict, Any
 from modulos.chunks.ChunkAbstract import ChunkAbstract
-from config import config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -119,7 +117,6 @@ class CharacterChunker(ChunkAbstract):
         
         # Calculate estimated number of pages to divide the content
         total_pages = max(1, math.ceil(content_length / (chunk_size * 2)))
-        chars_per_page = math.ceil(content_length / total_pages)
         
         # Calculate start points for each chunk with overlap
         start_positions = list(range(0, content_length, chunk_size - chunk_overlap))

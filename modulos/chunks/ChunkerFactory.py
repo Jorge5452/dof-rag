@@ -9,75 +9,89 @@ from modulos.chunks.implementaciones.context_chunker import ContextChunker
 from modulos.chunks.implementaciones.page_chunker import PageChunker
 
 # Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 class ChunkerFactory:
     """
     Factory for creating chunker instances.
     Implements the Factory pattern to select the appropriate implementation
-    based on the required chunking type.
+    based on the required chunking type, and the Singleton pattern to
+    manage unique chunker instances.
     """
     
+    # Dictionary to store created instances (Singleton)
     _instances = {}
     
-    @staticmethod
-    def get_chunker(
-        chunker_type: Optional[str] = None,
-        embedding_model = None
-    ) -> ChunkAbstract:
+    # Mapping of chunker types to their classes
+    _chunker_classes = {
+        'character': CharacterChunker,
+        'token': TokenChunker,
+        'context': ContextChunker,
+        'page': PageChunker
+    }
+    
+    def __init__(self) -> None:
         """
-        Returns an instance of the appropriate chunker based on the chunker_type.
-        If an instance already exists for that type, it returns the same instance (Singleton pattern).
-        
-        Parameters:
-            chunker_type (str, optional): Chunker type ('character', 'token', 'context', 'page').
-                                         If None, it's taken from the configuration file.
-            embedding_model: Initialized embedding model. If provided, it's assigned to the chunker.
+        Initializes the ChunkerFactory.
+        """
+        pass
+    
+    def _load_config(self) -> Dict[str, Any]:
+        """
+        Loads the chunks configuration.
         
         Returns:
-            ChunkAbstract: Instance of a class that implements ChunkAbstract.
+            Chunks configuration
+        """
+        return config.get_chunks_config()
+    
+    def get_chunker(self, chunker_type: Optional[str] = None, embedding_model: Optional[Any] = None) -> ChunkAbstract:
+        """
+        Gets a chunker instance of the specified type.
+        
+        Args:
+            chunker_type: Type of chunker ('character', 'token', 'context', 'page'). If None, the config value is used.
+            embedding_model: Embedding model to use (optional)
+            
+        Returns:
+            ChunkAbstract instance
             
         Raises:
-            ValueError: If the chunker type is not supported.
+            ValueError: If the chunker type is not valid
         """
-        # If no type is provided, get it from the configuration
-        chunks_config = config.get_chunks_config()
+        # Load configuration if no specific type is provided
         if chunker_type is None:
-            chunker_type = chunks_config.get("method", "context")
+            chunks_config = self._load_config()
+            chunker_type = chunks_config.get("method", "character")
         
-        # Unique key for this type of chunker
-        instance_key = f"chunker:{chunker_type}"
+        # Normalize the chunker type
+        chunker_type = chunker_type.lower()
         
-        # If an instance already exists for this type, return it
-        if instance_key in ChunkerFactory._instances:
-            # If an embedding model is provided, update it
-            if embedding_model is not None:
-                ChunkerFactory._instances[instance_key].set_embedding_model(embedding_model)
-            return ChunkerFactory._instances[instance_key]
+        # Verify that the implementation exists
+        if chunker_type not in self._chunker_classes:
+            raise ValueError(f"Invalid chunker type: {chunker_type}. Available options: {list(self._chunker_classes.keys())}")
         
-        # Create a new instance based on the type
-        if chunker_type.lower() == 'character':
-            chunker = CharacterChunker(embedding_model)
-        elif chunker_type.lower() == 'token':
-            chunker = TokenChunker(embedding_model)
-        elif chunker_type.lower() == 'context':
-            chunker = ContextChunker(embedding_model)
-        elif chunker_type.lower() == 'page':
-            chunker = PageChunker(embedding_model)
-        else:
-            raise ValueError(f"Unsupported chunker type: {chunker_type}")
+        # Get the chunker class
+        chunker_class = self._chunker_classes[chunker_type]
         
-        # Store the instance for future references
-        ChunkerFactory._instances[instance_key] = chunker
+        # Check if an instance already exists
+        instance_key = f"{chunker_type}:{id(embedding_model) if embedding_model else 'default'}"
         
-        return chunker
+        if instance_key in self._instances:
+            return self._instances[instance_key]
+        
+        # Create new instance
+        chunker_instance = chunker_class(embedding_model=embedding_model)
+        
+        # Store the instance for reuse
+        self._instances[instance_key] = chunker_instance
+        
+        return chunker_instance
     
-    @staticmethod
-    def reset_instances() -> None:
+    @classmethod
+    def reset_instances(cls) -> None:
         """
         Resets all chunker instances.
-        Useful for tests or to free resources.
+        Useful for testing or to free resources.
         """
-        ChunkerFactory._instances.clear()
-        logger.info("All chunker instances have been reset")
+        cls._instances.clear()

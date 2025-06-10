@@ -1,6 +1,6 @@
 import re
 import logging
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 
 from modulos.chunks.ChunkAbstract import ChunkAbstract
 # Configure logging
@@ -35,32 +35,32 @@ class PageChunker(ChunkAbstract):
     
     def extract_headers(self, content: str, **kwargs) -> List[Dict[str, Any]]:
         """
-        Extrae los encabezados del contenido Markdown utilizando expresiones regulares.
+        Extract headers from Markdown content using regular expressions.
         
-        Parámetros:
-            content: Contenido del archivo Markdown.
-            **kwargs: Parámetros adicionales (opcional).
+        Args:
+            content: Markdown file content.
+            **kwargs: Additional parameters (optional).
             
-        Retorna:
-            Lista de diccionarios con información de cada encabezado.
+        Returns:
+            List of dictionaries with information about each header.
         """
-        # Obtener parámetros de kwargs o usar valores por defecto
+        # Get parameters from kwargs or use default values
         max_header_level = kwargs.get("max_header_level", self.max_header_level)
         
         headers = []
         
-        # Expresión regular para buscar encabezados en Markdown (# Título, ## Subtítulo, etc.)
+        # Regular expression to search for headers in Markdown (# Title, ## Subtitle, etc.)
         header_pattern = r'^(#{1,6})\s+(.+?)(?:\s+#+)?$'
         
-        # Buscar encabezados en cada línea
+        # Search for headers in each line
         for match in re.finditer(header_pattern, content, re.MULTILINE):
-            level = len(match.group(1))  # Número de # determina el nivel
+            level = len(match.group(1))  # Number of # determines the level
             
-            # Verificar si el nivel está dentro del rango deseado
+            # Verify if the level is within the desired range
             if level <= max_header_level:
                 header_text = match.group(2).strip()
                 
-                # Posición de inicio y fin en el contenido
+                # Start and end positions in the content
                 start_index = match.start()
                 end_index = match.end()
                 
@@ -71,20 +71,20 @@ class PageChunker(ChunkAbstract):
                     "end_index": end_index
                 })
         
-        logger.debug(f"Extraídos {len(headers)} encabezados")
+        logger.debug(f"Extracted {len(headers)} headers")
         return headers
     
     def split_text_by_page_break(self, text: str, page_pattern: str) -> List[Dict[str, Any]]:
         """
-        Divide el texto en chunks basados en el patrón de página:
-        {número} seguido de al menos 5 guiones.
+        Splits text into chunks based on page pattern:
+        {number} followed by at least 5 dashes.
         
-        Parámetros:
-            text: Texto a dividir.
-            page_pattern: Patrón de expresión regular para identificar marcadores de página.
+        Args:
+            text: Text to split.
+            page_pattern: Regular expression pattern to identify page markers.
             
-        Retorna:
-            Lista de diccionarios con texto y número de página de cada chunk.
+        Returns:
+            List of dictionaries with text and page number for each chunk.
         """
         page_regex = re.compile(page_pattern)
         chunks = []
@@ -99,7 +99,7 @@ class PageChunker(ChunkAbstract):
             last_index = match.end()
             last_page = page_num
 
-        # Último fragmento después del último marcador de página
+        # Last fragment after the last page marker
         remaining = text[last_index:].strip()
         if remaining:
             final_page = last_page if last_page else "1"
@@ -109,32 +109,32 @@ class PageChunker(ChunkAbstract):
     
     def chunk(self, content: str, headers: List[Dict[str, Any]], **kwargs) -> List[Dict[str, Any]]:
         """
-        Divide el contenido en chunks basados únicamente en marcadores de página
-        y mantiene un sistema de encabezados abiertos para preservar el contexto.
+        Divides content into chunks based solely on page markers
+        and maintains an open headings system to preserve context.
         
-        Parámetros:
-            content: Contenido del archivo Markdown.
-            headers: Lista de encabezados extraídos previamente.
-            **kwargs: Parámetros adicionales (opcional).
+        Args:
+            content: Markdown file content.
+            headers: List of headers extracted previously.
+            **kwargs: Additional parameters (optional).
             
-        Retorna:
-            Lista de diccionarios con los chunks generados.
+        Returns:
+            List of dictionaries with the generated chunks.
         """
-        # Obtener parámetros de kwargs o usar valores por defecto
+        # Get parameters from kwargs or use default values
         page_pattern = kwargs.get("page_pattern", self.page_pattern)
-        doc_title = kwargs.get("doc_title", "Documento")
+        doc_title = kwargs.get("doc_title", "Document")
         
-        # Lista final de chunks a retornar
+        # Final list of chunks to return
         final_chunks = []
         
-        # Verificar si el contenido tiene marcadores de página
+        # Check if content has page markers
         if re.search(page_pattern, content):
             page_chunks = self.split_text_by_page_break(content, page_pattern)
         else:
-            # Si no hay marcadores de página, tratar todo el documento como una sola página
+            # If there are no page markers, treat the entire document as a single page
             page_chunks = [{"text": content, "page": "1"}]
         
-        # Lista de encabezados abiertos (nivel, texto)
+        # List of open headings (level, text)
         open_headings = []
         chunk_counter = 0
         
@@ -143,7 +143,7 @@ class PageChunker(ChunkAbstract):
             chunk_text = chunk["text"]
             page_number = chunk["page"]
             
-            # Para el primer chunk, pre-leer las líneas hasta obtener el primer encabezado
+            # For the first chunk, pre-read lines until getting the first heading
             if chunk_counter == 1:
                 lines = chunk_text.splitlines()
                 initial_headings = []
@@ -151,16 +151,16 @@ class PageChunker(ChunkAbstract):
                     lvl, txt = self.get_heading_level(line)
                     if lvl is not None:
                         initial_headings.append((lvl, txt))
-                        # Si el primer encabezado es H1, detenemos la pre-lectura
+                        # If the first heading is H1, stop pre-reading
                         if lvl == 1:
                             break
                     else:
-                        # Detenerse si se encuentra la primera línea que no es un encabezado
+                        # Stop if the first non-heading line is found
                         break
                 if initial_headings:
                     open_headings = initial_headings.copy()
             
-            # Construir el encabezado usando los encabezados "abiertos" al inicio del chunk
+            # Build the header using the "open" headings at the beginning of the chunk
             header = self.build_header_from_open_headings(doc_title, page_number, open_headings, chunk_counter)
             
             final_chunks.append({
@@ -169,10 +169,10 @@ class PageChunker(ChunkAbstract):
                 "page": page_number
             })
             
-            # Actualizar el estado de encabezados abiertos para los siguientes chunks
+            # Update the state of open headings for the following chunks
             lines = chunk_text.splitlines()
             for line in lines:
                 open_headings = self.update_open_headings(open_headings, line)
         
-        logger.info(f"Generados {len(final_chunks)} chunks por página")
-        return final_chunks 
+        logger.info(f"Generated {len(final_chunks)} chunks by page")
+        return final_chunks

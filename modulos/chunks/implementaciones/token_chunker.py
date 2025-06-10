@@ -1,11 +1,10 @@
 import re
 import logging
 import math
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any
 from transformers import AutoTokenizer
 
 from modulos.chunks.ChunkAbstract import ChunkAbstract
-from config import config
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -43,7 +42,7 @@ class TokenChunker(ChunkAbstract):
             self.tokenizer = None
             
         logger.info(f"TokenChunker initialized with max_tokens={self.max_tokens}, overlap={self.token_overlap}")
-    
+
     def extract_headers(self, content: str, **kwargs) -> List[Dict[str, Any]]:
         """
         Extracts headers from Markdown content using regular expressions.
@@ -137,7 +136,7 @@ class TokenChunker(ChunkAbstract):
             start_positions.pop()
         
         # Helper function to convert token indices to character indices
-        def token_idx_to_char_idx(token_idx):
+        def token_idx_to_char_idx(token_idx: int) -> int:
             if token_idx >= total_tokens:
                 return len(content)
             # Decode until the token to get the corresponding text

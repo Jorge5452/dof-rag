@@ -2,12 +2,10 @@ import re
 import logging
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
 
 from config import config
-from modulos.embeddings.embeddings_factory import EmbeddingFactory
 
-# Configure logging
+# Configure logging for chunk processing
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
@@ -42,27 +40,27 @@ class ChunkAbstract(ABC):
         # Configuration for header format
         self.header_format = self.chunks_config.get("header_format", "standard")
         
-    def set_embedding_model(self, model):
+    def set_embedding_model(self, model: Any) -> None:
         """
-        Establece el modelo de embeddings para calcular las representaciones vectoriales.
+        Sets the embedding model for calculating vector representations.
         
-        Parámetros:
-            model: Modelo de embeddings inicializado.
+        Args:
+            model: Initialized embedding model.
         """
         self.model = model
     
-    # Patrón para detectar encabezados en Markdown
+    # Regex pattern for detecting Markdown headers
     HEADING_PATTERN = re.compile(r'^(#{1,6})\s+(.*)$')
     
     def get_heading_level(self, line: str) -> Tuple[Optional[int], Optional[str]]:
         """
-        Obtiene el nivel y texto de un encabezado, o (None, None) si la línea no es un encabezado.
+        Extracts heading level and text from a line, or returns (None, None) if not a heading.
         
-        Parámetros:
-            line: Línea de texto a analizar.
+        Args:
+            line: Text line to analyze.
             
-        Retorna:
-            Tupla (nivel, texto) o (None, None) si no es un encabezado.
+        Returns:
+            Tuple (level, text) or (None, None) if not a heading.
         """
         match = self.HEADING_PATTERN.match(line.strip())
         if match:
@@ -74,42 +72,42 @@ class ChunkAbstract(ABC):
     
     def update_open_headings(self, open_headings: List[Tuple[int, str]], line: str) -> List[Tuple[int, str]]:
         """
-        Actualiza la lista de encabezados abiertos según la línea actual.
+        Updates the list of open headings based on the current line.
         
-        La estrategia es:
-        - Si se encuentra un H1, se reinicia la lista.
-        - Si la línea es un encabezado de nivel >1:
-            * Si la lista está vacía, se añade.
-            * Si el último encabezado abierto tiene un nivel menor o igual, 
-              se añade sin eliminar el anterior (para preservar hermanos).
-            * Si el nuevo encabezado es de nivel superior (número menor) 
-              al último, se preservan los de nivel inferior al nuevo y se añade.
+        Strategy:
+        - If H1 is found, reset the list.
+        - If line is a heading with level >1:
+            * If list is empty, add it.
+            * If last open heading has lower or equal level, 
+              add without removing previous (to preserve siblings).
+            * If new heading is higher level (lower number) than last,
+              preserve only headings with lower level numbers and add new one.
               
-        Parámetros:
-            open_headings: Lista actual de encabezados abiertos [(nivel, texto), ...].
-            line: Línea de texto a analizar.
+        Args:
+            open_headings: Current list of open headings [(level, text), ...].
+            line: Text line to analyze.
             
-        Retorna:
-            Lista actualizada de encabezados abiertos.
+        Returns:
+            Updated list of open headings.
         """
         lvl, txt = self.get_heading_level(line)
         if lvl is None:
-            # Línea sin encabezado, no se modifica el estado
+            # Non-heading line, state remains unchanged
             return open_headings
 
         if lvl == 1:
-            # Un H1 cierra todo el contexto anterior
+            # H1 closes all previous context
             return [(1, txt)]
         else:
             if not open_headings:
                 return [(lvl, txt)]
             else:
-                # Si el último encabezado tiene un nivel menor o igual, se añade el actual
+                # If last heading has lower or equal level, append current
                 if open_headings[-1][0] <= lvl:
                     open_headings.append((lvl, txt))
                 else:
-                    # Si el nuevo encabezado es de nivel superior (más importante)
-                    # solo se preservan los encabezados de nivel inferior (mayor) al nuevo
+                    # If new heading is higher level (more important),
+                    # preserve only headings with lower level numbers
                     new_chain = [item for item in open_headings if item[0] < lvl]
                     new_chain.append((lvl, txt))
                     open_headings = new_chain
@@ -117,48 +115,48 @@ class ChunkAbstract(ABC):
     
     def build_header_from_open_headings(self, doc_title: str, page: str, open_headings: List[Tuple[int, str]], chunk_number: int) -> str:
         """
-        Construye el encabezado del chunk según el formato configurado.
-        Soporta múltiples formatos para su uso por diferentes implementaciones de chunkers.
+        Builds chunk header according to configured format.
+        Supports multiple formats for use by different chunker implementations.
         
-        Formato "standard" (por defecto):
-          # Document: <Nombre del Documento> | page: <Número de Página>
-          {Lista de encabezados en formato Markdown}
+        "standard" format (default):
+          # Document: <Document Name> | page: <Page Number>
+          {List of headings in Markdown format}
         
-        Formato "simple":
-          <Nombre del Documento> - Página <Número de Página> - <Jerarquía de encabezados>
+        "simple" format:
+          <Document Name> - Page <Page Number> - <Heading Hierarchy>
         
-        Parámetros:
-            doc_title: Título del documento.
-            page: Número o etiqueta de página.
-            open_headings: Lista de encabezados abiertos [(nivel, texto), ...].
-            chunk_number: Número del chunk actual.
+        Args:
+            doc_title: Document title.
+            page: Page number or label.
+            open_headings: List of open headings [(level, text), ...].
+            chunk_number: Current chunk number.
             
-        Retorna:
-            String con el encabezado construido según el formato configurado.
+        Returns:
+            String with header built according to configured format.
         """
-        # Determinar formato específico para el método actual
+        # Determine specific format for current method
         method_config = self.chunks_config.get(self.method, {})
         header_format = method_config.get("header_format", self.header_format)
         
-        # Formato simple (estilo PageChunker)
+        # Simple format (PageChunker style)
         if header_format == "simple":
             if chunk_number == 1:
-                return f"{doc_title} - Página {page}"
+                return f"{doc_title} - Page {page}"
             else:
                 if open_headings:
                     sorted_headings = sorted(open_headings, key=lambda x: x[0])
                     headers_text = " > ".join([h[1] for h in sorted_headings])
-                    return f"{doc_title} - Página {page} - {headers_text}"
+                    return f"{doc_title} - Page {page} - {headers_text}"
                 else:
-                    return f"{doc_title} - Página {page}"
+                    return f"{doc_title} - Page {page}"
         
-        # Formato estándar (original)
+        # Standard format (original)
         else:
             header_lines = [f"# Document: {doc_title} | page: {page}"]
 
             if chunk_number == 1:
                 if open_headings:
-                    # Para el primer chunk, solo se incluye el primer encabezado detectado
+                    # For first chunk, only include first detected heading
                     top_level, top_text = open_headings[0]
                     hashes = "#" * top_level
                     header_lines.append(f"{hashes} {top_text}")
@@ -172,17 +170,17 @@ class ChunkAbstract(ABC):
     @abstractmethod
     def extract_headers(self, content: str, **kwargs) -> List[Dict[str, Any]]:
         """
-        Extrae los encabezados del contenido Markdown utilizando expresiones regulares y respetando la jerarquía.
+        Extracts headers from Markdown content using regex while respecting hierarchy.
         
-        Parámetros:
-            content: Contenido del texto.
-            **kwargs: Parámetros adicionales, por ejemplo, niveles a considerar, longitudes mínimas/máximas, etc.
+        Args:
+            content: Text content.
+            **kwargs: Additional parameters, e.g., levels to consider, min/max lengths, etc.
             
-        Retorna:
-            Lista de diccionarios con la información de cada encabezado:
+        Returns:
+            List of dictionaries with header information:
               {
                   "header_text": str,
-                  "level": int,           # 1 para h1, 2 para h2, etc.
+                  "level": int,           # 1 for h1, 2 for h2, etc.
                   "start_index": int,
                   "end_index": int
               }
@@ -192,44 +190,44 @@ class ChunkAbstract(ABC):
     @abstractmethod
     def chunk(self, content: str, headers: List[Dict[str, Any]], **kwargs) -> List[Dict[str, Any]]:
         """
-        Realiza el particionado del texto en chunks según la estrategia (caracteres, tokens, contexto, etc.).
+        Performs text partitioning into chunks according to strategy (characters, tokens, context, etc.).
         
-        Parámetros:
-            content: Contenido del texto.
-            headers: Lista de encabezados extraídos con extract_headers.
-            **kwargs: Parámetros opcionales que pueden sobrescribir o complementar la configuración.
+        Args:
+            content: Text content.
+            headers: List of headers extracted with extract_headers.
+            **kwargs: Optional parameters that can override or complement configuration.
             
-        Retorna:
-            Lista de diccionarios con la siguiente estructura:
+        Returns:
+            List of dictionaries with the following structure:
               {
-                  "text": str,             # Contenido del chunk.
-                  "header": str,           # Encabezado o jerarquía de encabezados asociados.
-                  "page": str,             # Número o etiqueta de página, asignado de forma inteligente.
+                  "text": str,             # Chunk content.
+                  "header": str,           # Associated header or header hierarchy.
+                  "page": str,             # Page number or label, intelligently assigned.
               }
         """
         pass
 
     def process_content(self, content: str, **kwargs) -> List[Dict[str, Any]]:
         """
-        Procesa el contenido para generar chunks.
-        Ya no tiene la responsabilidad de leer archivos, solo recibe el contenido.
+        Processes content to generate chunks.
+        No longer responsible for reading files, only receives content.
         
-        Parámetros:
-            content: Contenido de texto a procesar.
-            **kwargs: Parámetros adicionales para ajustar el proceso de chunking.
-                      Puede incluir doc_title para el título del documento.
+        Args:
+            content: Text content to process.
+            **kwargs: Additional parameters to adjust chunking process.
+                      May include doc_title for document title.
             
-        Retorna:
-            Lista de diccionarios con los chunks generados.
+        Returns:
+            List of dictionaries with generated chunks.
         """
         try:
-            # 1. Extraer los encabezados
+            # Extract headers from content
             headers = self.extract_headers(content, **kwargs)
             
-            # 2. Dividir en chunks según la estrategia implementada
+            # Split into chunks according to implemented strategy
             raw_chunks = self.chunk(content, headers, **kwargs)
             
-            # 3. Devolver los chunks generados
+            # Return generated chunks
             logger.info(f"Generated {len(raw_chunks)} chunks")
             return raw_chunks
             
@@ -239,71 +237,71 @@ class ChunkAbstract(ABC):
 
     def find_header_for_position(self, position: int, headers: List[Dict[str, Any]]) -> str:
         """
-        Encuentra el encabezado más relevante para una posición dada en el texto.
-        Considera la jerarquía de encabezados para construir un contexto completo.
+        Finds the most relevant header for a given position in text.
+        Considers header hierarchy to build complete context.
         
-        Parámetros:
-            position: Posición en el texto para la que queremos encontrar el encabezado.
-            headers: Lista de encabezados extraídos previamente.
+        Args:
+            position: Text position for which to find the header.
+            headers: List of previously extracted headers.
             
-        Retorna:
-            String con el encabezado construido (puede incluir jerarquía).
+        Returns:
+            String with built header (may include hierarchy).
         """
         relevant_headers = {}
         
-        # Encontrar todos los encabezados aplicables hasta la posición
+        # Find all applicable headers up to position
         for header in headers:
             if header["start_index"] <= position:
                 level = header["level"]
-                # Guardar el encabezado más reciente para cada nivel
+                # Save most recent header for each level
                 if level not in relevant_headers or header["start_index"] > relevant_headers[level]["start_index"]:
                     relevant_headers[level] = header
         
-        # Si no hay encabezados aplicables, retornar cadena vacía
+        # If no applicable headers, return empty string
         if not relevant_headers:
             return ""
         
-        # Construir la jerarquía de encabezados
+        # Build header hierarchy
         header_hierarchy = []
         for level in sorted(relevant_headers.keys()):
             header_hierarchy.append(relevant_headers[level]["header_text"])
         
-        # Unir los encabezados con un separador
+        # Join headers with separator
         return " > ".join(header_hierarchy)
 
-    def process_content_stream(self, content: str, **kwargs):
+    def process_content_stream(self, content: str, **kwargs) -> Any:
         """
-        Versión streaming del proceso de generación de chunks.
-        Procesa el contenido y devuelve chunks de forma iterativa con un generador.
-        Esta implementación es óptima para documentos grandes, ya que no mantiene
-        todos los chunks en memoria simultáneamente.
+        Streaming version of chunk generation process.
+        Processes content and returns chunks iteratively with a generator.
+        This implementation is optimal for large documents as it doesn't keep
+        all chunks in memory simultaneously.
         
-        Parámetros:
-            content: Contenido de texto a procesar.
-            **kwargs: Parámetros adicionales para ajustar el proceso de chunking.
-                      Puede incluir doc_title para el título del documento.
+        Args:
+            content: Text content to process.
+            **kwargs: Additional parameters to adjust chunking process.
+                      May include doc_title for document title.
             
-        Retorna:
-            Generador que produce diccionarios con los chunks uno por uno.
+        Returns:
+            Generator that produces chunk dictionaries one by one.
         """
         try:
-            # 1. Extraer los encabezados
+            # Extract headers from content
             headers = self.extract_headers(content, **kwargs)
             
-            # 2. Dividir en chunks según la estrategia implementada
+            # Split into chunks according to implemented strategy
             raw_chunks = self.chunk(content, headers, **kwargs)
             
-            # 3. Devolver los chunks generados uno por uno
+            # Return chunks one by one
             logger.info("Starting streaming chunk generation")
             total_chunks = len(raw_chunks)
             
             for i, chunk in enumerate(raw_chunks):
-                if i % 10 == 0:  # Log cada 10 chunks para no saturar logs
+                if i % 10 == 0:  # Log every 10 chunks to avoid log saturation
                     logger.debug(f"Processing chunk {i+1}/{total_chunks}")
                 
                 yield chunk
                 
-                # Liberar la referencia para ayudar al recolector de basura
+                # Release reference to help garbage collector
                 raw_chunks[i] = None
                 
             logger.info(f"Completed streaming generation of {total_chunks} chunks")
