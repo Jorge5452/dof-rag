@@ -1,9 +1,8 @@
 """
-Módulo para la generación y manejo de embeddings.
-Proporciona componentes para trabajar con diferentes modelos de embeddings.
+Module for embedding generation and management.
+Provides components for working with different embedding models.
 """
 
 from modulos.embeddings.embeddings_factory import EmbeddingFactory
 
-# Exportar la función para reiniciar instancias
-reset_embedding_managers = EmbeddingFactory.reset_instances
+__all__ = ['EmbeddingFactory']

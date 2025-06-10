@@ -1,129 +1,174 @@
 """
-Gestor de embeddings para el sistema RAG.
+Embedding manager for the RAG system.
 
-Este módulo se encarga de cargar y gestionar los modelos de embeddings,
-utilizando sentence-transformers para manejar automáticamente los modelos.
+This module is responsible for loading and managing embedding models,
+using sentence-transformers to automatically handle the models.
 """
 import logging
-from typing import List, Optional
+from typing import List
 import numpy as np
 
-# Configurar logging
+# Configure logging
 logger = logging.getLogger(__name__)
 
 class EmbeddingManager:
     """
-    Gestor para modelos de embeddings.
-    Maneja la carga, gestión y generación de embeddings usando
-    diversos modelos como ModernBERT, CDE, E5, etc.
+    Manager for embedding models.
+    Handles loading, management and generation of embeddings using
+    various models such as ModernBERT, CDE, E5, etc.
     """
     
     def __init__(self, model_type: str = None):
         """
-        Inicializa el gestor de embeddings.
+        Initializes the EmbeddingManager with a specific model type.
         
         Args:
-            model_type: Tipo de modelo a utilizar (modernbert, cde-small, e5-small).
-                       Si es None, se usa el configurado en config.yaml.
+            model_type: Type of model to use. If None, the configuration value is used.
         """
-        # Importar aquí para evitar la carga prematura
-        from config import config
-        
-        # Cargar configuración de embeddings
-        self.embedding_config = config.get_embedding_config()
-        
-        # Determinar el modelo a utilizar
+        # Get configuration if no specific model is provided
         if model_type is None:
-            model_type = self.embedding_config.get("model", "modernbert")
+            from config import config
+            embedding_config = config.get_embedding_config()
+            model_type = embedding_config.get("model", "modernbert")
         
         self.model_type = model_type
-        self.model_config = config.get_specific_model_config(model_type)
-        self.model_name = self.model_config.get("model_name", "")
-        
-        # Inicializar atributos para el modelo cargado (lazy loading)
         self._model = None
+        self.model_name = None
         self._embedding_dim = None
         
-        logger.info(f"EmbeddingManager inicializado, modelo seleccionado: {model_type} ({self.model_name})")
+        # Initialize the model (lazy loading)
+        self._initialize_model()
     
-    def load_model(self) -> None:
+    def _initialize_model(self):
         """
-        Carga el modelo de embeddings según la configuración.
-        
-        Sentence-transformers se encarga de gestionar automáticamente la caché de modelos.
+        Initializes the embedding model according to the specified type.
         """
-        # Importar aquí para permitir lazy loading y mejorar rendimiento
-        from sentence_transformers import SentenceTransformer
+        # Mapping of model types to actual model names
+        model_mapping = {
+            "modernbert": "nomic-ai/modernbert-embed-base",
+            "bge": "BAAI/bge-large-en-v1.5",
+            "e5": "intfloat/e5-large-v2",
+            "gte": "thenlper/gte-large",
+            "instructor": "hkunlp/instructor-large",
+            "minilm": "sentence-transformers/all-MiniLM-L6-v2",
+            "mpnet": "sentence-transformers/all-mpnet-base-v2"
+        }
         
-        logger.info(f"Cargando modelo de embeddings: {self.model_name}")
-        
-        # Obtener parámetros de configuración
-        trust_remote_code = self.embedding_config.get("trust_remote_code", False)
-        device = self.model_config.get("device", "cpu")
-        
-        try:
-            # Cargar el modelo - sentence-transformers lo buscará en caché local o lo descargará
-            self._model = SentenceTransformer(
-                self.model_name, 
-                device=device,
-                trust_remote_code=trust_remote_code
-            )
-            
-            # Obtener dimensión del embedding
-            self._embedding_dim = self._model.get_sentence_embedding_dimension()
-            logger.info(f"Modelo cargado correctamente. Dimensión del embedding: {self._embedding_dim}")
-            
-        except Exception as e:
-            logger.error(f"Error al cargar modelo de embeddings: {e}")
-            raise
+        # Get the actual model name
+        self.model_name = model_mapping.get(self.model_type.lower(), self.model_type)
+    
+    def load_model(self):
+        """
+        Loads the embedding model if not already loaded.
+        """
+        if self._model is None:
+            try:
+                # Import SentenceTransformer here to avoid early import
+                from sentence_transformers import SentenceTransformer
+                
+                # Load the model
+                self._model = SentenceTransformer(self.model_name)
+                
+                # Get model dimensions
+                self._embedding_dim = self._model.get_sentence_embedding_dimension()
+            except Exception as e:
+                logger.error(f"Error loading embedding model: {e}")
+                raise
     
     @property
     def model(self):
         """
-        Acceso al modelo con carga automática si no está cargado.
+        Access to the model with automatic loading if not loaded.
         
         Returns:
-            El modelo de embeddings cargado
+            The loaded embedding model
         """
         if self._model is None:
             self.load_model()
         return self._model
     
+    @model.setter
+    def model(self, value):
+        self._model = value
+    
     @property
     def embedding_dim(self) -> int:
         """
-        Dimensión del embedding con carga automática si es necesario.
+        Gets the embedding dimension of the current model.
         
         Returns:
-            La dimensión del embedding
+            Embedding dimension as integer
         """
         if self._embedding_dim is None:
-            if self._model is None:
-                self.load_model()
-            self._embedding_dim = self._model.get_sentence_embedding_dimension()
+            # Load model if necessary to get dimensions
+            _ = self.model
         return self._embedding_dim
     
-    def get_document_embedding(self, header: Optional[str], text: str) -> List[float]:
+    def get_dimensions(self) -> int:
         """
-        Genera embeddings para documentos o chunks combinando encabezado y texto.
+        Gets the embedding dimension of the current model.
+        
+        Returns:
+            Embedding dimension as integer
+        """
+        return self.embedding_dim
+    
+    def get_embedding(self, text: str) -> np.ndarray:
+        """
+        Generates the embedding for a given text.
         
         Args:
-            header: Encabezado del documento o chunk (puede ser None)
-            text: Texto principal del documento o chunk
+            text: Text to generate embedding for
             
         Returns:
-            Lista de valores float representando el embedding
+            Embedding vector as numpy array
         """
-        # Combinar encabezado y texto para generar el embedding
+        # Ensure the model is loaded
+        model = self.model
+        
+        # Generate embedding
+        embedding = model.encode(text, convert_to_numpy=True)
+        return embedding
+    
+    def get_embeddings(self, texts: List[str]) -> np.ndarray:
+        """
+        Generates embeddings for a list of texts.
+        
+        Args:
+            texts: List of texts to generate embeddings for
+            
+        Returns:
+            Matrix of embeddings as numpy array
+        """
+        # Ensure the model is loaded
+        model = self.model
+        
+        # Generate embeddings in batch
+        embeddings = model.encode(texts, convert_to_numpy=True)
+        
+        return embeddings
+    
+    def get_document_embedding(self, header: str = None, text: str = None) -> List[float]:
+        """
+        Generates embeddings for documents or chunks by combining header and text.
+        
+        Args:
+            header: Document or chunk header (can be None)
+            text: Main text of the document or chunk
+            
+        Returns:
+            List of float values representing the embedding
+        """
+        # Combine header and text to generate the embedding
         if header and header.strip():
             full_text = f"{header} - {text}"
         else:
             full_text = text
         
-        # Generar embedding
+        # Generate embedding
         embedding = self.model.encode(full_text)
         
-        # Convertir a lista si es un array numpy
+        # Convert to list if it's a numpy array
         if isinstance(embedding, np.ndarray):
             return embedding.tolist()
         
@@ -131,78 +176,23 @@ class EmbeddingManager:
     
     def get_query_embedding(self, query: str) -> List[float]:
         """
-        Genera embeddings para consultas.
+        Generates embeddings for queries.
         
         Args:
-            query: Texto de la consulta
+            query: Query text
             
         Returns:
-            Lista de valores float representando el embedding
+            List of float values representing the embedding
         """
-        # Algunos modelos requieren formateo especial para queries (e.g., E5)
-        if self.model_type == "e5-small" and self.model_config.get("prefix_queries", False):
+        # Some models require special formatting for queries (e.g., E5)
+        if self.model_type == "e5-small" and hasattr(self, 'model_config') and self.model_config.get("prefix_queries", False):
             query = f"query: {query}"
         
-        # Generar embedding
+        # Generate embedding
         embedding = self.model.encode(query)
         
-        # Convertir a lista si es un array numpy
+        # Convert to list if it's a numpy array
         if isinstance(embedding, np.ndarray):
             return embedding.tolist()
         
         return embedding
-    
-    def get_dimensions(self) -> int:
-        """
-        Obtiene la dimensión del embedding.
-        
-        Returns:
-            Dimensión del embedding (int)
-        """
-        return self.embedding_dim
-    
-    def batch_encode(self, texts: List[str]) -> List[List[float]]:
-        """
-        Genera embeddings para múltiples textos procesando uno por uno.
-        Esta implementación evita el procesamiento por lotes real para prevenir problemas de memoria.
-        
-        Args:
-            texts: Lista de textos a codificar
-            
-        Returns:
-            Lista de embeddings (cada uno como lista de floats)
-        """
-        # Procesar uno por uno en vez de por lotes para evitar problemas de memoria
-        embeddings = []
-        for text in texts:
-            # Usar encode con un solo texto
-            embedding = self.model.encode(text)
-            
-            # Convertir a lista si es un array numpy
-            if isinstance(embedding, np.ndarray):
-                embedding = embedding.tolist()
-            
-            embeddings.append(embedding)
-            
-        return embeddings
-
-    def get_batch_embeddings(self, headers: List[Optional[str]], texts: List[str]) -> List[List[float]]:
-        """
-        Genera embeddings para múltiples pares de encabezado-texto.
-        Esta implementación evita el procesamiento por lotes real y usa get_document_embedding
-        uno por uno para evitar problemas de memoria.
-        
-        Args:
-            headers: Lista de encabezados (puede contener None o strings vacíos)
-            texts: Lista de textos principales
-            
-        Returns:
-            Lista de embeddings (cada uno como lista de floats)
-        """
-        # Procesamos uno por uno para evitar problemas de memoria
-        embeddings = []
-        for header, text in zip(headers, texts):
-            embedding = self.get_document_embedding(header, text)
-            embeddings.append(embedding)
-                
-        return embeddings
