@@ -1,131 +1,137 @@
 from abc import ABC, abstractmethod
-import logging
 import json
+import logging
 import struct
-import time
+from typing import Any, Dict, List, Optional
+
 import numpy as np
-from typing import List, Dict, Any, Optional, Tuple, Union
 
 class VectorialDatabase(ABC):
     """
-    Clase abstracta que define la interfaz para las bases de datos vectoriales.
+    Abstract class that defines the interface for vectorial databases.
     
-    Define métodos para:
-    - Conectar/desconectar a la base de datos
-    - Crear el esquema
-    - Insertar documentos y chunks
-    - Buscar documentos por embedding
-    - Etc.
+    Defines methods for:
+    - Connecting/disconnecting to the database
+    - Creating the schema
+    - Inserting documents and chunks
+    - Searching documents by embedding
+    - And more
     
-    Las clases que implementen esta interfaz deben proporcionar una implementación
-    concreta para estos métodos.
+    Classes implementing this interface must provide concrete implementations
+    for these methods.
     """
     
-    def __init__(self):
-        """Inicializa el logger y otros atributos comunes."""
-        self._logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
-        self._conn = None
-        self._cursor = None
-        self._db_path = None
-        self._metadata = {}  # Caché local de metadatos
-        self._in_transaction = False  # Flag para rastrear si hay una transacción activa
-    
-    @abstractmethod
-    def connect(self, db_path):
-        """
-        Conecta a la base de datos.
+    def __init__(self, embedding_dim: Optional[int] = None) -> None:
+        """Initialize the logger and other common attributes.
         
         Args:
-            db_path (str): Ruta a la base de datos
+            embedding_dim: Dimension of the embedding vectors (optional for base class)
+        """
+        self._logger: logging.Logger = logging.getLogger(f"{__name__}.{self.__class__.__name__}")
+        self._conn: Optional[Any] = None
+        self._cursor: Optional[Any] = None
+        self._db_path: Optional[str] = None
+        self._metadata: Dict[str, Any] = {}  # Local metadata cache
+        self._in_transaction: bool = False  # Flag to track if there's an active transaction
+        self._embedding_dim: Optional[int] = embedding_dim  # Store embedding dimension
+    
+    @abstractmethod
+    def connect(self, db_path: str) -> bool:
+        """
+        Connect to the database.
+        
+        Args:
+            db_path: Path to the database
             
         Returns:
-            bool: True si la conexión fue exitosa, False en caso contrario
+            True if connection was successful, False otherwise
         """
         pass
     
     @abstractmethod
-    def close_connection(self):
+    def close_connection(self) -> bool:
         """
-        Cierra la conexión a la base de datos.
+        Close the database connection.
         
         Returns:
-            bool: True si el cierre fue exitoso, False en caso contrario
+            True if closing was successful, False otherwise
         """
         pass
     
-    def close(self):
+    def close(self) -> bool:
         """
-        Alias para close_connection() por compatibilidad.
+        Alias for close_connection() for compatibility.
         
         Returns:
-            bool: True si el cierre fue exitoso, False en caso contrario
+            True if closing was successful, False otherwise
         """
         return self.close_connection()
     
     @abstractmethod
-    def create_schema(self):
+    def create_schema(self) -> bool:
         """
-        Crea el esquema de la base de datos si no existe.
+        Create the database schema if it doesn't exist.
         
         Returns:
-            bool: True si la creación fue exitosa, False en caso contrario
+            True if creation was successful, False otherwise
         """
         pass
     
     @abstractmethod
-    def insert_document(self, document, chunks):
+    def insert_document(self, document: Dict[str, Any], chunks: List[Dict[str, Any]]) -> Optional[int]:
         """
-        Inserta un documento y sus chunks en la base de datos.
+        Insert a document and its chunks into the database.
         
         Args:
-            document (dict): Diccionario con los datos del documento
-            chunks (list): Lista de diccionarios con los datos de los chunks
+            document: Dictionary with document data
+            chunks: List of dictionaries with chunk data
             
         Returns:
-            int: ID del documento insertado, None si falla
+            ID of the inserted document, None if it fails
         """
         pass
     
     @abstractmethod
-    def get_chunks_by_document(self, document_id, offset=0, limit=100):
+    def get_chunks_by_document(self, document_id: int, offset: int = 0, limit: int = 100) -> List[Dict[str, Any]]:
         """
-        Obtiene los chunks de un documento.
+        Get chunks from a document.
         
         Args:
-            document_id (int): ID del documento
-            offset (int, optional): Offset para paginación
-            limit (int, optional): Límite para paginación
+            document_id: Document ID
+            offset: Offset for pagination (optional)
+            limit: Limit for pagination (optional)
             
         Returns:
-            list: Lista de chunks
+            List of chunks
         """
         pass
     
     @abstractmethod
-    def vector_search(self, query_embedding, filters=None, n_results=5, include_neighbors=False):
+    def vector_search(self, query_embedding: List[float], filters: Optional[Dict[str, Any]] = None, 
+                     n_results: int = 5, include_neighbors: bool = False) -> List[Dict[str, Any]]:
         """
-        Realiza una búsqueda por similitud vectorial.
+        Perform a vector similarity search.
         
         Args:
-            query_embedding (list): Vector de embedding de la consulta
-            filters (dict, optional): Filtros para la búsqueda
-            n_results (int, optional): Número máximo de resultados
-            include_neighbors (bool, optional): Si se incluyen los chunks vecinos en los resultados
+            query_embedding: Query embedding vector
+            filters: Search filters (optional)
+            n_results: Maximum number of results (optional)
+            include_neighbors: Whether to include neighboring chunks in results (optional)
             
         Returns:
-            list: Lista de chunks ordenados por similitud
+            List of chunks ordered by similarity
         """
         pass
     
-    def document_exists(self, file_path):
+    def document_exists(self, file_path: str) -> bool:
         """
-        Verifica si un documento ya existe en la base de datos.
+        Check if a document already exists in the database.
         
         Args:
-            file_path (str): Ruta del archivo del documento
+            file_path: Path to the document file
             
         Returns:
-            bool: True si el documento existe, False en caso contrario
+            True if the document exists, False otherwise
         """
         try:
             self._cursor.execute(
@@ -135,123 +141,121 @@ class VectorialDatabase(ABC):
             count = self._cursor.fetchone()[0]
             return count > 0
         except Exception as e:
-            self._logger.error(f"Error al verificar existencia del documento: {str(e)}")
+            self._logger.error(f"Error checking document existence: {str(e)}")
             return False
     
-    def serialize_vector(self, vector):
+    def serialize_vector(self, vector: List[float]) -> bytes:
         """
-        Serializa un vector a bytes para almacenamiento.
+        Serialize a vector to bytes for storage.
         
         Args:
-            vector (list): Vector de embeddings
+            vector: Embedding vector
             
         Returns:
-            bytes: Vector serializado
+            Serialized vector
         """
         return struct.pack(f'{len(vector)}f', *vector)
     
-    def deserialize_vector(self, serialized, vector_dim=None):
+    def deserialize_vector(self, serialized: bytes, vector_dim: Optional[int] = None) -> List[float]:
         """
-        Deserializa un vector desde bytes.
+        Deserialize a vector from bytes.
         
         Args:
-            serialized (bytes): Vector serializado
-            vector_dim (int, optional): Dimensión del vector
+            serialized: Serialized vector
+            vector_dim: Vector dimension (optional)
             
         Returns:
-            list: Vector deserializado
+            Deserialized vector
         """
         if vector_dim is None:
-            vector_dim = len(serialized) // 4  # 4 bytes por float
+            vector_dim = len(serialized) // 4  # 4 bytes per float
         
         return list(struct.unpack(f'{vector_dim}f', serialized))
     
-    def insert_chunks(self, chunks):
+    def insert_chunks(self, chunks: List[Dict[str, Any]]) -> bool:
         """
-        Inserta múltiples chunks en la base de datos.
+        Insert multiple chunks into the database.
         
         Args:
-            chunks (list): Lista de diccionarios con los datos de los chunks.
-                Cada chunk debe contener al menos 'text', 'embedding', 'metadata'
+            chunks: List of dictionaries with chunk data.
+                Each chunk must contain at least 'text', 'embedding', 'metadata'
         
         Returns:
-            bool: True si la inserción fue exitosa, False en caso contrario.
+            True if insertion was successful, False otherwise.
         """
-        # Implementación por defecto que debe ser sobreescrita
+        # Default implementation that should be overridden
         return False
     
-    def insert_chunk(self, text, embedding, metadata=None):
+    def insert_chunk(self, text: str, embedding: List[float], metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
         """
-        Inserta un único chunk en la base de datos.
+        Insert a single chunk into the database.
         
         Args:
-            text (str): Texto del chunk
-            embedding (list): Vector de embedding
-            metadata (dict, optional): Metadatos asociados al chunk
+            text: Chunk text
+            embedding: Embedding vector
+            metadata: Associated chunk metadata (optional)
             
         Returns:
-            str: ID del chunk insertado, None si falla
+            ID of the inserted chunk, None if it fails
         """
-        # Implementación por defecto que debe ser sobreescrita
+        # Default implementation that should be overridden
         return None
 
     @abstractmethod
-    def insert_document_metadata(self, document):
+    def insert_document_metadata(self, document: Dict[str, Any]) -> Optional[int]:
         """
-        Inserta solo los metadatos de un documento en la base de datos, sin los chunks.
-        Útil para el procesamiento en streaming de documentos grandes.
+        Insert only document metadata into the database, without chunks.
+        Useful for streaming processing of large documents.
         
         Args:
-            document (dict): Diccionario con los datos del documento
+            document: Dictionary with document data
             
         Returns:
-            int: ID del documento insertado, None si falla
+            ID of the inserted document, None if it fails
         """
         pass
     
     @abstractmethod
-    def insert_single_chunk(self, document_id, chunk_data):
+    def insert_single_chunk(self, document_id: int, chunk_data: Dict[str, Any]) -> Optional[int]:
         """
-        Inserta un solo chunk asociado a un documento específico.
+        Insert a single chunk associated with a specific document.
         
         Args:
-            document_id (int): ID del documento al que pertenece el chunk
-            chunk_data (dict): Diccionario con los datos del chunk:
-                - text (str): Texto del chunk
-                - header (str, opcional): Encabezado del chunk
-                - page (str, opcional): Número o identificador de página
-                - embedding (list): Vector de embedding del chunk
-                - embedding_dim (int): Dimensión del embedding
+            document_id: ID of the document the chunk belongs to
+            chunk_data: Dictionary with chunk data:
+                - text (str): Chunk text
+                - header (str, optional): Chunk header
+                - page (str, optional): Page number or identifier
+                - embedding (list): Chunk embedding vector
+                - embedding_dim (int): Embedding dimension
                 
         Returns:
-            int: ID del chunk insertado, None si falla
+            ID of the inserted chunk, None if it fails
         """
         pass
 
-    def get_db_path(self) -> str:
+    def get_db_path(self) -> Optional[str]:
         """
-        Devuelve la ruta de la base de datos.
+        Return the database path.
         
         Returns:
-            La ruta de la base de datos o None si no se ha conectado todavía.
+            The database path or None if not connected yet.
         """
         return self._db_path
     
-    # --- NUEVOS MÉTODOS PARA GESTIÓN DE METADATOS Y OPTIMIZACIÓN ---
-    
     def store_metadata(self, key: str, value: Any) -> bool:
         """
-        Almacena un metadato en la base de datos.
+        Store metadata in the database.
         
         Args:
-            key: Clave del metadato
-            value: Valor del metadato (debe ser serializable a JSON)
+            key: Metadata key
+            value: Metadata value (must be JSON serializable)
             
         Returns:
-            bool: True si se almacenó correctamente
+            True if stored correctly
         """
         try:
-            # Crear tabla de metadatos si no existe
+            # Create metadata table if it doesn't exist
             self._cursor.execute("""
                 CREATE TABLE IF NOT EXISTS db_metadata (
                     key TEXT PRIMARY KEY,
@@ -260,78 +264,41 @@ class VectorialDatabase(ABC):
                 );
             """)
             
-            # Serializar el valor a JSON si es necesario
+            # Serialize value to JSON if necessary
             if not isinstance(value, (str, int, float, bool, type(None))):
                 value = json.dumps(value)
                 
-            # Insertar o actualizar el metadato
+            # Insert or update the metadata
             self._cursor.execute("""
                 INSERT OR REPLACE INTO db_metadata (key, value, updated_at)
                 VALUES (?, ?, CURRENT_TIMESTAMP);
             """, (key, value))
             
             self._conn.commit()
-            self._metadata[key] = value  # Actualizar caché local
+            self._metadata[key] = value  # Update local cache
             return True
             
         except Exception as e:
-            self._logger.error(f"Error al almacenar metadato {key}: {e}")
+            self._logger.error(f"Error storing metadata {key}: {e}")
             return False
     
     def get_metadata(self, key: str, default: Any = None) -> Any:
         """
-        Recupera un metadato de la base de datos.
+        Retrieve metadata from the database.
         
         Args:
-            key: Clave del metadato
-            default: Valor por defecto si la clave no existe
+            key: Metadata key
+            default: Default value if key doesn't exist
             
         Returns:
-            El valor del metadato, o el valor por defecto si no existe
+            The metadata value, or default value if it doesn't exist
         """
-        # Primero intentar obtener de la caché en memoria
+        # First try to get from memory cache
         if key in self._metadata:
             return self._metadata[key]
             
         try:
-            # Verificar si existe la tabla
-            self._cursor.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='db_metadata';
-            """)
-            if not self._cursor.fetchone():
-                return default
-                
-            # Obtener el metadato
-            self._cursor.execute("SELECT value FROM db_metadata WHERE key = ?;", (key,))
-            result = self._cursor.fetchone()
-            
-            if result:
-                try:
-                    # Intentar deserializar JSON por si acaso
-                    value = json.loads(result[0])
-                    self._metadata[key] = value
-                    return value
-                except (json.JSONDecodeError, TypeError):
-                    # Si no es JSON, devolver el valor tal cual
-                    self._metadata[key] = result[0]
-                    return result[0]
-            
-            return default
-            
-        except Exception as e:
-            self._logger.error(f"Error al recuperar metadato {key}: {e}")
-            return default
-    
-    def list_metadata(self) -> Dict[str, Any]:
-        """
-        Lista todos los metadatos almacenados en la base de datos.
-        
-        Returns:
-            Dict[str, Any]: Diccionario con todos los metadatos
-        """
-        try:
-            # Verificar si existe la tabla
+            # Check if table exists
             self._cursor.execute("""
                 SELECT name FROM sqlite_master 
                 WHERE type='table' AND name='db_metadata';
@@ -339,128 +306,129 @@ class VectorialDatabase(ABC):
             if not self._cursor.fetchone():
                 return {}
                 
-            # Obtener todos los metadatos
+            # Get all metadata
             self._cursor.execute("SELECT key, value FROM db_metadata;")
             results = self._cursor.fetchall()
             
-            metadata = {}
+            metadata: Dict[str, Any] = {}
             for key, value in results:
                 try:
-                    # Intentar deserializar JSON
+                    # Try to deserialize JSON
                     metadata[key] = json.loads(value)
                 except (json.JSONDecodeError, TypeError):
-                    # Si no es JSON, usar el valor tal cual
+                    # If not JSON, use the value as is
                     metadata[key] = value
             
-            # Actualizar caché en memoria
+            # Update in-memory cache
             self._metadata.update(metadata)
             return metadata
             
         except Exception as e:
-            self._logger.error(f"Error al listar metadatos: {e}")
+            self._logger.error(f"Error listing metadata: {e}")
             return {}
     
     @abstractmethod
     def optimize_database(self) -> bool:
         """
-        Optimiza la base de datos (compactación, recreación de índices, etc.)
+        Optimize the database (compaction, index recreation, etc.)
         
         Returns:
-            bool: True si la optimización fue exitosa, False en caso contrario
+            True if optimization was successful, False otherwise
         """
         pass
     
-    # --- MÉTODOS PARA MANEJO DE TRANSACCIONES ---
+    # --- TRANSACTION HANDLING METHODS ---
     
     def begin_transaction(self) -> bool:
         """
-        Inicia una transacción manual para inserción masiva.
-        Útil para mejorar rendimiento con muchas inserciones.
+        Start a manual transaction for bulk insertion.
+        Useful for improving performance with many insertions.
         
         Returns:
-            bool: True si se inició correctamente la transacción
+            True if transaction was started correctly
         """
         try:
             if hasattr(self, "_conn") and self._conn:
-                # Verificar si ya hay una transacción activa
+                # Check if there's already an active transaction
                 if hasattr(self, "_in_transaction") and self._in_transaction:
-                    self._logger.debug("Ya hay una transacción activa, ignorando begin_transaction")
-                    return True  # Devolver True porque conceptualmente ya estamos en una transacción
+                    self._logger.debug("There's already an active transaction, ignoring begin_transaction")
+                    return True  # Return True because conceptually we're already in a transaction
                 
                 self._conn.execute("BEGIN TRANSACTION;")
                 self._in_transaction = True
-                self._logger.info("Transacción iniciada")
+                self._logger.info("Transaction started")
                 return True
             return False
         except Exception as e:
-            self._logger.error(f"Error al iniciar transacción: {e}")
+            self._logger.error(f"Error starting transaction: {e}")
             return False
     
     def commit_transaction(self) -> bool:
         """
-        Confirma una transacción en curso.
+        Commit an ongoing transaction.
         
         Returns:
-            bool: True si se confirmó correctamente la transacción
+            True if transaction was committed correctly
         """
         try:
             if hasattr(self, "_conn") and self._conn:
-                # Verificar si hay una transacción activa
+                # Check if there's an active transaction
                 if not hasattr(self, "_in_transaction") or not self._in_transaction:
-                    self._logger.debug("No hay transacción activa para confirmar")
-                    return True  # No hay transacción que confirmar, pero no es un error
+                    self._logger.debug("No active transaction to commit")
+                    return True  # No transaction to commit, but it's not an error
                 
                 self._conn.commit()
                 self._in_transaction = False
-                self._logger.info("Transacción confirmada")
+                self._logger.info("Transaction committed")
                 return True
             return False
         except Exception as e:
-            self._logger.error(f"Error al confirmar transacción: {e}")
+            self._logger.error(f"Error committing transaction: {e}")
             return False
     
     def rollback_transaction(self) -> bool:
         """
-        Revierte una transacción en curso.
+        Rollback an ongoing transaction.
         
         Returns:
-            bool: True si se revirtió correctamente la transacción
+            True if transaction was rolled back correctly
         """
         try:
             if hasattr(self, "_conn") and self._conn:
-                # Verificar si hay una transacción activa
+                # Check if there's an active transaction
                 if not hasattr(self, "_in_transaction") or not self._in_transaction:
-                    self._logger.debug("No hay transacción activa para revertir")
-                    return True  # No hay transacción que revertir, pero no es un error
+                    self._logger.debug("No active transaction to revert")
+                    return True  # No transaction to revert, but no error
                 
                 self._conn.rollback()
                 self._in_transaction = False
-                self._logger.info("Transacción revertida")
+                self._logger.info("Transaction rolled back")
                 return True
             return False
         except Exception as e:
-            self._logger.error(f"Error al revertir transacción: {e}")
+            self._logger.error(f"Error rolling back transaction: {e}")
             return False
     
     def get_statistics(self) -> Dict[str, Any]:
         """
-        Obtiene estadísticas de la base de datos (documentos, chunks, etc.)
+        Get database statistics (documents, chunks, etc.)
         
         Returns:
-            Dict[str, Any]: Estadísticas de la base de datos
+            Dict[str, Any]: Database statistics including document count, chunk count,
+                          latest document info, creation date, and database size
         """
-        stats = {}
+        stats: Dict[str, Any] = {}
         
         try:
-            # Total de documentos
+            # Total documents count
             self._cursor.execute("SELECT COUNT(*) FROM documents;")
             stats["total_documents"] = self._cursor.fetchone()[0]
             
-            # Total de chunks
+            # Total chunks count
             self._cursor.execute("SELECT COUNT(*) FROM chunks;")
             stats["total_chunks"] = self._cursor.fetchone()[0]
             
-            # Documento más reciente
+            # Most recent document
             self._cursor.execute("""
                 SELECT id, title, created_at FROM documents
                 ORDER BY created_at DESC LIMIT 1;
@@ -473,10 +441,10 @@ class VectorialDatabase(ABC):
                     "created_at": doc[2]
                 }
             
-            # Fecha de creación de la base de datos
+            # Database creation date
             stats["db_created"] = self.get_metadata("db_created", "unknown")
             
-            # Tamaño de la base de datos
+            # Database size in MB
             try:
                 if self._db_path and self._db_path != ":memory:":
                     import os
@@ -487,55 +455,62 @@ class VectorialDatabase(ABC):
             return stats
             
         except Exception as e:
-            self._logger.error(f"Error al obtener estadísticas: {e}")
+            self._logger.error(f"Error getting statistics: {e}")
             return {"error": str(e)}
             
     def convert_embedding_dimension(self, embedding: List[float], target_dim: int) -> List[float]:
         """
-        Convierte un embedding a una dimensión específica (truncando o rellenando).
-        Útil para compatibilidad entre diferentes modelos.
+        Convert an embedding to a specific dimension (truncating or padding).
+        Useful for compatibility between different models.
         
         Args:
-            embedding: Vector de embedding original
-            target_dim: Dimensión objetivo
+            embedding: Original embedding vector
+            target_dim: Target dimension
             
         Returns:
-            Vector de embedding convertido
+            Converted embedding vector
         """
         if len(embedding) == target_dim:
             return embedding
             
         if len(embedding) > target_dim:
-            # Truncar si es más grande
+            # Truncate if larger
             return embedding[:target_dim]
         else:
-            # Rellenar con ceros
+            # Pad with zeros
             return embedding + [0.0] * (target_dim - len(embedding))
     
-    def _vector_search_manual(self, query_embedding: List[float], filters=None, n_results=5, include_neighbors=False):
+    def _vector_search_manual(self, query_embedding: List[float], filters: Optional[Dict[str, Any]] = None, n_results: int = 5, include_neighbors: bool = False) -> List[Dict[str, Any]]:
         """
-        Implementación manual de búsqueda vectorial cuando no hay soporte nativo.
-        Esta implementación carga todos los embeddings y calcula similitud manualmente.
+        Manual implementation of vector search when there's no native support.
+        
+        This implementation loads all embeddings from the database and calculates 
+        cosine similarity manually using numpy operations. It's a fallback method
+        for databases that don't have built-in vector search capabilities.
         
         Args:
-            query_embedding: Vector de consulta
-            filters: Filtros adicionales para la búsqueda
-            n_results: Número máximo de resultados
-            include_neighbors: Si se incluyen chunks vecinos
+            query_embedding: Query vector as a list of floats
+            filters: Optional dictionary with search filters:
+                   - 'document_id': Filter by specific document ID
+                   - 'min_similarity': Minimum similarity threshold
+            n_results: Maximum number of results to return
+            include_neighbors: Whether to include neighboring chunks in results
             
         Returns:
-            Lista de chunks ordenados por similitud
+            List[Dict[str, Any]]: List of chunks ordered by similarity score (descending).
+                                Each chunk contains: id, document_id, text, header, page,
+                                title, url, file_path, and similarity score
         """
         try:
-            # Convertir embedding de consulta a array numpy para cálculos eficientes
-            query_vector = np.array(query_embedding, dtype=np.float32)
+            # Convert query embedding to numpy array for efficient calculations
+            query_vector: np.ndarray = np.array(query_embedding, dtype=np.float32)
             
-            # Normalizar el vector de consulta para similitud por coseno
-            query_norm = np.linalg.norm(query_vector)
+            # Normalize query vector for cosine similarity
+            query_norm: float = np.linalg.norm(query_vector)
             if query_norm > 0:
                 query_vector = query_vector / query_norm
             
-            # Obtener todos los chunks con sus embeddings
+            # Get all chunks with their embeddings
             self._cursor.execute("""
                 SELECT c.id, c.document_id, c.text, c.embedding, c.embedding_dim, 
                        c.header, c.page, d.title, d.url, d.file_path
@@ -546,49 +521,49 @@ class VectorialDatabase(ABC):
             
             rows = self._cursor.fetchall()
             
-            # Calcular similitud para cada chunk
-            similarities = []
+            # Calculate similarity for each chunk
+            similarities: List[Dict[str, Any]] = []
             
             for row in rows:
-                # Extraer campos según el orden de la consulta
-                chunk_id = row[0]
-                doc_id = row[1]
-                text = row[2]
-                embedding_blob = row[3]
-                embedding_dim = row[4] if row[4] else self._embedding_dim
-                header = row[5]
-                page = row[6]
-                title = row[7]
-                url = row[8]
-                file_path = row[9]
+                # Extract fields according to query order
+                chunk_id: int = row[0]
+                doc_id: int = row[1]
+                text: str = row[2]
+                embedding_blob: bytes = row[3]
+                embedding_dim: Optional[int] = row[4] if row[4] else self._embedding_dim
+                header: Optional[str] = row[5]
+                page: Optional[str] = row[6]
+                title: str = row[7]
+                url: Optional[str] = row[8]
+                file_path: Optional[str] = row[9]
                 
                 if not embedding_blob:
                     continue
                 
-                # Deserializar embedding
+                # Deserialize embedding
                 try:
-                    chunk_vector = np.array(self.deserialize_vector(embedding_blob, embedding_dim), dtype=np.float32)
+                    chunk_vector: np.ndarray = np.array(self.deserialize_vector(embedding_blob, embedding_dim), dtype=np.float32)
                 except Exception as e:
-                    self._logger.warning(f"Error al deserializar vector del chunk {chunk_id}: {str(e)}")
+                    self._logger.warning(f"Error deserializing vector from chunk {chunk_id}: {str(e)}")
                     continue
                 
-                # Normalizar el vector del chunk
-                chunk_norm = np.linalg.norm(chunk_vector)
+                # Normalize chunk vector
+                chunk_norm: float = np.linalg.norm(chunk_vector)
                 if chunk_norm > 0:
                     chunk_vector = chunk_vector / chunk_norm
                 
-                # Calcular similitud de coseno
-                similarity = np.dot(query_vector, chunk_vector)
+                # Calculate cosine similarity
+                similarity: float = np.dot(query_vector, chunk_vector)
                 
-                # Aplicar filtros si existen
+                # Apply filters if they exist
                 if filters:
                     if 'document_id' in filters and doc_id != filters['document_id']:
                         continue
                     if 'min_similarity' in filters and similarity < filters['min_similarity']:
                         continue
                 
-                # Solo incluir resultados por encima del umbral
-                similarity_threshold = filters.get('min_similarity', self._similarity_threshold) if filters else self._similarity_threshold
+                # Only include results above threshold
+                similarity_threshold: float = filters.get('min_similarity', self._similarity_threshold) if filters else self._similarity_threshold
                 if similarity >= similarity_threshold:
                     similarities.append({
                         "id": chunk_id,
@@ -602,43 +577,48 @@ class VectorialDatabase(ABC):
                         "similarity": float(similarity)
                     })
             
-            # Ordenar por similitud descendente
+            # Sort by descending similarity
             similarities.sort(key=lambda x: x["similarity"], reverse=True)
             
-            # Limitar a n_results
-            top_results = similarities[:n_results]
+            # Limit to n_results
+            top_results: List[Dict[str, Any]] = similarities[:n_results]
             
-            # Incluir chunks vecinos si se solicita
+            # Include neighboring chunks if requested
             if include_neighbors and top_results:
                 best_match = top_results[0]
                 neighbors = self._get_adjacent_chunks(best_match["document_id"], best_match["id"])
                 
                 if neighbors:
-                    # Agregar vecinos al principio de los resultados
+                    # Add neighbors at the beginning of results
                     return neighbors + top_results
             
             return top_results
             
         except Exception as e:
-            self._logger.error(f"Error en búsqueda vectorial manual: {str(e)}")
+            self._logger.error(f"Error in manual vector search: {str(e)}")
             return []
             
-    def _get_adjacent_chunks(self, document_id, chunk_id):
+    def _get_adjacent_chunks(self, document_id: int, chunk_id: int) -> List[Dict[str, Any]]:
         """
-        Obtiene chunks adyacentes al chunk especificado.
-        Implementación básica que debe ser personalizada en clases concretas si es necesario.
+        Get chunks adjacent to the specified chunk.
+        
+        This method retrieves the previous and next chunks relative to the given chunk ID
+        within the same document. Basic implementation that should be customized in 
+        concrete classes if needed for better performance or specific requirements.
         
         Args:
-            document_id: ID del documento
-            chunk_id: ID del chunk
+            document_id: ID of the document containing the chunks
+            chunk_id: ID of the reference chunk to find neighbors for
             
         Returns:
-            Lista de chunks adyacentes
+            List[Dict[str, Any]]: List of adjacent chunks with their metadata.
+                                Each chunk dict contains: id, document_id, text, header,
+                                page, title, url, file_path, and similarity (set to 0.0)
         """
-        adjacent_chunks = []
+        adjacent_chunks: List[Dict[str, Any]] = []
         
         try:
-            # Obtener el chunk anterior (ID menor más cercano)
+            # Get previous chunk (closest smaller ID)
             self._cursor.execute("""
                 SELECT c.id, c.document_id, c.text, c.header, c.page, d.title, d.url, d.file_path
                 FROM chunks c
@@ -660,10 +640,10 @@ class VectorialDatabase(ABC):
                     "title": title,
                     "url": url,
                     "file_path": file_path,
-                    "similarity": 0.0  # Marcar como vecino con similitud 0
+                    "similarity": 0.0  # Mark as neighbor with similarity 0
                 })
             
-            # Obtener el chunk siguiente (ID mayor más cercano)
+            # Get next chunk (closest larger ID)
             self._cursor.execute("""
                 SELECT c.id, c.document_id, c.text, c.header, c.page, d.title, d.url, d.file_path
                 FROM chunks c
@@ -685,66 +665,66 @@ class VectorialDatabase(ABC):
                     "title": title,
                     "url": url,
                     "file_path": file_path,
-                    "similarity": 0.0  # Marcar como vecino con similitud 0
+                    "similarity": 0.0  # Mark as neighbor with similarity 0
                 })
             
             return adjacent_chunks
         except Exception as e:
-            self._logger.error(f"Error al obtener chunks adyacentes: {str(e)}")
+            self._logger.error(f"Error getting adjacent chunks: {str(e)}")
             return []
 
-    def insert_chunks_batch(self, document_id, chunks_data):
+    def insert_chunks_batch(self, document_id: int, chunks_data: List[Dict[str, Any]]) -> Optional[List[int]]:
         """
-        Inserta un lote de chunks asociados a un documento específico.
+        Insert a batch of chunks associated with a specific document.
         
-        Este método permite la inserción eficiente de múltiples chunks en una sola operación,
-        lo que puede mejorar sustancialmente el rendimiento al reducir el número de
-        operaciones individuales y aprovechar transacciones.
+        This method allows efficient insertion of multiple chunks in a single operation,
+        which can substantially improve performance by reducing the number of
+        individual operations and leveraging transactions.
         
-        Las implementaciones concretas pueden optimizar este proceso utilizando
-        características específicas del motor de base de datos subyacente.
+        Concrete implementations can optimize this process using
+        specific features of the underlying database engine.
         
         Args:
-            document_id (int): ID del documento al que pertenecen los chunks
-            chunks_data (List[dict]): Lista de diccionarios con los datos de cada chunk:
-                - text (str): Texto del chunk
-                - header (str, opcional): Encabezado del chunk
-                - page (str, opcional): Número o identificador de página
-                - embedding (list): Vector de embedding del chunk
-                - embedding_dim (int): Dimensión del embedding
+            document_id: ID of the document to which the chunks belong
+            chunks_data: List of dictionaries with data for each chunk:
+                - text (str): Chunk text
+                - header (str, optional): Chunk header
+                - page (str, optional): Page number or identifier
+                - embedding (list): Chunk embedding vector
+                - embedding_dim (int): Embedding dimension
                 
         Returns:
-            List[int]: Lista de IDs de los chunks insertados, o None si falla
+            List of IDs of inserted chunks, or None if it fails
         """
-        # Implementación por defecto que inserta cada chunk individualmente
-        # Las clases derivadas deberían sobrescribir esto con una implementación más eficiente
-        self._logger.debug(f"Insertando batch de {len(chunks_data)} chunks usando método por defecto")
-        chunk_ids = []
+        # Default implementation that inserts each chunk individually
+        # Derived classes should override this with a more efficient implementation
+        self._logger.debug(f"Inserting batch of {len(chunks_data)} chunks using default method")
+        chunk_ids: List[int] = []
         try:
-            # Asegurarse de que estamos en una transacción
-            in_transaction = getattr(self, '_in_transaction', False)
+            # Ensure we're in a transaction
+            in_transaction: bool = getattr(self, '_in_transaction', False)
             if not in_transaction:
                 self.begin_transaction()
                 transaction_started = True
             else:
                 transaction_started = False
                 
-            # Procesar cada chunk
+            # Process each chunk
             for chunk_data in chunks_data:
                 chunk_id = self.insert_single_chunk(document_id, chunk_data)
                 if chunk_id:
                     chunk_ids.append(chunk_id)
                 else:
-                    self._logger.warning("Fallo al insertar chunk individual en batch")
+                    self._logger.warning("Failed to insert individual chunk in batch")
             
-            # Commit solo si iniciamos la transacción
+            # Commit only if we started the transaction
             if transaction_started:
                 self.commit_transaction()
                 
             return chunk_ids
         except Exception as e:
-            self._logger.error(f"Error al insertar batch de chunks: {e}")
-            # Rollback solo si iniciamos la transacción
+            self._logger.error(f"Error inserting chunk batch: {e}")
+            # Rollback only if we started the transaction
             if 'transaction_started' in locals() and transaction_started:
                 self.rollback_transaction()
             return None
