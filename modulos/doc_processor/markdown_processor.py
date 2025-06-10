@@ -1,12 +1,12 @@
 import logging
-from typing import Dict, Any, List, Optional, Tuple
-from pathlib import Path
-import time
 import re
+import time
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
 
 from config import config
 
-# Configure logging
+# Initialize logger for this module
 logger = logging.getLogger(__name__)
 
 class MarkdownProcessor:
@@ -19,12 +19,12 @@ class MarkdownProcessor:
     3. Preparing the document for chunking
     """
     
-    def __init__(self):
+    def __init__(self) -> None:
         """
-        Initializes the Markdown file processor.
+        Initializes the Markdown file processor with configuration settings.
         """
-        self.processing_config = config.get_processing_config()
-        # Pattern to detect headers in Markdown
+        self.processing_config: Dict[str, Any] = config.get_processing_config()
+        # Regex pattern to detect Markdown headers (# Heading)
         self.HEADING_PATTERN = re.compile(r'^(#{1,6})\s+(.*)$')
     
     def read_markdown_file(self, document_path: str) -> str:
@@ -65,13 +65,14 @@ class MarkdownProcessor:
         Returns:
             Dictionary with document metadata:
             {
-                'title': str,       # Extracted title or file name
-                'url': str,         # URL constructed as 'file://' + absolute path
-                'file_path': str,   # Complete file path
-                'file_name': str,   # File name without extension
-                'file_size': int,   # Size in bytes
-                'created_at': str,  # Creation date (ISO format)
-                'modified_at': str, # Modification date (ISO format)
+                'title': str,         # Extracted title or file name
+                'url': str,           # URL constructed as 'file://' + absolute path
+                'file_path': str,     # Complete file path
+                'file_name': str,     # File name without extension
+                'file_size': int,     # Size in bytes
+                'created_at': str,    # Creation date (ISO format)
+                'modified_at': str,   # Modification date (ISO format)
+                'content_length': int # Length of content in characters
             }
         """
         path = Path(document_path)
@@ -83,8 +84,8 @@ class MarkdownProcessor:
         # Basic metadata from filesystem
         stat = path.stat()
         
-        # Try to extract title from content
-        title = self._extract_title_from_content(content) or path.stem
+        # Extract title from content or use filename as fallback
+        title: str = self._extract_title_from_content(content) or path.stem
         
         # Build metadata
         metadata = {
@@ -112,12 +113,12 @@ class MarkdownProcessor:
             Extracted title or None if not found.
         """
         # Look for H1 header (# Title)
-        h1_match = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
+        h1_match: Optional[re.Match] = re.search(r'^#\s+(.+)$', content, re.MULTILINE)
         if h1_match:
             return h1_match.group(1).strip()
         
         # Look for title in YAML frontmatter
-        frontmatter_match = re.search(r'^---\s+(?:.|\n)+?title:\s*"?([^"\n]+)"?(?:.|\n)+?---', content)
+        frontmatter_match: Optional[re.Match] = re.search(r'^---\s+(?:.|\n)+?title:\s*"?([^"\n]+)"?(?:.|\n)+?---', content)
         if frontmatter_match:
             return frontmatter_match.group(1).strip()
         
@@ -143,23 +144,22 @@ class MarkdownProcessor:
         
     def update_open_headings(self, open_headings: List[Tuple[int, str]], line: str) -> List[Tuple[int, str]]:
         """
-        Updates the list of open headers according to the current line.
+        Updates the hierarchical structure of headers based on the current line.
         
-        The strategy is:
-        - If an H1 is found, the list is reset.
-        - If the line is a header of level >1:
-            * If the list is empty, it's added.
-            * If the last open header has a level less than or equal to the current,
-              it's added without removing the previous one (to preserve siblings).
-            * If the new header is of a higher level (smaller number) 
-              than the last one, those of a level lower than the new one are preserved and the new one is added.
+        Header hierarchy management rules:
+        - H1 (#) resets the entire header hierarchy
+        - For headers level >1 (##, ###, etc.):
+          * If no open headers exist, add the current header
+          * If current header level is >= last header level, append to maintain siblings
+          * If current header level is more important (smaller number) than last header,
+            preserve only headers with higher importance and add the current one
               
         Args:
             open_headings: Current list of open headers [(level, text), ...].
             line: Text line to analyze.
             
         Returns:
-            Updated list of open headers.
+            Updated list of open headers maintaining proper hierarchy.
         """
         lvl, txt = self.get_heading_level(line)
         if lvl is None:
@@ -195,10 +195,10 @@ class MarkdownProcessor:
             Tuple with (metadata, content) of the document.
         """
         # Read content
-        content = self.read_markdown_file(document_path)
+        content: str = self.read_markdown_file(document_path)
         
         # Extract metadata
-        metadata = self.extract_metadata(document_path, content)
+        metadata: Dict[str, Any] = self.extract_metadata(document_path, content)
         
         return metadata, content
     
@@ -212,11 +212,11 @@ class MarkdownProcessor:
         Returns:
             List of tuples (metadata, content) for each document.
         """
-        results = []
+        results: List[Tuple[Dict[str, Any], str]] = []
         
         for path in document_paths:
             try:
-                result = self.process_document(path)
+                result: Tuple[Dict[str, Any], str] = self.process_document(path)
                 results.append(result)
                 logger.info(f"Document processed successfully: {path}")
             except Exception as e:
@@ -235,8 +235,8 @@ class MarkdownProcessor:
         Returns:
             List of paths to found Markdown files.
         """
-        markdown_files = []
-        directory = Path(directory_path)
+        markdown_files: List[str] = []
+        directory: Path = Path(directory_path)
         
         if not directory.exists():
             logger.warning(f"Directory {directory_path} does not exist")
