@@ -5,10 +5,9 @@ This module provides functions to load and access the system
 configuration from a single point.
 """
 
-import os
 import logging
 from config import config  # Global configuration singleton
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
@@ -41,28 +40,28 @@ def get_embedding_config() -> Dict[str, Any]:
 
 def get_chunking_config() -> Dict[str, Any]:
     """
-    Obtiene la configuración de chunking.
+    Gets the chunking configuration.
     
     Returns:
-        Diccionario con la configuración de chunking
+        Dictionary with chunking configuration
     """
     return config.get_chunks_config()
 
 def get_database_config() -> Dict[str, Any]:
     """
-    Obtiene la configuración de base de datos.
+    Gets the database configuration.
     
     Returns:
-        Diccionario con la configuración de la base de datos
+        Dictionary with database configuration
     """
     return config.get_database_config()
 
 def get_ai_client_config() -> Dict[str, Any]:
     """
-    Obtiene la configuración del cliente de IA.
+    Gets the AI client configuration.
     
     Returns:
-        Diccionario con la configuración del cliente de IA
+        Dictionary with AI client configuration
     """
     return config.get_ai_client_config()
 
@@ -82,4 +81,4 @@ def is_debug_enabled() -> bool:
     Returns:
         True if debug mode is enabled, False otherwise
     """
-    return config.get_general_config().get("debug", False) 
+    return config.get_general_config().get("debug", False)

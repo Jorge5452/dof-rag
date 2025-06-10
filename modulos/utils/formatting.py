@@ -5,8 +5,7 @@ This module contains functions to format and colorize the
 RAG system outputs in the terminal.
 """
 
-import logging
-from typing import List, Dict, Any
+from typing import List
 from colorama import init, Fore, Style, Back
 
 # Initialize colorama to work across all platforms
@@ -92,12 +91,12 @@ def print_formatted_response(title: str, response: str) -> None:
         response: Response text
     """
     # Format the response to display response and context separately
-    if "=======================  RESPUESTA  =======================" in response:
-        parts = response.split("=======================  RESPUESTA  =======================")
+    if "=======================  RESPONSE  =======================" in response:
+        parts = response.split("=======================  RESPONSE  =======================")
         if len(parts) > 1:
             # Extract the response part (without header)
-            response_text = parts[1].split("=======================  CONTEXTO  =======================")[0].strip()
-            context_text = response.split("=======================  CONTEXTO  =======================")
+            response_text = parts[1].split("=======================  CONTEXT  =======================")[0].strip()
+            context_text = response.split("=======================  CONTEXT  =======================")
             
             # Print only the response first
             print("\n" + C_TITLE + " RESPONSE " + C_RESET)
@@ -166,4 +165,4 @@ def print_useful_commands() -> None:
     print(f"    {C_COMMAND}python run.py --db-stats")
     print("  • For interactive mode:")
     print(f"    {C_COMMAND}python run.py --query")
-    print(Style.BRIGHT + "="*80 + "\n") 
+    print(Style.BRIGHT + "="*80 + "\n")
