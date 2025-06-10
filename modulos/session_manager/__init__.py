@@ -1,6 +1,5 @@
-"""
-Módulo para la gestión de sesiones de RAG.
-Permite rastrear y recuperar configuraciones usadas en sesiones anteriores.
+"""Module for RAG session management.
+Allows tracking and retrieving configurations used in previous sessions.
 """
 
 from modulos.session_manager.session_manager import SessionManager

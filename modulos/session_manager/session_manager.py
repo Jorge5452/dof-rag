@@ -9,22 +9,13 @@ import os
 import json
 import logging
 import time
-import uuid
-import re
 import threading
-import psutil
-import gc
-import glob
-from typing import Dict, Any, List, Optional, Tuple, Union
+
+from typing import Dict, Any, List, Optional, Tuple
 from pathlib import Path
 from datetime import datetime
-import weakref
 
 from config import Config
-from modulos.databases.FactoryDatabase import DatabaseFactory
-from modulos.embeddings.embeddings_factory import EmbeddingFactory
-# Avoid direct import that causes circular dependency
-# from modulos.resource_management.resource_manager import ResourceManager
 
 logger = logging.getLogger(__name__)
 
@@ -128,8 +119,18 @@ class SessionManager:
             
             self.config = Config()
             self.general_config = self.config.get_general_config()
-            self.sessions_dir = Path(self.general_config.get("sessions_dir", "sessions"))
+            # Ensure that the sessions path is absolute
+            sessions_dir_config = self.general_config.get("sessions_dir", "sessions")
+            if os.path.isabs(sessions_dir_config):
+                self.sessions_dir = Path(sessions_dir_config)
+            else:
+                # If it's a relative path, make it absolute from the project root directory
+                root_dir = Path(__file__).parent.parent.parent
+                self.sessions_dir = root_dir / sessions_dir_config
+            
+            # Ensure the directory exists
             self.sessions_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Sessions directory configured at: {self.sessions_dir}")
             
             # Cache for sessions (to avoid reading from disk every time)
             self._sessions_cache = {}
@@ -185,7 +186,7 @@ class SessionManager:
                         "embedding_dim": db_metadata.get("embedding_dim", 768),
                         "chunking_method": db_metadata.get("chunking_method", "character"),
                         "files": session_data.get("files", []),
-                        "total_chunks": db_metadata.get("total_chunks", 0),  # En nivel raíz para consistencia
+                        "total_chunks": db_metadata.get("total_chunks", 0),  # At root level for consistency
                         "stats": {
                             "total_documents": db_metadata.get("total_files", 0)
                         }
@@ -479,15 +480,36 @@ class SessionManager:
                 try:
                     # Load session data
                     with open(session_file, 'r', encoding='utf-8') as f:
-                        session_data = json.load(f)
+                        try:
+                            session_data = json.load(f)
+                        except json.JSONDecodeError as json_err:
+                            # Try to repair the corrupted JSON file
+                            logger.error(f"Corrupted JSON in {session_file}: {json_err}. Attempting repair...")
+                            # Read the content as text
+                            f.seek(0)
+                            content = f.read()
+                            # Buscar el primer cierre de llave
+                            first_closing = content.find('}')
+                            if first_closing > 0:
+                                # Use only up to the first closing brace
+                                fixed_content = content[:first_closing+1]                                
+                                try:
+                                    session_data = json.loads(fixed_content)
+                                    logger.info(f"JSON file repaired: {session_file}")
+                                except (json.JSONDecodeError, ValueError):
+                                    logger.error(f"Could not repair JSON file: {session_file}")
+                                    continue
+                            else:
+                                logger.error(f"Could not repair JSON file: {session_file}")
+                                continue
                     
-                    # Add full path for reference
-                    session_data["file_path"] = str(session_file)
+
                     
                     # Add to list
                     sessions.append(session_data)
                 except Exception as e:
                     logger.error(f"Error loading session from {session_file}: {e}")
+                    # Continuar con el siguiente archivo
             
             # Sort sessions
             if sort_by in ["last_modified", "created_at", "name"]:
@@ -543,6 +565,8 @@ class SessionManager:
             chunking_method = session.get("chunking_method", "character")
             
             # Validate required fields
+            if not session_id:
+                raise ValueError("Missing session ID")
             if not db_path:
                 raise ValueError(f"Missing database path for session {session_id}")
                 
