@@ -15,14 +15,14 @@ from typing import Optional, Dict, Any, TYPE_CHECKING
 if TYPE_CHECKING:
     from .memory_manager import MemoryManager
     from .concurrency_manager import ConcurrencyManager
-    from modulos.session_manager.session_manager import SessionManager
+    from config import Config
 
 # Optional configuration
 try:
     from config import Config
 except ImportError:
     # Fallback if Config cannot be imported directly
-    Config = None 
+    Config = None
 
 class ResourceManager:
     """
@@ -34,10 +34,8 @@ class ResourceManager:
     - Managing concurrency through ConcurrencyManager.
     - Loading and providing resource management specific configuration.
     - Interacting with other RAG system components (like SessionManager and
-      EmbeddingFactory) to obtain metrics and coordinate actions.
-
-    Attributes:
-        config (Optional[Config]): Instance of global configuration.
+      EmbeddingFactory) to obtain metrics and coordinate actions.    Attributes:
+        config (Optional[Any]): Instance of global configuration.
         memory_manager (Optional[MemoryManager]): Instance of memory manager.
         concurrency_manager (Optional[ConcurrencyManager]): Instance of concurrency manager.
         session_manager_instance (Optional[SessionManager]): Instance of session manager.
@@ -65,16 +63,14 @@ class ResourceManager:
                 cls._instance._initialized = False
         return cls._instance
 
-    def __init__(self, config_instance: Optional[Config] = None):
+    def __init__(self, config_instance: Optional[Any] = None):
         """
         Initializes the ResourceManager.
 
         As a Singleton, real initialization only happens once.
         Loads configuration, initializes sub-managers (MemoryManager,
-        ConcurrencyManager) and may start the resource monitoring thread.
-
-        Args:
-            config_instance (Optional[Config]): An optional Config instance.
+        ConcurrencyManager) and may start the resource monitoring thread.        Args:
+            config_instance (Optional[Any]): An optional Config instance.
                 If not provided, it will try to get the global Config instance.
         """
         # Quick check without lock for performance
@@ -563,7 +559,6 @@ class ResourceManager:
         This function is called periodically by the monitoring thread.
         """
         # Safe access to log_verbosity
-        is_minimal = getattr(self, 'log_verbosity', 'normal') == "minimal"
         is_detailed = getattr(self, 'log_verbosity', 'normal') == "detailed"
         
         # Verify if checks are suspended
