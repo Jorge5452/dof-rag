@@ -1,0 +1,124 @@
+{
+  "_comment": "Archivo de configuración unificado para modules_captions",
+  "_instructions": "Este archivo contiene todas las configuraciones necesarias para diferentes proveedores de IA",
+  
+  "root_dir": "/ruta/a/tus/imagenes",
+  "db_path": "captions.db",
+  "provider": "gemini",
+  "api_key": null,
+  
+  
+  "log_dir": "logs",
+  "checkpoint_dir": "checkpoints",
+  "log_level": 20,
+  
+  "prompt": "Resume brevemente la imagen en español (máximo 3-4 oraciones por categoría):\n- **Texto:** Menciona solo el título y 2-3 puntos clave si hay texto.\n- **Mapas:** Identifica la región principal y máximo 2-3 ubicaciones relevantes.\n- **Diagramas:** Resume el concepto central en 1-2 oraciones.\n- **Logos:** Identifica la entidad y sus características distintivas.\n- **Datos visuales:** Menciona solo los 2-3 valores o tendencias más importantes.\nPrioriza la información esencial sobre los detalles, manteniendo la descripción breve y directa.",
+  
+  "providers": {
+    "openai": {
+      "client_config": {
+        "model": "gpt-4o",
+        "max_tokens": 256,
+        "temperature": 0.6,
+        "top_p": 0.6,
+        "base_url": null
+      },
+      "env_var": "OPENAI_API_KEY",
+      "rate_limits": {
+        "requests_per_minute": 500,
+        "tokens_per_minute": 100000,
+        "requests_per_day": null
+      }
+    },
+    
+    "gemini": {
+      "client_config": {
+        "model": "gemini-2.0-flash-lite",
+        "max_tokens": 256,
+        "temperature": 0.6,
+        "top_p": 0.6,
+        "base_url": "https://generativelanguage.googleapis.com/v1beta/openai"
+      },
+      "env_var": "GEMINI_API_KEY",
+      "rate_limits": {
+        "requests_per_minute": 30,
+        "tokens_per_minute": 1000000,
+        "requests_per_day": 1500
+      }
+    },
+    
+    "claude": {
+      "client_config": {
+        "model": "claude-sonnet-4-20250514",
+        "max_tokens": 256,
+        "temperature": 0.6,
+        "top_p": 0.6,
+        "base_url": "https://api.anthropic.com/v1/"
+      },
+      "env_var": "ANTHROPIC_API_KEY",
+      "rate_limits": {
+        "requests_per_minute": 50,
+        "tokens_per_minute": 20000,
+        "requests_per_day": null
+      }
+    },
+    
+    "ollama": {
+      "client_config": {
+        "model": "llama3.2-vision",
+        "max_tokens": 256,
+        "temperature": 0.6,
+        "top_p": 0.6,
+        "base_url": "http://localhost:11434/v1"
+      },
+      "env_var": null,
+      "rate_limits": {
+        "requests_per_minute": null,
+        "tokens_per_minute": null,
+        "requests_per_day": null
+      }
+    },
+    
+    "azure": {
+      "client_config": {
+        "model": "gpt-4-vision",
+        "max_tokens": 256,
+        "temperature": 0.6,
+        "top_p": 0.6,
+        "base_url": "https://your-resource.openai.azure.com/"
+      },
+      "env_var": "AZURE_OPENAI_API_KEY",
+      "rate_limits": {
+        "requests_per_minute": 500,
+        "tokens_per_minute": 100000,
+        "requests_per_day": null
+      }
+    }
+  },
+  
+  "_configuration_notes": {
+    "root_dir": "Directorio raíz que contiene las imágenes a procesar",
+    "db_path": "Ruta al archivo de base de datos SQLite (se creará si no existe)",
+    "provider": "Proveedor de IA: 'openai', 'gemini', 'claude', 'ollama', 'azure'",
+    "api_key": "Clave API (null para usar variable de entorno)",
+    
+    "log_level": "Nivel de logging: 10=DEBUG, 20=INFO, 30=WARNING, 40=ERROR",
+    "providers": "Configuraciones específicas para cada proveedor de IA"
+  },
+  
+  "_environment_variables": {
+    "OPENAI_API_KEY": "Clave API de OpenAI",
+    "GEMINI_API_KEY": "Clave API de Google Gemini",
+    "ANTHROPIC_API_KEY": "Clave API de Anthropic Claude",
+    "AZURE_OPENAI_API_KEY": "Clave API de Azure OpenAI"
+  },
+  
+  "_usage_examples": {
+    "basic_openai": "python extract_captions.py --config config.json --openai --root-dir /path/to/images",
+    "basic_gemini": "python extract_captions.py --config config.json --gemini --root-dir /path/to/images",
+    "basic_claude": "python extract_captions.py --config config.json --claude --root-dir /path/to/images",
+    "basic_ollama": "python extract_captions.py --config config.json --ollama --root-dir /path/to/images",
+    "basic_azure": "python extract_captions.py --config config.json --azure --root-dir /path/to/images",
+    "with_custom_settings": "python extract_captions.py --config config.json --openai"
+  }
+}
