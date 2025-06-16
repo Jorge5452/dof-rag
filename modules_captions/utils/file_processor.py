@@ -8,7 +8,9 @@ import re
 
 try:
     from tqdm import tqdm
+    TQDM_AVAILABLE = True
 except ImportError:
+    TQDM_AVAILABLE = False
     # Fallback if tqdm is not available
     class tqdm:
         def __init__(self, iterable=None, total=None, desc=None, unit=None, **kwargs):
@@ -37,6 +39,19 @@ except ImportError:
         def close(self):
             pass
 
+# Import colorama for better visual output
+try:
+    import colorama
+    from colorama import Fore, Style, init
+    init(autoreset=True)
+    COLORAMA_AVAILABLE = True
+except ImportError:
+    class MockColor:
+        def __getattr__(self, name):
+            return ''
+    Fore = Style = MockColor()
+    COLORAMA_AVAILABLE = False
+
 try:
     from ..db.manager import DatabaseManager
 except ImportError:
@@ -60,8 +75,9 @@ class FileProcessor:
                  root_directory: str,
                  db_manager: DatabaseManager,
                  ai_client,
-
-                 checkpoint_dir: str = "checkpoints",
+                 log_dir: str = "logs",
+                 commit_interval: int = 10,
+                 cooldown_seconds: int = 0,
                  debug_mode: bool = False):
         """
         Initialize the file processor.
@@ -70,18 +86,26 @@ class FileProcessor:
             root_directory: Root directory containing image files to process.
             db_manager: Database manager for storing descriptions.
             ai_client: AI client for generating descriptions.
-            checkpoint_dir: Directory for storing checkpoint files.
+            log_dir: Directory for storing log files.
+            commit_interval: Number of images to process before committing to database.
+            cooldown_seconds: Seconds to wait between processing batches.
             debug_mode: Enable debug mode with enhanced logging.
         """
         self.root_directory = Path(root_directory)
         self.db_manager = db_manager
         self.ai_client = ai_client
-        self.checkpoint_dir = Path(checkpoint_dir)
-        self.commit_interval = 15  # Commit every 15 images
+        self.log_dir = Path(log_dir)
+        self.commit_interval = commit_interval
+        self.cooldown_seconds = cooldown_seconds
         self.debug_mode = debug_mode
         
-        # Create checkpoint directory and parent directories if they don't exist
-        self.checkpoint_dir.mkdir(exist_ok=True, parents=True)
+        # Create necessary directories
+        self.log_dir.mkdir(exist_ok=True, parents=True)
+        
+        # Checkpoint files in logs directory
+        self.completed_checkpoints_file = self.log_dir / "completed_directories.json"
+        self.pending_checkpoint_file = self.log_dir / "pending_directory.json"
+        self.error_images_file = self.log_dir / "error_images.json"
         
         # Processing statistics
         self.stats = {
@@ -97,8 +121,8 @@ class FileProcessor:
         # Interruption flag
         self.interrupted = False
         
-        # Logger
-        self.logger = logging.getLogger(__name__)
+        # Logger - use the same logger as the main application
+        self.logger = logging.getLogger('caption_extractor')
         
         # Supported image extensions
         self.image_extensions = {'.png', '.jpg', '.jpeg', '.gif', '.bmp', '.tiff', '.webp'}
@@ -122,11 +146,29 @@ class FileProcessor:
             List of tuples (document_name, image_path, page_number, image_filename).
         """
         images_to_process = []
+        completed_dirs = self._load_completed_directories()
+        error_images = self._load_error_images()
         
         self.logger.info(f"Scanning for images in {self.root_directory}")
         
+        # Group images by directory
+        directories_with_images = {}
+        
         for image_path in self.root_directory.rglob('*'):
             if image_path.suffix.lower() in self.image_extensions:
+                parent_dir = str(image_path.parent.relative_to(self.root_directory))
+                
+                # Skip if directory is already completed
+                if parent_dir in completed_dirs:
+                    self.stats['total_skipped'] += 1
+                    continue
+                
+                # Skip if image had errors
+                image_key = f"{parent_dir}/{image_path.name}"
+                if image_key in error_images:
+                    self.stats['total_skipped'] += 1
+                    continue
+                
                 # Extract document and page information from path
                 document_name, page_number = self._extract_document_info(image_path)
                 image_filename = image_path.name
@@ -138,20 +180,41 @@ class FileProcessor:
                     self.stats['total_skipped'] += 1
                     continue
                 
-                images_to_process.append((
+                if parent_dir not in directories_with_images:
+                    directories_with_images[parent_dir] = []
+                
+                directories_with_images[parent_dir].append((
                     document_name, 
                     str(image_path), 
                     page_number, 
-                    image_filename
+                    image_filename,
+                    parent_dir
                 ))
         
+        # Flatten the dictionary to a list, prioritizing pending directory
+        pending_dir = self._load_pending_directory()
+        if pending_dir and pending_dir in directories_with_images:
+            # Process pending directory first
+            images_to_process.extend(directories_with_images[pending_dir])
+            del directories_with_images[pending_dir]
+        
+        # Add remaining directories
+        for dir_images in directories_with_images.values():
+            images_to_process.extend(dir_images)
+        
         self.stats['total_found'] = len(images_to_process)
-        self.logger.info(f"Found {len(images_to_process)} images to process")
+        self.logger.info(f"Found {len(images_to_process)} images to process across {len(directories_with_images) + (1 if pending_dir else 0)} directories")
+        
+        if self.debug_mode:
+            self.logger.debug(f"🔍 Total files scanned: {self.stats['total_found'] + self.stats['total_skipped']}")
+            self.logger.debug(f"🔍 Directories with images: {list(directories_with_images.keys())}")
+            self.logger.debug(f"🔍 Completed directories: {completed_dirs}")
+            self.logger.debug(f"🔍 Error images: {len(error_images)}")
         
         return images_to_process
     
     def process_images(self, 
-                      images: Optional[List[Tuple[str, str, int, str]]] = None,
+                      images: Optional[List[Tuple[str, str, int, str, str]]] = None,
                       force_reprocess: bool = False) -> Dict[str, Any]:
         """
         Process a list of images to generate descriptions.
@@ -174,7 +237,7 @@ class FileProcessor:
             return self._get_final_stats()
         
         self.stats['start_time'] = time.time()
-        self.logger.info(f"🚀 Starting sequential processing of {len(images)} images (commit every {self.commit_interval} images)")
+        self.logger.info(f"🚀 Starting directory-based processing of {len(images)} images (commit every {self.commit_interval} images)")
         
         if self.debug_mode:
             self.logger.debug(f"Processing configuration:")
@@ -186,171 +249,240 @@ class FileProcessor:
             # Log first few images for debugging
             sample_images = images[:3] if len(images) > 3 else images
             self.logger.debug(f"Sample images to process:")
-            for i, (doc, path, page, filename) in enumerate(sample_images):
-                self.logger.debug(f"  {i+1}. {filename} (doc: {doc}, page: {page})")
+            for i, (doc, path, page, filename, parent_dir) in enumerate(sample_images):
+                self.logger.debug(f"  {i+1}. {filename} (doc: {doc}, page: {page}, dir: {parent_dir})")
             if len(images) > 3:
                 self.logger.debug(f"  ... and {len(images) - 3} more images")
         
-        # Check for existing checkpoint
-        checkpoint = self.load_checkpoint()
-        start_index = 0
+        # Group images by directory for processing
+        images_by_directory = {}
+        for image_tuple in images:
+            parent_dir = image_tuple[4]  # parent_dir is the 5th element
+            if parent_dir not in images_by_directory:
+                images_by_directory[parent_dir] = []
+            images_by_directory[parent_dir].append(image_tuple)
         
-        if checkpoint and not force_reprocess:
-            processed_count = checkpoint.get('processed_count', 0)
-            total_count = checkpoint.get('total_count', 0)
-            
-            # Validate checkpoint against current image list
-            if total_count == len(images) and processed_count < len(images):
-                start_index = processed_count
-                self.logger.info(f"📂 Resuming from checkpoint: {processed_count}/{total_count} images already processed")
+        # Process directories one by one
+        for current_dir, dir_images in images_by_directory.items():
+            if self.interrupted:
+                break
                 
-                # Restore stats from checkpoint if available
-                if 'stats' in checkpoint:
-                    saved_stats = checkpoint['stats']
-                    self.stats['total_processed'] = saved_stats.get('total_processed', 0)
-                    self.stats['total_errors'] = saved_stats.get('total_errors', 0)
-            else:
-                self.logger.info("🔄 Checkpoint found but invalid (different image count), starting fresh")
-                self._cleanup_checkpoint()
-        
-        # Process images sequentially with progress bar
-        pending_descriptions = []
-        
-        # Initialize progress bar with current progress
-        with tqdm(total=len(images), desc="🖼️  Processing images", unit="img", 
-                  initial=start_index,
-                  bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}] {postfix}") as pbar:
+            # Enhanced directory processing logs
+            dir_start_msg = f"{Fore.BLUE}📂 Starting directory: {current_dir}{Style.RESET_ALL}"
+            dir_info_msg = f"{Fore.CYAN}   └─ Found {len(dir_images)} images to process{Style.RESET_ALL}"
             
-            for i, (document_name, image_path, page_number, image_filename) in enumerate(images[start_index:], start=start_index):
+            self.logger.info(f"\n{dir_start_msg}")
+            self.logger.info(dir_info_msg)
+            self._save_pending_directory(current_dir)
+            
+            success = self._process_directory_images(dir_images)
+            
+            if success and not self.interrupted:
+                # Mark directory as completed
+                self._mark_directory_completed(current_dir)
+                self._clear_pending_directory()
+                
+                # Enhanced completion message
+                completion_msg = f"{Fore.GREEN}✅ Directory completed: {current_dir}{Style.RESET_ALL}"
+                stats_msg = f"{Fore.CYAN}   └─ Processed: {len(dir_images)} images | Errors: {self.stats.get('directory_errors', 0)}{Style.RESET_ALL}"
+                
+                self.logger.info(f"\n{completion_msg}")
+                self.logger.info(stats_msg)
+            elif self.interrupted:
+                interrupt_msg = f"{Fore.YELLOW}⚠️ Processing interrupted in directory: {current_dir}{Style.RESET_ALL}"
+                self.logger.warning(f"\n{interrupt_msg}")
+                break
+        
+        self.stats['end_time'] = time.time()
+        
+        # Clean up checkpoint if processing completed successfully
+        if not self.interrupted:
+            self._cleanup_checkpoint()
+        
+        return self._get_final_stats()
+    
+    def _process_directory_images(self, dir_images: List[Tuple[str, str, int, str, str]]) -> bool:
+        """
+        Process all images in a specific directory.
+        
+        Args:
+            dir_images: List of image tuples for the directory.
+            
+        Returns:
+            True if all images were processed successfully, False otherwise.
+        """
+        pending_descriptions = []
+        directory_success = True
+        
+        # Configure tqdm for better visual output
+        tqdm_config = {
+            'total': len(dir_images),
+            'desc': f"{Fore.CYAN}🔄 Processing {dir_images[0][4] if dir_images else 'directory'}{Style.RESET_ALL}",
+            'unit': "img",
+            'ncols': 100,
+            'bar_format': '{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]',
+            'leave': True,
+            'position': 0
+        }
+        
+        if TQDM_AVAILABLE:
+            # Use tqdm with proper configuration to avoid log interference
+            tqdm_config['file'] = None  # Use stdout
+            tqdm_config['dynamic_ncols'] = True
+        
+        with tqdm(**tqdm_config) as pbar:
+            for i, (document_name, image_path, page_number, image_filename, parent_dir) in enumerate(dir_images):
                 if self.interrupted:
-                    pbar.set_description("⚠️  Processing interrupted")
-                    self.logger.info("Processing interrupted by user")
+                    directory_success = False
                     break
                 
                 try:
                     # Update progress bar description with current file
-                    pbar.set_description(f"🖼️  Processing {image_filename[:30]}...")
-                    
-                    # Add rate limiting info to progress bar
-                    rate_info = ""
-                    if hasattr(self.ai_client, 'rate_limit_enabled') and self.ai_client.rate_limit_enabled:
-                        current_requests = len(getattr(self.ai_client, 'request_timestamps', []))
-                        max_requests = getattr(self.ai_client, 'requests_per_minute', 0)
-                        rate_info = f"Rate: {current_requests}/{max_requests}/min"
-                        pbar.set_postfix_str(rate_info)
-                    
-                    # Record start time for this image
-                    image_start_time = time.time()
+                    pbar.set_description(f"{Fore.CYAN}🔄 Processing {parent_dir}{Style.RESET_ALL} - {image_filename[:20]}...")
                     
                     # Generate description
                     description = self.ai_client.describe(image_path)
                     
-                    # Calculate processing time for this image
-                    image_processing_time = time.time() - image_start_time
-                    
                     if description:
-                        # Add to pending descriptions
                         pending_descriptions.append((document_name, page_number, image_filename, description))
-                        
                         self.stats['total_processed'] += 1
-                        pbar.set_postfix_str(f"{rate_info} ✅ Success")
-                        
-                        # Enhanced success logging with timing
-                        self.logger.info(f"✓ Completed {image_filename} in {image_processing_time:.2f}s")
-                        self.logger.debug(f"Description length: {len(description)} characters")
+                        self.logger.debug(f"Successfully processed {image_filename}")
                     else:
-                        self.stats['total_errors'] += 1
-                        pbar.set_postfix_str(f"{rate_info} ⚠️ Failed")
-                        self.logger.warning(f"⚠️  No description generated for {image_filename}")
-                    
-                    # Update progress bar
-                    pbar.update(1)
-                    
-                    # Commit every commit_interval images or at the end
-                    if (i + 1) % self.commit_interval == 0 or (i + 1) == len(images):
-                        self._commit_descriptions(pending_descriptions)
-                        pending_descriptions = []
-                        pbar.set_postfix_str(f"{rate_info} 💾 Saved batch")
-                        self.logger.info(f"📊 Committed descriptions for {i + 1} images")
+                        raise ValueError("Empty description returned")
                         
-                        # Save checkpoint
-                        self._save_checkpoint(i + 1, len(images))
-                    
                 except Exception as e:
                     self.stats['total_errors'] += 1
+                    error_msg = str(e)
                     
-                    # Update progress bar with error
-                    pbar.set_postfix_str(f"❌ Error: {str(e)[:30]}...")
-                    pbar.update(1)
+                    # Temporarily disable tqdm to show error clearly
+                    pbar.clear()
+                    self.logger.error(f"{Fore.RED}❌ Error processing {image_filename}: {error_msg}{Style.RESET_ALL}")
+                    pbar.refresh()
                     
-                    # Enhanced error logging with progress context
-                    self.logger.error(f"❌ Error processing {image_filename} ({i+1}/{len(images)}): {str(e)}")
-                    self.logger.debug(f"Error details - Document: {document_name}, Page: {page_number}")
-                    self.logger.debug(f"Error details - Full path: {image_path}")
+                    # Save error image
+                    self._save_error_image(parent_dir, image_filename, error_msg)
                     
-                    # Check for critical server errors
-                    error_handler = getattr(self.ai_client, 'error_handler', None)
-                    if error_handler and ('UNAVAILABLE' in str(e) or '503' in str(e) or '500' in str(e) or 'overloaded' in str(e).lower()):
-                        self.logger.critical(f"🚨 Detected server error: {str(e)}. Stopping processing.")
-                        pbar.set_description("🚨 Server error - stopping")
-                        # Commit any pending descriptions before stopping
-                        if pending_descriptions:
-                            self._commit_descriptions(pending_descriptions)
+                    # Check for critical server errors (400, 500, 503)
+                    if any(code in error_msg for code in ['400', '500', '503', 'UNAVAILABLE', 'overloaded']):
+                        pbar.clear()
+                        self.logger.critical(f"{Fore.RED}🚨 Detected server error: {error_msg}. Stopping directory processing.{Style.RESET_ALL}")
+                        directory_success = False
                         self.interrupted = True
                         break
-            
-            # Final update
-            if not self.interrupted:
-                pbar.set_description("🎉 Processing completed")
-                pbar.set_postfix_str(f"✅ {self.stats['total_processed']} processed")
+                
+                pbar.update(1)
+                
+                # Commit batch if needed
+                if len(pending_descriptions) >= self.commit_interval:
+                    # Temporarily clear progress bar for clean commit message
+                    pbar.clear()
+                    self._commit_descriptions(pending_descriptions)
+                    pbar.refresh()
+                    pending_descriptions = []
         
-        # Final commit for any remaining descriptions
-        if pending_descriptions and not self.interrupted:
+        # Commit remaining descriptions
+        if pending_descriptions:
             self._commit_descriptions(pending_descriptions)
         
-        # Final statistics
-        self.stats['end_time'] = time.time()
-        self.stats['total_time'] = self.stats['end_time'] - self.stats['start_time']
+        return directory_success and not self.interrupted
+    
+    # Checkpoint management methods for directory-based processing
+    def _load_completed_directories(self) -> set:
+        """Load the set of completed directories."""
+        if not self.completed_checkpoints_file.exists():
+            return set()
         
-        # Clean up checkpoint file if processing completed successfully
-        if not self.interrupted:
-            self._cleanup_checkpoint()
-            
-        # Enhanced completion logging
-        success_rate = (self.stats['total_processed'] / len(images) * 100) if len(images) > 0 else 0
-        avg_time_per_image = self.stats['total_time'] / self.stats['total_processed'] if self.stats['total_processed'] > 0 else 0
+        try:
+            with open(self.completed_checkpoints_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return set(data.get('completed_directories', []))
+        except Exception as e:
+            self.logger.error(f"Error loading completed directories: {e}")
+            return set()
+    
+    def _mark_directory_completed(self, directory: str) -> None:
+        """Mark a directory as completed."""
+        completed_dirs = self._load_completed_directories()
+        completed_dirs.add(directory)
         
-        self.logger.info(f"🎉 Processing completed!")
-        self.logger.info(f"📊 Summary: {self.stats['total_processed']}/{len(images)} images processed ({success_rate:.1f}% success rate)")
-        self.logger.info(f"⏱️  Total time: {self.stats['total_time']:.2f}s (avg: {avg_time_per_image:.2f}s per image)")
+        data = {
+            'completed_directories': list(completed_dirs),
+            'last_updated': time.time()
+        }
         
-        if self.stats['total_errors'] > 0:
-            self.logger.warning(f"⚠️  Errors encountered: {self.stats['total_errors']}")
+        try:
+            with open(self.completed_checkpoints_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            self.logger.debug(f"Marked directory as completed: {directory}")
+        except Exception as e:
+            self.logger.error(f"Error marking directory as completed: {e}")
+    
+    def _load_pending_directory(self) -> Optional[str]:
+        """Load the currently pending directory."""
+        if not self.pending_checkpoint_file.exists():
+            return None
         
-        if self.debug_mode:
-            self.logger.debug(f"🔍 Debug summary:")
-            self.logger.debug(f"  - Start time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.stats['start_time']))}")
-            self.logger.debug(f"  - End time: {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(self.stats['end_time']))}")
-            self.logger.debug(f"  - Commit interval: {self.commit_interval} images")
-            self.logger.debug(f"  - Interrupted: {self.interrupted}")
-            if hasattr(self.ai_client, 'model'):
-                self.logger.debug(f"  - AI model used: {self.ai_client.model}")
-            
-            # Log processing rate statistics
-            if self.stats['total_time'] > 0:
-                images_per_minute = (self.stats['total_processed'] / self.stats['total_time']) * 60
-                self.logger.debug(f"  - Processing rate: {images_per_minute:.1f} images/minute")
-                
-            # Log memory and performance info if available
-            try:
-                import psutil
-                process = psutil.Process()
-                memory_mb = process.memory_info().rss / 1024 / 1024
-                self.logger.debug(f"  - Memory usage: {memory_mb:.1f} MB")
-            except ImportError:
-                pass
+        try:
+            with open(self.pending_checkpoint_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                return data.get('pending_directory')
+        except Exception as e:
+            self.logger.error(f"Error loading pending directory: {e}")
+            return None
+    
+    def _save_pending_directory(self, directory: str) -> None:
+        """Save the currently processing directory as pending."""
+        data = {
+            'pending_directory': directory,
+            'timestamp': time.time()
+        }
         
-        return self._get_final_stats()
+        try:
+            with open(self.pending_checkpoint_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            self.logger.debug(f"Saved pending directory: {directory}")
+        except Exception as e:
+            self.logger.error(f"Error saving pending directory: {e}")
+    
+    def _clear_pending_directory(self) -> None:
+        """Clear the pending directory file."""
+        try:
+            if self.pending_checkpoint_file.exists():
+                self.pending_checkpoint_file.unlink()
+                self.logger.debug("Cleared pending directory")
+        except Exception as e:
+            self.logger.error(f"Error clearing pending directory: {e}")
+    
+    def _load_error_images(self) -> dict:
+        """Load the dictionary of images that had errors."""
+        if not self.error_images_file.exists():
+            return {}
+        
+        try:
+            with open(self.error_images_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            self.logger.error(f"Error loading error images: {e}")
+            return {}
+    
+    def _save_error_image(self, directory: str, filename: str, error_msg: str) -> None:
+        """Save an image that had an error."""
+        error_images = self._load_error_images()
+        image_key = f"{directory}/{filename}"
+        
+        error_images[image_key] = {
+            'error_message': error_msg,
+            'timestamp': time.time(),
+            'directory': directory,
+            'filename': filename
+        }
+        
+        try:
+            with open(self.error_images_file, 'w', encoding='utf-8') as f:
+                json.dump(error_images, f, indent=2, ensure_ascii=False)
+            self.logger.debug(f"Saved error image: {image_key}")
+        except Exception as e:
+            self.logger.error(f"Error saving error image: {e}")
     
     def _commit_descriptions(self, descriptions: List[Tuple[str, int, str, str]]) -> None:
         """
@@ -369,10 +501,17 @@ class FileProcessor:
                 self.stats['total_errors'] += len(descriptions) - inserted_count
             
             self.stats['commits_made'] += 1
-            self.logger.info(f"Committed {len(descriptions)} descriptions to database (commit #{self.stats['commits_made']})")
+            
+            # Enhanced commit message with better formatting
+            commit_msg = f"{Fore.GREEN}💾 Committed {len(descriptions)} descriptions to database{Style.RESET_ALL}"
+            commit_details = f"{Fore.CYAN}   └─ Commit #{self.stats['commits_made']} | Total processed: {self.stats['total_processed']}{Style.RESET_ALL}"
+            
+            self.logger.info(f"\n{commit_msg}")
+            self.logger.info(commit_details)
             
         except Exception as e:
-            self.logger.error(f"Failed to commit {len(descriptions)} descriptions: {str(e)}")
+            error_msg = f"{Fore.RED}❌ Failed to commit {len(descriptions)} descriptions: {str(e)}{Style.RESET_ALL}"
+            self.logger.error(error_msg)
             self.stats['total_errors'] += len(descriptions)
     
     def _process_batch(self, batch: List[Tuple[str, str, int, str]]) -> None:

@@ -10,7 +10,6 @@ Usage:
     python extract_captions.py --root-dir /path/to/images --openai --batch-size 20
     python extract_captions.py --root-dir /path/to/images --gemini
     python extract_captions.py --root-dir /path/to/images --claude
-    python extract_captions.py --config config.json
 """
 
 import argparse
@@ -148,12 +147,12 @@ class CaptionExtractor:
         # Initialize file processor only if not status-only mode
         if not status_only:
             self.file_processor = FileProcessor(
-                root_directory=config['root_dir'],
+                root_directory=config['root_directory'],
                 db_manager=self.db_manager,
                 ai_client=self.ai_client,
-    
-                
-                checkpoint_dir=config.get('checkpoint_dir', 'checkpoints'),
+                log_dir=config.get('log_directory', 'logs'),
+                commit_interval=config.get('commit_interval', 10),
+                cooldown_seconds=config.get('cooldown_seconds', 0),
                 debug_mode=config.get('debug_mode', False)
             )
             
@@ -319,21 +318,7 @@ class CaptionExtractor:
             self.error_handler.handle_error(e, {'operation': 'get_status'}, 'unknown')
             return {'error': str(e)}
 
-def load_config(config_path: str) -> Dict[str, Any]:
-    """
-    Load configuration from JSON file.
-    
-    Args:
-        config_path: Path to the configuration file.
-        
-    Returns:
-        Configuration dictionary.
-    """
-    try:
-        with open(config_path, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception as e:
-        raise ValueError(f"Error loading configuration file {config_path}: {e}")
+
 
 def load_provider_config(provider: str) -> Dict[str, Any]:
     """
@@ -381,6 +366,37 @@ def load_provider_config(provider: str) -> Dict[str, Any]:
     if "rate_limits" in provider_config:
         config["rate_limits"] = provider_config["rate_limits"]
     
+    # Convert relative paths to absolute paths within modules_captions
+    module_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Handle log_directory
+    if "log_directory" in config:
+        if not os.path.isabs(config["log_directory"]):
+            config["log_directory"] = os.path.join(module_dir, config["log_directory"])
+            config["log_dir"] = config["log_directory"]  # Alias for compatibility
+    
+    # Handle checkpoint_directory
+    if "checkpoint_directory" in config:
+        if not os.path.isabs(config["checkpoint_directory"]):
+            config["checkpoint_directory"] = os.path.join(module_dir, config["checkpoint_directory"])
+            config["checkpoint_dir"] = config["checkpoint_directory"]  # Alias for compatibility
+    
+    # Handle db_path - place it in modules_captions/db/
+    if "db_path" in config:
+        if not os.path.isabs(config["db_path"]):
+            # Extract just the filename from the path
+            db_filename = os.path.basename(config["db_path"])
+            config["db_path"] = os.path.join(module_dir, "db", db_filename)
+    
+    # Create directories if they don't exist
+    if "log_directory" in config:
+        os.makedirs(config["log_directory"], exist_ok=True)
+    if "checkpoint_directory" in config:
+        os.makedirs(config["checkpoint_directory"], exist_ok=True)
+    if "db_path" in config:
+        db_dir = os.path.dirname(config["db_path"])
+        os.makedirs(db_dir, exist_ok=True)
+    
     # Show rate limit information
     if "rate_limits" in provider_config:
         rate_limits = provider_config["rate_limits"]
@@ -421,7 +437,6 @@ def create_default_config() -> Dict[str, Any]:
         'provider': 'openai',
 
         'log_dir': logs_dir,
-        'checkpoint_dir': os.path.join(logs_dir, 'checkpoints'),
         'log_level': 20,  # INFO
         'client_config': {
             'model': 'gpt-4o',
@@ -455,7 +470,7 @@ def main():
         epilog="""
 Examples:
   python extract_captions.py --root-dir ./images --db-path captions.db
-  python extract_captions.py --config config.json --force-reprocess
+  python extract_captions.py --force-reprocess
   python extract_captions.py --root-dir ./images --openai
   python extract_captions.py --root-dir ./images --gemini
   python extract_captions.py --root-dir ./images --claude
@@ -463,7 +478,6 @@ Examples:
     )
     
     # Configuration options
-    parser.add_argument('--config', type=str, help='Path to JSON configuration file')
     parser.add_argument('--root-dir', type=str, help='Root directory containing images')
     parser.add_argument('--db-path', type=str, default='captions.db', help='Path to SQLite database')
     
@@ -501,18 +515,8 @@ Examples:
         elif args.openai:
             provider = 'openai'
         
-        # Load configuration
-        if args.config:
-            config = load_config(args.config)
-            # If provider is specified via command line, override config
-            if any([args.openai, args.gemini, args.claude, args.ollama, args.azure]):
-                provider_config = load_provider_config(provider)
-                # Merge configurations, prioritizing provider config for client settings
-                for key, value in provider_config.items():
-                    config[key] = value
-        else:
-            # Load provider-specific configuration
-            config = load_provider_config(provider)
+        # Load provider-specific configuration from config.json
+        config = load_provider_config(provider)
         
         # Set default root directory to dof_markdown if not specified
         project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -520,13 +524,22 @@ Examples:
         
         # Override config with command line arguments
         if args.root_dir:
-            config['root_dir'] = args.root_dir
+            config['root_directory'] = args.root_dir
         else:
             # Use dof_markdown as default root directory
-            config['root_dir'] = default_root_dir
+            config['root_directory'] = default_root_dir
             
-        if args.db_path:
-            config['db_path'] = args.db_path
+        if args.db_path and args.db_path != 'captions.db':  # Only override if explicitly set by user
+            # Apply the same path conversion logic as in load_config
+            if not os.path.isabs(args.db_path):
+                module_dir = os.path.dirname(os.path.abspath(__file__))
+                db_filename = os.path.basename(args.db_path)
+                config['db_path'] = os.path.join(module_dir, "db", db_filename)
+                # Create directory if it doesn't exist
+                db_dir = os.path.dirname(config['db_path'])
+                os.makedirs(db_dir, exist_ok=True)
+            else:
+                config['db_path'] = args.db_path
         if args.api_key:
             # Import OpenAIClient to use clean_api_key method
             from clients.openai import OpenAIClient
@@ -545,11 +558,11 @@ Examples:
             config['debug_mode'] = False
         
         # Validate required parameters
-        if 'root_dir' not in config:
+        if 'root_directory' not in config:
             parser.error("Root directory is required. Use --root-dir or provide in config file.")
         
-        if not os.path.exists(config['root_dir']):
-            parser.error(f"Root directory does not exist: {config['root_dir']}")
+        if not os.path.exists(config['root_directory']):
+            parser.error(f"Root directory does not exist: {config['root_directory']}")
         
         # Handle status request specially to avoid API key requirement
         if args.status:
@@ -584,7 +597,7 @@ Examples:
         
         if config.get('debug_mode', False):
             print_warning("🔍 Debug mode: ENABLED")
-            print_info("Root directory", config['root_dir'], Fore.YELLOW)
+            print_info("Root directory", config['root_directory'], Fore.YELLOW)
             print_info("Database path", config.get('db_path', 'captions.db'), Fore.YELLOW)
         
         extractor = CaptionExtractor(config)
@@ -595,7 +608,11 @@ Examples:
         
         # Print results with colored formatting
         if results['status'] in ['completed', 'interrupted']:
-            print_stats(results['results'])
+            # Only print stats if we have results data
+            if 'results' in results:
+                print_stats(results['results'])
+            else:
+                print_info("Processing completed", results.get('message', 'No additional information'), Fore.GREEN)
             if results['status'] == 'interrupted':
                 print_warning("Processing was interrupted")
         else:

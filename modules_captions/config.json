@@ -2,14 +2,14 @@
   "_comment": "Archivo de configuración unificado para modules_captions",
   "_instructions": "Este archivo contiene todas las configuraciones necesarias para diferentes proveedores de IA",
   
-  "root_dir": "/ruta/a/tus/imagenes",
+  "root_directory": "/ruta/a/tus/imagenes",
   "db_path": "captions.db",
   "provider": "gemini",
   "api_key": null,
   
   
-  "log_dir": "logs",
-  "checkpoint_dir": "checkpoints",
+  "log_directory": "logs",
+  "commit_interval": 10,
   "log_level": 20,
   
   "prompt": "Resume brevemente la imagen en español (máximo 3-4 oraciones por categoría):\n- **Texto:** Menciona solo el título y 2-3 puntos clave si hay texto.\n- **Mapas:** Identifica la región principal y máximo 2-3 ubicaciones relevantes.\n- **Diagramas:** Resume el concepto central en 1-2 oraciones.\n- **Logos:** Identifica la entidad y sus características distintivas.\n- **Datos visuales:** Menciona solo los 2-3 valores o tendencias más importantes.\nPrioriza la información esencial sobre los detalles, manteniendo la descripción breve y directa.",
@@ -33,7 +33,7 @@
     
     "gemini": {
       "client_config": {
-        "model": "gemini-2.0-flash-lite",
+        "model": "gemini-2.0-flash",
         "max_tokens": 256,
         "temperature": 0.6,
         "top_p": 0.6,
@@ -41,7 +41,7 @@
       },
       "env_var": "GEMINI_API_KEY",
       "rate_limits": {
-        "requests_per_minute": 30,
+        "requests_per_minute": 15,
         "tokens_per_minute": 1000000,
         "requests_per_day": 1500
       }
@@ -114,11 +114,11 @@
   },
   
   "_usage_examples": {
-    "basic_openai": "python extract_captions.py --config config.json --openai --root-dir /path/to/images",
-    "basic_gemini": "python extract_captions.py --config config.json --gemini --root-dir /path/to/images",
-    "basic_claude": "python extract_captions.py --config config.json --claude --root-dir /path/to/images",
-    "basic_ollama": "python extract_captions.py --config config.json --ollama --root-dir /path/to/images",
-    "basic_azure": "python extract_captions.py --config config.json --azure --root-dir /path/to/images",
-    "with_custom_settings": "python extract_captions.py --config config.json --openai"
+    "basic_openai": "python extract_captions.py --openai --root-dir /path/to/images",
+    "basic_gemini": "python extract_captions.py --gemini --root-dir /path/to/images",
+    "basic_claude": "python extract_captions.py --claude --root-dir /path/to/images",
+    "basic_ollama": "python extract_captions.py --ollama --root-dir /path/to/images",
+    "basic_azure": "python extract_captions.py --azure --root-dir /path/to/images",
+    "with_custom_settings": "python extract_captions.py --openai"
   }
 }

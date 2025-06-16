@@ -68,7 +68,6 @@ Prioriza la información esencial sobre los detalles, manteniendo la descripció
         self.requests_per_minute = None
         self.request_timestamps = []
         self.rate_limit_enabled = False
-        self.warning_shown = False  # Track if warning has been shown for current period
         
         # Reference to file processor for interrupt handling
         self.file_processor = None
@@ -116,12 +115,17 @@ Prioriza la información esencial sobre los detalles, manteniendo la descripció
         Remove timestamps older than 1 minute from the request history.
         """
         current_time = time.time()
+        cutoff_time = current_time - 60
         old_count = len(self.request_timestamps)
-        self.request_timestamps = [ts for ts in self.request_timestamps if current_time - ts < 60]
+        self.request_timestamps = [ts for ts in self.request_timestamps if ts > cutoff_time]
         
-        # Reset warning flag if timestamps were cleaned (new minute period)
+        # Log cleanup if timestamps were removed
         if len(self.request_timestamps) < old_count:
-            self.warning_shown = False
+            self.logger.debug(f"Cleaned {old_count - len(self.request_timestamps)} old timestamps")
+            # Reset warning flag for new minute period
+            if hasattr(self, '_warning_shown_this_minute'):
+                delattr(self, '_warning_shown_this_minute')
+        # Timestamps cleaned for new minute period
     
     def _check_rate_limit(self) -> bool:
         """
@@ -136,15 +140,21 @@ Prioriza la información esencial sobre los detalles, manteniendo la descripció
         self._clean_old_timestamps()
         current_requests = len(self.request_timestamps)
         
-        # Warning when approaching limit (80% of limit) - show only once per period
-        warning_threshold = int(self.requests_per_minute * 0.8)
-        if current_requests >= warning_threshold and current_requests < self.requests_per_minute and not self.warning_shown:
-            self.logger.warning(f"\n⚠️ Approaching rate limit: {current_requests}/{self.requests_per_minute} requests in current minute")
-            self.warning_shown = True
+        # Show warning exactly one request before the actual rate limit
+        warning_threshold = self.requests_per_minute - 1
         
-        # Check if we've reached the limit
+        # Warning one request before rate limit (only show once per minute)
+        if current_requests == warning_threshold and not hasattr(self, '_warning_shown_this_minute'):
+            self._warning_shown_this_minute = True
+            warning_msg = f"\n🟡 Rate limit warning: {current_requests}/{self.requests_per_minute} requests"
+            next_msg = f"   └─ Next request will trigger 60s cooling period"
+            self.logger.warning(warning_msg)
+            self.logger.info(next_msg)
+        
+        # Apply cooling when reaching the actual rate limit
         if current_requests >= self.requests_per_minute:
-            self.logger.warning(f"\n🛑 Rate limit reached: {current_requests}/{self.requests_per_minute} requests per minute")
+            cooling_msg = f"\n🔴 Rate limit reached: {current_requests}/{self.requests_per_minute} requests per minute"
+            self.logger.warning(cooling_msg)
             self._apply_cooling()
             return False
         
@@ -160,38 +170,48 @@ Prioriza la información esencial sobre los detalles, manteniendo la descripció
         try:
             from tqdm import tqdm
             
-            # Use tqdm for visual cooling progress
-            with tqdm(total=cooling_seconds, desc="❄️ Rate limit cooling", unit="s",
-                      bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt}s [{elapsed}<{remaining}] {postfix}") as pbar:
+            # Enhanced visual cooling progress with better formatting
+            cooling_desc = f"🧊 Rate limit cooling - Please wait"
+            with tqdm(total=cooling_seconds, desc=cooling_desc, unit="s",
+                     bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt}s [{elapsed}<{remaining}]',
+                     ncols=100, leave=False, colour='blue') as pbar:
                 
                 for second in range(cooling_seconds):
                     # Check for interruption during cooling
                     if self.file_processor and hasattr(self.file_processor, 'interrupted') and self.file_processor.interrupted:
-                        self.logger.info("Interruption detected during cooling, stopping immediately")
+                        pbar.clear()
+                        self.logger.info("\n⚠️ Cooling interrupted by user")
                         break
+                    
                     time.sleep(1)
                     pbar.update(1)
                     
-                    # Update postfix with remaining time
+                    # Update description with remaining time
                     remaining = cooling_seconds - second - 1
                     if remaining > 0:
-                        pbar.set_postfix_str(f"⏳ {remaining}s remaining")
+                        pbar.set_description(f"🧊 Rate limit cooling - {remaining}s remaining")
                     else:
-                        pbar.set_postfix_str("✅ Ready to resume")
+                        pbar.set_description("🧊 Cooling complete")
                         
+            self.logger.info("\n✅ Rate limit cooling completed - Ready to continue")
+            
         except ImportError:
             # Fallback to original method if tqdm is not available
-            for remaining in range(cooling_seconds, 0, -10):
+            self.logger.info(f"🧊 Cooling for {cooling_seconds} seconds...")
+            
+            for second in range(cooling_seconds):
                 # Check for interruption during cooling
                 if self.file_processor and hasattr(self.file_processor, 'interrupted') and self.file_processor.interrupted:
-                    self.logger.info("Interruption detected during cooling, stopping immediately")
+                    self.logger.info("⚠️ Cooling interrupted by user")
                     break
-                if remaining <= 10:
-                    time.sleep(remaining)
-                    break
-                else:
-                    time.sleep(10)
-                    self.logger.info(f"⏳ Cooling in progress... {remaining} seconds remaining")
+                time.sleep(1)
+                
+                # Show progress every 10 seconds
+                if (second + 1) % 10 == 0:
+                    remaining = cooling_seconds - second - 1
+                    self.logger.info(f"   └─ {remaining}s remaining...")
+                
+            self.logger.info("✅ Rate limit cooling completed - Ready to continue")
         
         # Clear old timestamps after cooling
         self._clean_old_timestamps()

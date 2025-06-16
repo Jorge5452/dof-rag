@@ -1,87 +1,65 @@
-# Módulos de Extracción de Descripciones (modules_captions)
+# Módulo de Extracción de Descripciones de Imágenes (modules_captions)
 
-Este módulo proporciona una versión mejorada del sistema de extracción de descripciones de imágenes con almacenamiento en base de datos SQLite, mejor manejo de errores y capacidades de procesamiento mejoradas.
+Sistema modular de extracción de descripciones de imágenes con almacenamiento SQLite, manejo centralizado de errores y soporte para múltiples proveedores de IA.
 
 ## Características Principales
 
-### 🔄 Mejoras sobre `extract_captions_1`
+- **Almacenamiento en Base de Datos SQLite**: Operaciones transaccionales con interfaz CRUD
+- **Manejo Centralizado de Errores**: Logging estructurado con reportes de errores en JSON
+- **Arquitectura Modular**: Separación de responsabilidades en módulos especializados
+- **Cliente Universal de IA**: Cliente único compatible con OpenAI para múltiples proveedores
+- **Logging Avanzado**: Logging multinivel con salida colorizada
+- **Procesamiento por Lotes**: Tamaños de lote configurables con limitación de velocidad
 
-- **Almacenamiento en Base de Datos**: Reemplaza el sistema basado en archivos TXT con SQLite
-- **Manejo de Errores Mejorado**: Sistema centralizado de logging y recuperación de errores
-- **Arquitectura Modular**: Separación clara de responsabilidades en módulos especializados
-- **Procesamiento Transaccional**: Operaciones de base de datos con soporte para transacciones
-- **Checkpoints Mejorados**: Sistema de puntos de control más robusto para recuperación
-- **Cliente Universal**: Un solo cliente OpenAI que soporta múltiples proveedores
-
-### 🏗️ Arquitectura
+## Arquitectura
 
 ```
 modules_captions/
-├── __init__.py              # Módulo principal con imports y versión
-├── extract_captions.py      # Script principal de extracción (618 líneas)
-├── config.json              # Configuración unificada con todos los proveedores
-├── debug_config.py          # Configuración para debugging
-├── captions.db              # Base de datos SQLite (generada automáticamente)
-├── clients/                 # Clientes de IA
-│   ├── __init__.py         # Factory de clientes y funciones de utilidad
-│   └── openai.py          # Cliente OpenAI universal para todos los proveedores
-├── db/                     # Gestión de base de datos
+├── __init__.py              # Module exports and version
+├── extract_captions.py      # Main extraction script
+├── config.json              # Provider configurations
+├── debug_config.py          # Debug utilities
+├── captions.db              # SQLite database (auto-generated)
+├── clients/                 # AI client implementations
+│   ├── __init__.py          # Client factory
+│   └── openai.py            # Universal OpenAI-compatible client
+├── db/                      # Database management
 │   ├── __init__.py
-│   └── manager.py         # Gestor SQLite con operaciones CRUD
-├── logs/                   # Archivos de registro del sistema
-│   ├── caption_extractor_YYYYMMDD.log  # Logs principales
-│   └── errors_YYYYMMDD.json            # Errores detallados
-├── checkpoints/            # Puntos de control del procesamiento
-│   └── processing_checkpoint.json      # Estado del procesamiento
-└── utils/                  # Utilidades del sistema
+│   ├── captions.db          # SQLite database (auto-generated)
+│   └── manager.py           # SQLite CRUD operations
+├── logs/                    # System logs
+│   ├── caption_extractor_YYYYMMDD.log
+│   └── errors_YYYYMMDD.json
+└── utils/                   # Core utilities
     ├── __init__.py
-    ├── error_handler.py   # Manejo centralizado de errores
-    └── file_processor.py  # Procesador de archivos e imágenes
+    ├── error_handler.py     # Centralized error management
+    └── file_processor.py    # File and image processing
 ```
 
-## Instalación y Configuración
+## Instalación
 
 ### Dependencias
 
 ```bash
-# Instalar dependencias requeridas
 pip install openai pillow python-dotenv colorama tqdm
-
-# Dependencias opcionales para funcionalidades adicionales
-pip install sqlite3  # Incluido en Python estándar
 ```
 
 ### Variables de Entorno
 
 ```bash
-# Configurar API key según el proveedor
-export OPENAI_API_KEY="tu_api_key_aqui"        # Para OpenAI oficial
-export GOOGLE_API_KEY="tu_api_key_aqui"        # Para Gemini
-export ANTHROPIC_API_KEY="tu_api_key_aqui"     # Para Claude
+export OPENAI_API_KEY="your_api_key_here"     # OpenAI official
+export GOOGLE_API_KEY="your_api_key_here"     # Google Gemini
+export ANTHROPIC_API_KEY="your_api_key_here"  # Anthropic Claude
 ```
 
-## 🔑 Configuración de API Keys
+## Proveedores Soportados
 
-### OpenAI y Proveedores Compatibles
-```bash
-# Opción 1: Variable de entorno
-export OPENAI_API_KEY="tu_clave_api_aqui"
+Todos los proveedores utilizan el cliente universal compatible con OpenAI:
 
-# Opción 2: En el archivo de configuración
-{
-  "api_key": "tu_clave_api_aqui",
-  "provider": "openai"
-}
-```
-
-### Proveedores Soportados
-
-Todos los proveedores utilizan el cliente OpenAI universal con diferentes configuraciones:
-
-- **OpenAI Official**: GPT-4o, GPT-4 Vision, GPT-4o-mini
+- **OpenAI**: gpt-4o, gpt-4-vision-preview, gpt-4o-mini
 - **Google Gemini**: gemini-1.5-pro, gemini-1.5-flash, gemini-2.0-flash-exp
 - **Anthropic Claude**: claude-3-5-sonnet, claude-3-5-haiku, claude-3-opus
-- **Ollama Local**: Modelos locales con API compatible (llava, moondream, etc.)
+- **Ollama**: Modelos locales con API compatible con OpenAI
 - **Azure OpenAI**: Modelos OpenAI desplegados en Azure
 - **Endpoints Personalizados**: Cualquier API compatible con OpenAI
 
@@ -90,65 +68,51 @@ Todos los proveedores utilizan el cliente OpenAI universal con diferentes config
 ### Uso Básico
 
 ```bash
-# Usar Gemini (por defecto)
-python extract_captions.py --root-dir ./imagenes
+# Proveedor por defecto (Gemini)
+python extract_captions.py --root-dir ./images
 
-# Especificar proveedor explícitamente
-python extract_captions.py --root-dir ./imagenes --gemini
+# Especificar proveedor
+python extract_captions.py --root-dir ./images --gemini
+python extract_captions.py --root-dir ./images --openai
+python extract_captions.py --root-dir ./images --claude
 
-# Con configuración personalizada
-python extract_captions.py --config mi_config.json
-
-# Con diferentes proveedores (todos usan cliente OpenAI)
-python extract_captions.py --root-dir ./imagenes --openai
-python extract_captions.py --root-dir ./imagenes --claude
-python extract_captions.py --root-dir ./imagenes --ollama
+# Configuración personalizada
+python extract_captions.py
 
 # Forzar reprocesamiento
-python extract_captions.py --root-dir /ruta/a/imagenes --force-reprocess
+python extract_captions.py --root-dir ./images --force-reprocess
 ```
 
 ### Configuración Avanzada
 
 ```bash
-# Configurar tamaño de lote y tiempo de espera
-python extract_captions.py --root-dir /ruta/a/imagenes --batch-size 20 --cooldown-seconds 10
+# Procesamiento por lotes con limitación de velocidad
+python extract_captions.py --root-dir ./images --batch-size 20 --cooldown-seconds 10
 
-# Cambiar nivel de logging
-python extract_captions.py --root-dir /ruta/a/imagenes --log-level DEBUG
+# Logging de depuración
+python extract_captions.py --root-dir ./images --log-level DEBUG
 
-# Ver estado del sistema
+# Estado del sistema
 python extract_captions.py --status
 ```
 
 ### Archivo de Configuración
 
-Crea un archivo `config.json`:
-
 ```json
 {
-  "root_dir": "/ruta/a/imagenes",
+  "root_dir": "./images",
   "db_path": "captions.db",
-  "provider": "openai",
-  "api_key": null,
+  "provider": "gemini",
   "log_dir": "logs",
-  "checkpoint_dir": "checkpoints",
   "log_level": 20,
-  "prompt": "Resume brevemente la imagen en español (máximo 3-4 oraciones por categoría)...",
   "providers": {
     "openai": {
       "client_config": {
         "model": "gpt-4o",
         "max_tokens": 256,
-        "temperature": 0.6,
-        "top_p": 0.6,
-        "base_url": null
+        "temperature": 0.6
       },
-      "env_var": "OPENAI_API_KEY",
-      "rate_limits": {
-        "requests_per_minute": 500,
-        "tokens_per_minute": 100000
-      }
+      "env_var": "OPENAI_API_KEY"
     },
     "gemini": {
       "client_config": {
@@ -177,16 +141,15 @@ Crea un archivo `config.json`:
 ### Ejemplo Básico
 
 ```python
-from modules_captions import DatabaseManager, create_client, FileProcessor, ErrorHandler
+from modules_captions import DatabaseManager, create_client, FileProcessor
 
-# Configurar componentes
+# Inicializar componentes
 db_manager = DatabaseManager("captions.db")
-client = create_client("openai", api_key="tu_api_key")
-error_handler = ErrorHandler()
+client = create_client("openai", api_key="your_api_key")
 
-# Procesar archivos
+# Procesar imágenes
 processor = FileProcessor(
-    root_directory="/ruta/a/imagenes",
+    root_directory="./images",
     db_manager=db_manager,
     ai_client=client,
     batch_size=10
@@ -204,12 +167,11 @@ from modules_captions.utils import ErrorHandler
 error_handler = ErrorHandler(log_dir="logs")
 
 try:
-    # Tu código aquí
+    # Tu código de procesamiento
     pass
 except Exception as e:
     error_handler.handle_api_error(e, image_path, model_info)
     
-# Obtener reporte de errores
 print(error_handler.get_error_report())
 ```
 
@@ -222,20 +184,20 @@ db = DatabaseManager("captions.db")
 
 # Insertar descripción
 db.insert_description(
-    document_name="documento_001",
+    document_name="document_001",
     page_number=1,
-    image_filename="imagen_001.png",
-    description="Descripción de la imagen"
+    image_filename="image_001.png",
+    description="Descripción de imagen"
 )
 
-# Verificar si existe
-if db.description_exists("documento_001", 1, "imagen_001.png"):
-    description = db.get_description("documento_001", 1, "imagen_001.png")
+# Verificar existencia
+if db.description_exists("document_001", 1, "image_001.png"):
+    description = db.get_description("document_001", 1, "image_001.png")
     print(description)
 
 # Obtener estadísticas
 stats = db.get_statistics()
-print(f"Total descripciones: {stats['total_descriptions']}")
+print(f"Total de descripciones: {stats['total_descriptions']}")
 ```
 
 ## Esquema de Base de Datos
@@ -258,55 +220,47 @@ CREATE TABLE image_descriptions (
 ### Archivos de Log
 
 - `logs/caption_extractor_YYYYMMDD.log`: Log principal del sistema
-- `logs/errors_YYYYMMDD.json`: Errores detallados en formato JSON
-- `checkpoints/processing_checkpoint.json`: Punto de control del procesamiento
+- `logs/errors_YYYYMMDD.json`: Reportes detallados de errores
 
 ### Niveles de Log
 
-- **DEBUG**: Información detallada para debugging
-- **INFO**: Información general del progreso
-- **WARNING**: Advertencias que no detienen el procesamiento
-- **ERROR**: Errores que afectan operaciones específicas
-- **CRITICAL**: Errores que pueden detener el sistema
+- **DEBUG**: Información detallada de depuración
+- **INFO**: Información general de progreso
+- **WARNING**: Advertencias no bloqueantes
+- **ERROR**: Errores específicos de operación
+- **CRITICAL**: Errores que detienen el sistema
 
-## Comparación con `extract_captions_1`
+## Comparación con extract_captions_1
 
 | Característica | extract_captions_1 | modules_captions |
-|---|---|---|
+|---------|-------------------|------------------|
 | Almacenamiento | Archivos TXT | Base de datos SQLite |
-| Manejo de errores | Básico | Centralizado y detallado |
-| Checkpoints | Archivos JSON simples | Sistema robusto con transacciones |
+| Manejo de errores | Básico | Centralizado con reportes detallados |
 | Arquitectura | Monolítica | Modular (4 módulos principales) |
-| Logging | Básico | Avanzado con colorama y múltiples niveles |
-| Recuperación | Manual | Automática con reintentos |
-| Estadísticas | Limitadas | Completas con métricas detalladas |
-| Configuración | Hardcoded | Flexible (CLI + JSON + .env) |
+| Logging | Básico | Avanzado con salida colorizada |
+| Recuperación | Manual | Automática con lógica de reintentos |
+| Estadísticas | Limitadas | Métricas comprehensivas |
+| Configuración | Hardcodeada | Flexible (CLI + JSON + env) |
 | Proveedores | Múltiples clientes | Cliente universal OpenAI |
-| Interfaz | Scripts separados | CLI unificado con flags |
+| Interfaz | Scripts separados | CLI unificado |
 
-## Migración desde `extract_captions_1`
-
-### Script de Migración
+## Migración desde extract_captions_1
 
 ```python
-# Migrar datos existentes de TXT a SQLite
 from modules_captions.db import DatabaseManager
 import os
-import re
 
 def migrate_txt_to_db(txt_dir, db_path):
+    """Migrar archivos TXT existentes a base de datos SQLite."""
     db = DatabaseManager(db_path)
     
     for txt_file in os.listdir(txt_dir):
         if txt_file.endswith('.txt'):
-            # Extraer información del nombre del archivo
             image_name = txt_file.replace('.txt', '')
             
-            # Leer descripción
             with open(os.path.join(txt_dir, txt_file), 'r', encoding='utf-8') as f:
                 description = f.read().strip()
             
-            # Insertar en base de datos
             db.insert_description(
                 document_name="migrated",
                 page_number=0,
@@ -314,37 +268,35 @@ def migrate_txt_to_db(txt_dir, db_path):
                 description=description
             )
 
-# migrate_txt_to_db("/ruta/a/archivos/txt", "captions.db")
+# Uso: migrate_txt_to_db("/path/to/txt/files", "captions.db")
 ```
 
 ## Solución de Problemas
 
 ### Problemas Comunes
 
-1. **Error de API Key**: Verificar que `OPENAI_API_KEY` esté configurada
-2. **Permisos de Base de Datos**: Verificar permisos de escritura en el directorio
-3. **Memoria Insuficiente**: Reducir `batch_size` para imágenes grandes
-4. **Rate Limiting**: Aumentar `cooldown_seconds`
+1. **Error de Clave API**: Verificar que la variable de entorno esté configurada correctamente
+2. **Permisos de Base de Datos**: Verificar permisos de escritura en el directorio destino
+3. **Problemas de Memoria**: Reducir `batch_size` para imágenes grandes
+4. **Limitación de Velocidad**: Aumentar `cooldown_seconds`
 
-### Debugging
+### Depuración
 
 ```bash
-# Ejecutar con logging detallado
-python extract_captions.py --root-dir /ruta --log-level DEBUG
+# Logging detallado
+python extract_captions.py --root-dir ./images --log-level DEBUG
 
-# Verificar estado del sistema
+# Estado del sistema
 python extract_captions.py --status
 ```
 
-## Contribución
-
-Para contribuir al proyecto:
+## Contribuir
 
 1. Seguir la estructura modular existente
-2. Añadir tests para nuevas funcionalidades
-3. Documentar cambios en este README
-4. Mantener compatibilidad con la interfaz `AIClientInterface`
+2. Agregar pruebas para nueva funcionalidad
+3. Actualizar documentación
+4. Mantener compatibilidad con `AIClientInterface`
 
 ## Licencia
 
-Este proyecto está bajo la misma licencia que el proyecto DOF-RAG principal.
+Misma licencia que el proyecto principal DOF-RAG.
