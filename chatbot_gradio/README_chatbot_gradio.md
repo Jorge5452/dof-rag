@@ -50,7 +50,17 @@ Sistema de chat inteligente que permite consultar documentos del **Diario Oficia
 - Base de datos DOF creada (desde proyecto principal)
 - API key de al menos un proveedor LLM
 
-### 2. Configuración
+### 2. Instalación de Dependencias
+```bash
+# Instalar dependencias con uv
+uv add openai
+uv add python-dotenv
+uv add duckdb
+uv add gradio
+uv add sentence-transformers
+```
+
+### 3. Configuración
 ```bash
 # Desde la raíz del proyecto dof-rag
 cd chatbot_gradio
@@ -59,7 +69,7 @@ cd chatbot_gradio
 echo "GEMINI_API_KEY=tu_api_key_aqui" >> ../.env
 ```
 
-### 3. Ejecutar
+### 4. Ejecutar
 ```bash
 python app.py
 # URL: http://localhost:8888
