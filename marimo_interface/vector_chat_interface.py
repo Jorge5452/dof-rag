@@ -15,10 +15,12 @@ def _():
     from dotenv import load_dotenv
     from google import genai
     from google.genai import types
+    from google.genai import errors
 
-    load_dotenv()
+    # Cargar variables de entorno
+    _ = load_dotenv()
 
-    return SentenceTransformer, duckdb, mo, np, os, genai, types
+    return SentenceTransformer, duckdb, mo, np, os, genai, types, errors
 
 
 @app.cell
@@ -136,7 +138,7 @@ def _(mo):
 
 
 @app.cell
-def _(search_similar_chunks, client, model_id, mo, types):
+def _(search_similar_chunks, client, model_id, mo, types, errors):
     def rag_model(messages, config) -> str:
         """Modelo RAG con Gemini 2.5-flash y fuentes plegables.
 
@@ -158,12 +160,6 @@ def _(search_similar_chunks, client, model_id, mo, types):
         latest_message = last_message.content.strip()
 
         search_results = search_similar_chunks(latest_message, limit=3)
-
-        if not search_results:
-            return (
-                f"No encontré información relevante sobre '{latest_message}' en la base de datos del DOF. "
-                "¿Podrías reformular tu pregunta o ser más específico?"
-            )
 
         context_chunks, fuentes_md = [], []
         for i, res in enumerate(search_results, 1):
@@ -212,26 +208,18 @@ def _(search_similar_chunks, client, model_id, mo, types):
                 # Extraer configuración del chat de marimo
                 chat_config = {}
                 if config:
-                    # Mapear parámetros de marimo a Gemini (con múltiples nombres posibles)
                     # Temperature
-                    temp_value = getattr(config, "temperature", None) or getattr(
-                        config, "temp", None
-                    )
+                    temp_value = getattr(config, "temperature", None)
                     if temp_value is not None:
                         chat_config["temperature"] = max(
                             0.0, min(2.0, float(temp_value))
                         )
 
-                    # Max Tokens (puede venir como max_tokens o max_output_tokens)
-                    max_tokens_value = (
-                        getattr(config, "max_tokens", None)
-                        or getattr(config, "max_output_tokens", None)
-                        or getattr(config, "maxTokens", None)
+                    # Max Tokens - usar nombre exacto que confirme marimo
+                    max_tokens_value = getattr(config, "max_tokens")
+                    chat_config["max_output_tokens"] = max(
+                        1, min(8192, int(max_tokens_value))
                     )
-                    if max_tokens_value is not None:
-                        chat_config["max_output_tokens"] = max(
-                            1, min(8192, int(max_tokens_value))
-                        )
 
                     # Top P
                     top_p_value = getattr(config, "top_p", None) or getattr(
@@ -285,39 +273,13 @@ def _(search_similar_chunks, client, model_id, mo, types):
                     model=model_id, contents=contents, config=gemini_config
                 )
 
-                # Validar respuesta de Gemini
-                if hasattr(resp, "text") and resp.text:
-                    answer = resp.text
-                elif hasattr(resp, "candidates") and resp.candidates:
-                    # Intentar extraer texto del primer candidato
-                    candidate = resp.candidates[0]
-                    if (
-                        hasattr(candidate, "content")
-                        and candidate.content
-                        and candidate.content.parts
-                    ):
-                        answer = candidate.content.parts[0].text
-                    else:
-                        answer = f"⚠️ Respuesta de Gemini sin contenido de texto.\n\n**Información encontrada:**\n{context_text[:500]}..."
-                else:
-                    answer = f"⚠️ Respuesta inesperada de Gemini.\n\n**Información encontrada:**\n{context_text[:500]}..."
+                # Validación simple según documentación oficial
+                answer = resp.text or "No se pudo generar una respuesta."
 
-            except ImportError as e:
-                answer = f"⚠️ Error de importación: {e}\n\n**Información encontrada (modo fallback):**\n{context_text[:500]}..."
-            except ValueError as e:
-                answer = f"⚠️ Error de configuración: {e}\n\n**Información encontrada (modo fallback):**\n{context_text[:500]}..."
+            except errors.APIError as e:
+                answer = f"⚠️ Error de API: {e.message}\n\n**Información encontrada (modo fallback):**\n{context_text[:500]}..."
             except Exception as e:
-                # Manejo específico de errores de la API de Gemini
-                error_message = str(e)
-                if "API_KEY" in error_message.upper():
-                    answer = f"⚠️ Error de API Key de Gemini. Verifica tu configuración.\n\n**Información encontrada (modo fallback):**\n{context_text[:500]}..."
-                elif (
-                    "QUOTA" in error_message.upper()
-                    or "RATE_LIMIT" in error_message.upper()
-                ):
-                    answer = f"⚠️ Límite de API alcanzado. Intenta nuevamente en unos minutos.\n\n**Información encontrada (modo fallback):**\n{context_text[:500]}..."
-                else:
-                    answer = f"⚠️ Error al consultar Gemini: {error_message}\n\n**Información encontrada (modo fallback):**\n{context_text[:500]}..."
+                answer = f"⚠️ Error inesperado: {str(e)}\n\n**Información encontrada (modo fallback):**\n{context_text[:500]}..."
 
         fuentes_md_block = "\n\n".join(fuentes_md)
 
@@ -344,6 +306,23 @@ def _(search_similar_chunks, client, model_id, mo, types):
 
 @app.cell
 def _(mo, rag_model):
+    """
+    Configuración del chat con valores por defecto personalizados.
+    
+    Esta configuración reemplaza los valores por defecto de marimo (como 100 tokens)
+    con valores más apropiados para consultas de documentos del DOF.
+    """
+    
+    # Configuración por defecto para el chat
+    default_config = {
+        "max_tokens": 1200,      
+        "temperature": 0.5,      
+        "top_p": 0.9,           
+        "top_k": 40,            
+        "frequency_penalty": 0.0,  
+        "presence_penalty": 0.0    
+    }
+    
     # Create and display the chat interface
     mo.ui.chat(
         rag_model,
@@ -357,6 +336,7 @@ def _(mo, rag_model):
             "¿Qué dice sobre {{concepto_específico}}?",
         ],
         show_configuration_controls=True,
+        config=default_config,  # Agregar configuración por defecto
     )
 
 
