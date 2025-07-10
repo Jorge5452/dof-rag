@@ -28,7 +28,8 @@ def connect_duckdb(path: str) -> duckdb.DuckDBPyConnection:
         conn.execute("INSTALL vss")
         conn.execute("LOAD vss")
         
-        initialize_database(conn)
+        # Verify required tables exist (read-only check)
+        verify_database_schema(conn)
         
         logger.info(f"Connected to DuckDB at {path} with VSS extension")
         return conn
@@ -38,87 +39,34 @@ def connect_duckdb(path: str) -> duckdb.DuckDBPyConnection:
         raise
 
 
-def initialize_database(conn: duckdb.DuckDBPyConnection) -> None:
-    """Create database tables with vector support but no HNSW indexes.
+def verify_database_schema(conn: duckdb.DuckDBPyConnection) -> None:
+    """Verify that required tables exist in the database (read-only check).
     
     Args:
         conn: DuckDB connection with VSS extension loaded
+        
+    Raises:
+        duckdb.Error: If required tables are missing
     """
     try:
+        # Check if required tables exist
+        required_tables = ['documents', 'chunks']
+        
+        for table in required_tables:
+            result = conn.execute(
+                "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?", 
+                [table]
+            ).fetchone()
+            
+            if result[0] == 0:
+                raise duckdb.Error(f"Required table '{table}' not found in database")
+        
+        # Verify embedding dimension matches
         embedding_dim = embedding_manager.get_dimension()
-        
-        # Create auto-increment sequences
-        conn.execute("""
-            CREATE SEQUENCE IF NOT EXISTS documents_id_seq START 1
-        """)
-        
-        conn.execute("""
-            CREATE SEQUENCE IF NOT EXISTS chunks_id_seq START 1
-        """)
-        
-        conn.execute("""
-            CREATE SEQUENCE IF NOT EXISTS image_descriptions_id_seq START 1
-        """)
-        
-        # Create documents table
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS documents (
-                id INTEGER PRIMARY KEY DEFAULT nextval('documents_id_seq'),
-                title VARCHAR,
-                url VARCHAR UNIQUE,
-                file_path VARCHAR,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        
-        # Create chunks table with vector embeddings
-        conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS chunks (
-                id INTEGER PRIMARY KEY DEFAULT nextval('chunks_id_seq'),
-                document_id INTEGER,
-                text VARCHAR,
-                header VARCHAR,
-                embedding FLOAT[{embedding_dim}],
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (document_id) REFERENCES documents(id)
-            )
-        """)
-        
-        # Create image_descriptions table
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS image_descriptions (
-                id INTEGER PRIMARY KEY DEFAULT nextval('image_descriptions_id_seq'),
-                document_name VARCHAR,
-                page_number INTEGER,
-                image_filename VARCHAR,
-                description VARCHAR,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                UNIQUE(document_name, page_number, image_filename)
-            )
-        """)
-        
-        # Create performance indexes
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_chunks_document_id 
-            ON chunks(document_id)
-        """)
-        
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_documents_url 
-            ON documents(url)
-        """)
-        
-        conn.execute("""
-            CREATE INDEX IF NOT EXISTS idx_image_descriptions_document 
-            ON image_descriptions(document_name, page_number)
-        """)
-        
-        conn.commit()
-        logger.info(f"Database tables initialized successfully with embedding dimension {embedding_dim}")
+        logger.info(f"Database schema verified - embedding dimension: {embedding_dim}")
         
     except duckdb.Error as e:
-        logger.error(f"Failed to initialize database: {e}")
+        logger.error(f"Database schema verification failed: {e}")
         raise
 
 

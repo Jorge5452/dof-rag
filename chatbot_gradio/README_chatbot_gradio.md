@@ -56,9 +56,11 @@ Sistema de chat inteligente que permite consultar documentos del **Diario Oficia
 uv add openai
 uv add python-dotenv
 uv add duckdb
-uv add gradio
+uv add "gradio<=5.34.2"
 uv add sentence-transformers
 ```
+
+**Nota importante**: Se requiere Gradio versión 5.34.2 o inferior debido a problemas de compatibilidad con versiones más recientes.
 
 ### 3. Configuración
 ```bash
